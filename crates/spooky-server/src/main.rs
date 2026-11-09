@@ -11,8 +11,8 @@ mod unix {
     use anyhow::{Context, Result, anyhow, bail};
     use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
     use spooky_core::{
-        Cell, Cursor, Layout, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Pane as PaneSnapshot, Request,
-        Response, Snapshot, Tab, Workspace,
+        Cursor, Layout, Line, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Pane as PaneSnapshot, Request,
+        Response, Run, Snapshot, Tab, Workspace,
     };
     use std::{
         collections::BTreeMap,
@@ -134,6 +134,7 @@ mod unix {
         writer: SyncSender<Vec<u8>>,
         killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
         revision: Arc<AtomicU64>,
+        viewport: Mutex<RowCache>,
         changes: Arc<Changes>,
     }
     impl Drop for Pane {
@@ -151,10 +152,7 @@ mod unix {
             let pair = native_pty_system().openpty(size.pty())?;
             let mut reader = pair.master.try_clone_reader()?;
             let mut output = pair.master.take_writer()?;
-            let shell = env::var_os("SHELL")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/bin/sh".into());
-            let mut cmd = CommandBuilder::new(shell);
+            let mut cmd = shell_command();
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
@@ -186,6 +184,7 @@ mod unix {
                 killer: Mutex::new(killer),
                 revision: revision.clone(),
                 changes: changes.clone(),
+                viewport: Mutex::new(RowCache::default()),
             });
             thread::spawn(move || {
                 while let Ok(bytes) = rx.recv() {
@@ -271,14 +270,21 @@ mod unix {
                 rows: (size >> 16) as u16,
             }
         }
-        fn snapshot(&self) -> Result<PaneSnapshot> {
+        /// Renders the viewport. `since` limits `lines` to rows that changed after
+        /// that revision; `None` returns every row.
+        fn snapshot(&self, since: Option<u64>) -> Result<PaneSnapshot> {
             let term = self
                 .terminal
                 .lock()
                 .map_err(|_| anyhow!("terminal state poisoned"))?;
             let content = term.renderable_content();
             let size = self.size();
-            let mut cells = Vec::new();
+            let mut rendered: Vec<Line> = (0..size.rows)
+                .map(|row| Line {
+                    row,
+                    runs: Vec::new(),
+                })
+                .collect();
             for indexed in content.display_iter {
                 let cell = indexed.cell;
                 if cell
@@ -290,9 +296,9 @@ mod unix {
                 let Some(point) = point_to_viewport(content.display_offset, indexed.point) else {
                     continue;
                 };
-                if point.line >= usize::from(size.rows) {
+                let Some(line) = rendered.get_mut(point.line) else {
                     continue;
-                }
+                };
                 let mut fg = color(cell.fg, content.colors);
                 let mut bg = color(cell.bg, content.colors);
                 if cell.flags.contains(Flags::INVERSE) {
@@ -308,18 +314,33 @@ mod unix {
                 {
                     text.extend(chars);
                 }
-                cells.push(Cell {
-                    row: point.line as u16,
-                    col: point.column.0 as u16,
+                push_cell(
+                    line,
+                    point.column.0 as u16,
                     text,
-                    fg,
-                    bg,
-                    bold: cell.flags.contains(Flags::BOLD),
-                    italic: cell.flags.contains(Flags::ITALIC),
-                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                    wide: cell.flags.contains(Flags::WIDE_CHAR),
-                });
+                    Style {
+                        fg,
+                        bg,
+                        bold: cell.flags.contains(Flags::BOLD),
+                        italic: cell.flags.contains(Flags::ITALIC),
+                        underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                    },
+                    cell.flags.contains(Flags::WIDE_CHAR),
+                );
             }
+            // Content and its revision bump are committed together under the
+            // terminal lock, so this revision is never older than the render. The
+            // cache is updated before the lock is released so concurrent clients
+            // cannot record an older render over a newer one.
+            let revision = self.revision.load(Ordering::Acquire);
+            let lines = {
+                let mut viewport = self
+                    .viewport
+                    .lock()
+                    .map_err(|_| anyhow!("viewport cache poisoned"))?;
+                viewport.update(size.cols, rendered, revision);
+                viewport.changed_since(since)
+            };
             let cursor_point = point_to_viewport(content.display_offset, content.cursor.point);
             let cursor = Cursor {
                 row: cursor_point.map_or(0, |p| p.line.min(usize::from(size.rows - 1)) as u16),
@@ -342,7 +363,7 @@ mod unix {
                 title,
                 cols: size.cols,
                 rows: size.rows,
-                cells,
+                lines,
                 cursor,
                 exited: self.exited.load(Ordering::Acquire),
                 bracketed_paste: content.mode.contains(TermMode::BRACKETED_PASTE),
@@ -366,6 +387,126 @@ mod unix {
             );
             self.changes.advance(&self.revision);
             Ok(())
+        }
+        /// Returns the viewport to live output; typing while scrolled into history
+        /// must show the typed text rather than leave the view in the past.
+        fn scroll_to_bottom(&self) -> Result<()> {
+            let mut term = self
+                .terminal
+                .lock()
+                .map_err(|_| anyhow!("terminal state poisoned"))?;
+            if term.grid().display_offset() != 0 {
+                term.scroll_display(Scroll::Bottom);
+                self.changes.advance(&self.revision);
+            }
+            Ok(())
+        }
+    }
+
+    /// The last rendered viewport of a pane and the revision at which each of its
+    /// rows last changed, so any client can be sent exactly the rows it lacks.
+    #[derive(Default)]
+    struct RowCache {
+        cols: u16,
+        lines: Vec<Line>,
+        revisions: Vec<u64>,
+    }
+    impl RowCache {
+        /// Records a render taken at `revision`. Rows that differ from the cached
+        /// ones take that revision; a different grid size replaces every row.
+        fn update(&mut self, cols: u16, rendered: Vec<Line>, revision: u64) {
+            if self.cols != cols || self.lines.len() != rendered.len() {
+                self.cols = cols;
+                self.revisions = vec![revision; rendered.len()];
+                self.lines = rendered;
+                return;
+            }
+            for ((cached, changed_at), line) in
+                self.lines.iter_mut().zip(&mut self.revisions).zip(rendered)
+            {
+                if *cached != line {
+                    *cached = line;
+                    *changed_at = revision;
+                }
+            }
+        }
+        /// Rows that changed after `since`; every row when `since` is `None`.
+        fn changed_since(&self, since: Option<u64>) -> Vec<Line> {
+            self.lines
+                .iter()
+                .zip(&self.revisions)
+                .filter(|(_, changed_at)| since.is_none_or(|since| **changed_at > since))
+                .map(|(line, _)| line.clone())
+                .collect()
+        }
+    }
+
+    struct Style {
+        fg: [u8; 3],
+        bg: [u8; 3],
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    }
+
+    /// Appends one terminal cell to its row. Blank cells on the default background
+    /// are left implicit; neighbouring plain cells with the same style share a run.
+    /// A wide cell or one with combining characters is always a run of its own.
+    fn push_cell(line: &mut Line, col: u16, text: String, style: Style, wide: bool) {
+        if text == " " && style.bg == spooky_core::DEFAULT_BACKGROUND && !style.underline {
+            return;
+        }
+        let single = wide || text.chars().nth(1).is_some();
+        if !single
+            && let Some(last) = line.runs.last_mut()
+            && last.width == 0
+            && last.fg == style.fg
+            && last.bg == style.bg
+            && last.bold == style.bold
+            && last.italic == style.italic
+            && last.underline == style.underline
+            && last.col + last.columns() == col
+        {
+            last.text.push_str(&text);
+            return;
+        }
+        line.runs.push(Run {
+            col,
+            text,
+            fg: style.fg,
+            bg: style.bg,
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline,
+            width: if wide { 2 } else { u8::from(single) },
+        });
+    }
+
+    /// Locale supplied to shells when the server's environment has none.
+    const DEFAULT_MACOS_LOCALE: &str = "en_US.UTF-8";
+
+    fn env_is_unset(name: &str) -> bool {
+        env::var_os(name).is_none_or(|value| value.is_empty())
+    }
+
+    /// Builds the shell command for a new pane.
+    ///
+    /// macOS runs a login shell so `~/.zprofile` (PATH, Homebrew) applies even
+    /// when the GUI was launched from Finder, whose environment has neither it
+    /// nor a locale; a UTF-8 locale is supplied only when `LC_ALL` and `LANG` are
+    /// both unset. Other platforms keep the plain `$SHELL` invocation.
+    fn shell_command() -> CommandBuilder {
+        if cfg!(target_os = "macos") {
+            let mut cmd = CommandBuilder::new_default_prog();
+            if env_is_unset("LC_ALL") && env_is_unset("LANG") {
+                cmd.env("LANG", DEFAULT_MACOS_LOCALE);
+            }
+            cmd
+        } else {
+            let shell = env::var_os("SHELL")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/bin/sh".into());
+            CommandBuilder::new(shell)
         }
     }
 
@@ -487,18 +628,18 @@ mod unix {
                             state.panes.values().cloned().collect::<Vec<_>>(),
                         )
                     };
+                    // A topology change needs every viewport row, including newly
+                    // inserted panes whose output may predate their insertion.
+                    let full = since.is_none_or(|since| {
+                        since > revision || self.layout_revision.load(Ordering::Acquire) > since
+                    });
+                    let delta = if full { None } else { since };
                     let panes = panes
-                        // A topology change needs every viewport, including newly
-                        // inserted panes whose output may predate their insertion.
                         .iter()
                         .filter(|pane| {
-                            since.is_none_or(|since| {
-                                since > revision
-                                    || self.layout_revision.load(Ordering::Acquire) > since
-                                    || pane.revision.load(Ordering::Acquire) > since
-                            })
+                            delta.is_none_or(|since| pane.revision.load(Ordering::Acquire) > since)
                         })
-                        .map(|pane| pane.snapshot())
+                        .map(|pane| pane.snapshot(delta))
                         .collect::<Result<Vec<_>>>()?;
                     return Ok(Response::Snapshot(Snapshot {
                         version: PROTOCOL_VERSION,
@@ -614,6 +755,7 @@ mod unix {
                     pane.writer
                         .try_send(bytes)
                         .map_err(|e| anyhow!("terminal input unavailable: {e}"))?;
+                    pane.scroll_to_bottom()?;
                 }
                 Request::Resize { pane, cols, rows } => {
                     validate_size(cols, rows)?;

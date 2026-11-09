@@ -9,7 +9,7 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Maximum encoded request or response, including its newline delimiter.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
@@ -188,12 +188,13 @@ pub struct Snapshot {
     pub revision: u64,
     /// Ordered workspace tree.
     pub workspaces: Vec<Workspace>,
-    /// All viewports for a full snapshot; only changed viewports for an update.
+    /// Every viewport for a full snapshot. An update carries only the panes that
+    /// changed, and each of those only the rows that changed.
     pub panes: Vec<Pane>,
 }
 
 impl Snapshot {
-    /// Apply an ordered update from the same server without copying unchanged grids.
+    /// Apply an ordered update from the same server without copying unchanged rows.
     /// The workspace tree is authoritative: panes removed from it are discarded.
     pub fn apply_update(&mut self, update: Self) {
         self.version = update.version;
@@ -206,10 +207,14 @@ impl Snapshot {
                 .any(|tab| tab.layout.contains(pane.id))
         });
         for pane in update.panes {
-            if let Some(current) = self.panes.iter_mut().find(|current| current.id == pane.id) {
-                *current = pane;
-            } else {
-                self.panes.push(pane);
+            match self.panes.iter_mut().find(|current| current.id == pane.id) {
+                Some(current) => current.apply_update(pane),
+                None => {
+                    let mut fresh = pane;
+                    let lines = std::mem::take(&mut fresh.lines);
+                    fresh.set_lines(lines);
+                    self.panes.push(fresh);
+                }
             }
         }
     }
@@ -226,8 +231,10 @@ pub struct Pane {
     pub cols: u16,
     /// Grid height.
     pub rows: u16,
-    /// Visible cells, excluding wide-character spacer cells.
-    pub cells: Vec<Cell>,
+    /// Viewport rows. A full snapshot carries every row; an update only the rows
+    /// that changed since the requested revision. After [`Pane::apply_update`] a
+    /// client's pane holds exactly one line per row, ordered by row.
+    pub lines: Vec<Line>,
     /// Viewport-relative cursor.
     pub cursor: Cursor,
     /// Whether the shell has terminated; its screen remains inspectable.
@@ -238,27 +245,178 @@ pub struct Pane {
     pub application_cursor: bool,
 }
 
-/// One display cell, including combining characters attached to its base glyph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Cell {
+impl Pane {
+    /// Merge an update for this pane: scalar state is replaced and only the rows
+    /// the update carries are overwritten. Grid size changes always arrive with
+    /// every row, so rows beyond the new height are dropped and new ones filled.
+    pub fn apply_update(&mut self, update: Self) {
+        let Self {
+            title,
+            cols,
+            rows,
+            lines,
+            cursor,
+            exited,
+            bracketed_paste,
+            application_cursor,
+            ..
+        } = update;
+        self.title = title;
+        self.cols = cols;
+        self.rows = rows;
+        self.cursor = cursor;
+        self.exited = exited;
+        self.bracketed_paste = bracketed_paste;
+        self.application_cursor = application_cursor;
+        self.set_lines(lines);
+    }
+
+    /// Visible text of one row without trailing blanks; empty for an unknown row.
+    pub fn row_text(&self, row: u16) -> String {
+        self.lines
+            .iter()
+            .find(|line| line.row == row)
+            .map(|line| line.text_between(0, self.cols.saturating_sub(1)))
+            .unwrap_or_default()
+    }
+
+    /// Make `lines` dense (one per row), overwriting the rows listed in `changed`.
+    fn set_lines(&mut self, changed: Vec<Line>) {
+        let rows = usize::from(self.rows);
+        self.lines.truncate(rows);
+        while self.lines.len() < rows {
+            self.lines.push(Line {
+                row: self.lines.len() as u16,
+                runs: Vec::new(),
+            });
+        }
+        for line in changed {
+            if let Some(slot) = self.lines.get_mut(usize::from(line.row)) {
+                *slot = line;
+            }
+        }
+    }
+}
+
+/// One viewport row. Columns not covered by a run are blank with the default
+/// background, so an empty row costs nothing on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Line {
     /// Zero-based viewport row.
     pub row: u16,
-    /// Zero-based terminal column.
+    /// Styled text in increasing column order.
+    pub runs: Vec<Run>,
+}
+
+impl Line {
+    /// Text of the cells starting in columns `start..=end`, without trailing
+    /// blanks. Columns no run covers read as spaces.
+    pub fn text_between(&self, start: u16, end: u16) -> String {
+        let mut text = String::new();
+        let mut column = start;
+        for run in &self.runs {
+            for (col, cell, width) in run.cells() {
+                if col < start || col > end {
+                    continue;
+                }
+                while column < col {
+                    text.push(' ');
+                    column += 1;
+                }
+                text.push_str(cell);
+                column = col.saturating_add(width);
+            }
+        }
+        text.truncate(text.trim_end_matches(' ').len());
+        text
+    }
+}
+
+/// Adjacent cells sharing one style, starting at `col`.
+///
+/// With `width == 0` every Unicode scalar value in `text` is one single-column
+/// cell. A cell that is wide or carries combining characters is instead a run of
+/// its own whose whole `text` is that one cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    /// Zero-based terminal column of the first cell.
     pub col: u16,
-    /// Base character followed by any combining characters.
+    /// Cell contents; see the type documentation for how it maps to cells.
     pub text: String,
     /// Resolved RGB foreground.
     pub fg: [u8; 3],
     /// Resolved RGB background.
     pub bg: [u8; 3],
     /// Bold styling.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub bold: bool,
     /// Italic styling.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub italic: bool,
     /// Underline styling.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub underline: bool,
-    /// The glyph occupies two columns; it must still be rendered.
-    pub wide: bool,
+    /// Zero for one cell per scalar value; otherwise `text` is a single cell
+    /// occupying this many columns (1 with combining characters, 2 when wide).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub width: u8,
+}
+
+impl Run {
+    /// Terminal columns this run covers.
+    pub fn columns(&self) -> u16 {
+        match self.width {
+            0 => u16::try_from(self.text.chars().count()).unwrap_or(u16::MAX),
+            width => u16::from(width),
+        }
+    }
+
+    /// Each terminal cell as `(column, text, columns occupied)`.
+    pub fn cells(&self) -> impl Iterator<Item = (u16, &str, u16)> {
+        Cells {
+            run: self,
+            byte: 0,
+            column: 0,
+        }
+    }
+}
+
+struct Cells<'a> {
+    run: &'a Run,
+    byte: usize,
+    column: u16,
+}
+
+impl<'a> Iterator for Cells<'a> {
+    type Item = (u16, &'a str, u16);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let rest = self
+            .run
+            .text
+            .get(self.byte..)
+            .filter(|rest| !rest.is_empty())?;
+        let (length, width) = match self.run.width {
+            0 => (rest.chars().next()?.len_utf8(), 1),
+            width => (rest.len(), u16::from(width)),
+        };
+        let item = (
+            self.run.col.saturating_add(self.column),
+            &rest[..length],
+            width,
+        );
+        self.byte += length;
+        self.column = self.column.saturating_add(width);
+        Some(item)
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 /// Terminal cursor position relative to the current viewport.
@@ -270,4 +428,130 @@ pub struct Cursor {
     pub col: u16,
     /// False when hidden by the application or outside the viewport.
     pub visible: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cursor, Line, Pane, Run};
+
+    fn run(col: u16, text: &str, width: u8) -> Run {
+        Run {
+            col,
+            text: text.into(),
+            fg: [1, 2, 3],
+            bg: [0, 0, 0],
+            bold: false,
+            italic: false,
+            underline: false,
+            width,
+        }
+    }
+
+    fn pane(cols: u16, rows: u16, lines: Vec<Line>) -> Pane {
+        Pane {
+            id: 1,
+            title: String::new(),
+            cols,
+            rows,
+            lines,
+            cursor: Cursor {
+                row: 0,
+                col: 0,
+                visible: true,
+            },
+            exited: false,
+            bracketed_paste: false,
+            application_cursor: false,
+        }
+    }
+
+    fn line(row: u16, runs: Vec<Run>) -> Line {
+        Line { row, runs }
+    }
+
+    #[test]
+    fn a_run_is_one_cell_per_scalar_unless_it_is_a_single_cell() {
+        assert_eq!(
+            run(3, "ab", 0).cells().collect::<Vec<_>>(),
+            [(3, "a", 1), (4, "b", 1)]
+        );
+        assert_eq!(run(5, "界", 2).cells().collect::<Vec<_>>(), [(5, "界", 2)]);
+        assert_eq!(
+            run(0, "e\u{301}", 1).cells().collect::<Vec<_>>(),
+            [(0, "e\u{301}", 1)]
+        );
+        assert_eq!(run(3, "ab", 0).columns(), 2);
+        assert_eq!(run(5, "界", 2).columns(), 2);
+    }
+
+    #[test]
+    fn row_text_pads_uncovered_columns_and_drops_trailing_blanks() {
+        let pane = pane(
+            10,
+            1,
+            vec![line(
+                0,
+                vec![run(1, "ab", 0), run(5, "界", 2), run(7, "z", 0)],
+            )],
+        );
+        assert_eq!(pane.row_text(0), " ab  界z");
+        assert_eq!(pane.lines[0].text_between(2, 5), "b  界");
+        assert_eq!(pane.row_text(9), "");
+    }
+
+    #[test]
+    fn an_update_overwrites_only_the_rows_it_carries() {
+        let mut current = pane(
+            4,
+            3,
+            vec![
+                line(0, vec![run(0, "one", 0)]),
+                line(1, vec![run(0, "two", 0)]),
+                line(2, vec![run(0, "six", 0)]),
+            ],
+        );
+        current.apply_update(pane(4, 3, vec![line(1, vec![run(0, "2nd", 0)])]));
+        assert_eq!(
+            (
+                current.row_text(0),
+                current.row_text(1),
+                current.row_text(2)
+            ),
+            ("one".into(), "2nd".into(), "six".into())
+        );
+
+        // A row that became blank is an explicit empty line, not an omission.
+        current.apply_update(pane(4, 3, vec![line(0, Vec::new())]));
+        assert_eq!(current.row_text(0), "");
+        assert_eq!(current.row_text(1), "2nd");
+    }
+
+    #[test]
+    fn a_resize_reshapes_the_held_rows() {
+        let mut current = pane(4, 3, vec![line(2, vec![run(0, "old", 0)])]);
+        current.apply_update(pane(
+            6,
+            2,
+            vec![line(0, vec![run(0, "a", 0)]), line(1, vec![run(0, "b", 0)])],
+        ));
+        assert_eq!(current.lines.len(), 2);
+        assert_eq!(
+            (current.row_text(0), current.row_text(1)),
+            ("a".into(), "b".into())
+        );
+
+        current.apply_update(pane(
+            6,
+            4,
+            (0..4).map(|row| line(row, Vec::new())).collect(),
+        ));
+        assert_eq!(current.lines.len(), 4);
+        assert!(
+            current
+                .lines
+                .iter()
+                .enumerate()
+                .all(|(row, l)| usize::from(l.row) == row)
+        );
+    }
 }

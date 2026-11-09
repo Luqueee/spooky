@@ -4,11 +4,12 @@ mod chrome;
 mod link;
 #[cfg(target_os = "macos")]
 mod macos_keyboard;
+mod tailscale;
 mod terminal;
 mod view;
 
 use iced::{Point, Rectangle, Size, Subscription, Task, clipboard, event, keyboard, window};
-use link::{Command, Event, Link};
+use link::{Channel, Command, Event, Link};
 use spooky_core::{Axis, Pane, Request, Snapshot, Tab, Workspace};
 use std::{
     collections::{HashMap, HashSet},
@@ -77,12 +78,17 @@ enum Message {
     NewTab,
     Split(Axis),
     Workspace(u64),
+    WorkspaceMenu(u64, Point),
+    DismissWorkspaceMenu,
+    RenameWorkspace(u64),
+    CloseWorkspace(u64),
     Tab(u64),
     Rename,
     RenameValue(String),
     RenameSubmit,
     CancelRename,
     ToggleSidebar,
+    ToggleWorkspaces,
     ToggleConnection,
     ToggleMenu,
     AskClosePane,
@@ -92,6 +98,13 @@ enum Message {
     TargetValue(String),
     Connect,
     Local,
+    OpenTailscale,
+    CloseTailscale,
+    RefreshTailscale,
+    TailscaleLoaded(Result<tailscale::Network, String>),
+    TailscaleQuery(String),
+    TailscaleUser(String),
+    SelectTailscale(String),
     Upload,
     Picked(Option<PathBuf>),
     Capture,
@@ -134,8 +147,15 @@ struct App {
     target: String,
     connected_target: String,
     sidebar_open: bool,
+    workspaces_open: bool,
     connection_open: bool,
     menu_open: bool,
+    workspace_menu: Option<(u64, Point)>,
+    rename_workspace: Option<u64>,
+    tailscale_open: bool,
+    tailscale: tailscale::Discovery,
+    tailscale_query: String,
+    tailscale_user: String,
     rename: String,
     renaming: bool,
     status: String,
@@ -145,6 +165,8 @@ struct App {
     visible: bool,
     initialized: bool,
     hotkey_id: Option<u32>,
+    commands_online: bool,
+    display_online: bool,
 }
 impl App {
     fn new(config: Config, status: String, hotkey_id: Option<u32>) -> (Self, Task<Message>) {
@@ -157,15 +179,22 @@ impl App {
                 workspace: None,
                 tab: None,
                 pane: None,
-                terminal_focused: false,
+                terminal_focused: true,
                 selection: None,
                 bounds: HashMap::new(),
                 grids: HashMap::new(),
                 target: String::new(),
                 connected_target: String::new(),
                 sidebar_open: true,
+                workspaces_open: true,
                 connection_open: false,
                 menu_open: false,
+                workspace_menu: None,
+                rename_workspace: None,
+                tailscale_open: false,
+                tailscale: tailscale::Discovery::Idle,
+                tailscale_query: String::new(),
+                tailscale_user: String::new(),
                 rename: String::new(),
                 renaming: false,
                 status,
@@ -175,6 +204,8 @@ impl App {
                 visible: true,
                 initialized: false,
                 hotkey_id,
+                commands_online: false,
+                display_online: false,
             },
             window::latest().map(|id| id.map(Message::Opened).unwrap_or(Message::Tick)),
         )
@@ -218,6 +249,24 @@ impl App {
             .find(|p| Some(p.id) == self.pane)
     }
     fn reconcile(&mut self, s: &Snapshot) {
+        if self
+            .workspace_menu
+            .is_some_and(|(id, _)| !s.workspaces.iter().any(|w| w.id == id))
+        {
+            self.workspace_menu = None;
+        }
+        if self
+            .rename_workspace
+            .is_some_and(|id| !s.workspaces.iter().any(|w| w.id == id))
+        {
+            self.rename_workspace = None;
+            self.renaming = false;
+            self.terminal_focused = true;
+        }
+        if matches!(self.confirm, Some(Confirm::Workspace(id)) if !s.workspaces.iter().any(|w| w.id == id))
+        {
+            self.confirm = None;
+        }
         if let Some(pending) = self.pending.take() {
             match pending {
                 Pending::Workspace(old) => {
@@ -310,6 +359,22 @@ impl App {
                     self.snapshot = Some(s);
                 }
                 Event::Status(g, s) if g == self.generation => self.status = s,
+                Event::Connection(g, channel, online) if g == self.generation => {
+                    match channel {
+                        Channel::Commands => self.commands_online = online,
+                        Channel::Display => {
+                            self.display_online = online;
+                            if online {
+                                // A restarted server reuses pane IDs; sizes already
+                                // sent to its predecessor say nothing about its panes.
+                                self.grids.clear();
+                            }
+                        }
+                    }
+                    if online && self.online() {
+                        self.status = "Connected".into();
+                    }
+                }
                 Event::Failed(g, s) if g == self.generation => {
                     self.pending = None;
                     self.status = s;
@@ -331,6 +396,7 @@ impl App {
                 }
             }
             Message::NewWorkspace => {
+                self.workspaces_open = true;
                 let ids = self
                     .snapshot
                     .as_ref()
@@ -364,6 +430,9 @@ impl App {
                 }
             }
             Message::Workspace(id) => {
+                self.workspace_menu = None;
+                self.connection_open = false;
+                self.terminal_focused = true;
                 self.workspace = Some(id);
                 self.tab = None;
                 self.pane = None;
@@ -380,12 +449,35 @@ impl App {
                     self.snapshot = Some(s);
                 }
             }
+            Message::WorkspaceMenu(id, position) => {
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.workspaces.iter().any(|w| w.id == id))
+                {
+                    self.workspace_menu = Some((id, position));
+                    self.menu_open = false;
+                }
+            }
+            Message::DismissWorkspaceMenu => self.workspace_menu = None,
             Message::Rename => {
+                if let Some(id) = self.workspace {
+                    return Task::done(Message::RenameWorkspace(id));
+                }
+            }
+            Message::RenameWorkspace(id) => {
                 self.menu_open = false;
-                if let Some((w, _)) = self.active() {
+                self.workspace_menu = None;
+                if let Some(w) = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.workspaces.iter().find(|w| w.id == id))
+                {
                     self.rename = w.name.clone();
+                    self.rename_workspace = Some(id);
                     self.renaming = true;
                     self.terminal_focused = false;
+                    return iced::widget::operation::focus("workspace-name");
                 }
             }
             Message::RenameValue(v) => {
@@ -393,7 +485,7 @@ impl App {
                 self.terminal_focused = false;
             }
             Message::RenameSubmit => {
-                if let Some(id) = self.workspace {
+                if let Some(id) = self.rename_workspace.take() {
                     if !self.rename.trim().is_empty() {
                         self.send(Request::RenameWorkspace {
                             workspace: id,
@@ -408,9 +500,21 @@ impl App {
             }
             Message::CancelRename => {
                 self.renaming = false;
+                self.rename_workspace = None;
                 self.terminal_focused = true;
             }
-            Message::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            Message::ToggleSidebar => {
+                self.sidebar_open = !self.sidebar_open;
+                self.workspace_menu = None;
+                if !self.sidebar_open && self.connection_open {
+                    self.connection_open = false;
+                    self.terminal_focused = true;
+                }
+            }
+            Message::ToggleWorkspaces => {
+                self.workspaces_open = !self.workspaces_open;
+                self.workspace_menu = None;
+            }
             Message::ToggleConnection => {
                 self.connection_open = !self.connection_open;
                 self.terminal_focused = !self.connection_open;
@@ -422,7 +526,19 @@ impl App {
             }
             Message::AskCloseWorkspace => {
                 self.menu_open = false;
-                self.confirm = self.workspace.map(Confirm::Workspace);
+                if let Some(id) = self.workspace {
+                    return Task::done(Message::CloseWorkspace(id));
+                }
+            }
+            Message::CloseWorkspace(id) => {
+                self.workspace_menu = None;
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.workspaces.iter().any(|w| w.id == id))
+                {
+                    self.confirm = Some(Confirm::Workspace(id));
+                }
             }
             Message::ConfirmClose => match self.confirm.take() {
                 Some(Confirm::Pane(p)) => self.send(Request::ClosePane { pane: p }),
@@ -438,8 +554,60 @@ impl App {
                 self.target.clear();
                 return Task::done(Message::Connect);
             }
+            Message::OpenTailscale => {
+                self.tailscale_open = true;
+                self.terminal_focused = false;
+                if !matches!(self.tailscale, tailscale::Discovery::Loading) {
+                    return Task::done(Message::RefreshTailscale);
+                }
+            }
+            Message::CloseTailscale => {
+                self.tailscale_open = false;
+                self.terminal_focused = !self.connection_open;
+            }
+            Message::RefreshTailscale => {
+                if !matches!(self.tailscale, tailscale::Discovery::Loading) {
+                    self.tailscale = tailscale::Discovery::Loading;
+                    return Task::perform(tailscale::discover(), Message::TailscaleLoaded);
+                }
+            }
+            Message::TailscaleLoaded(result) => {
+                self.tailscale = match result {
+                    Ok(network) => tailscale::Discovery::Ready(network),
+                    Err(error) => tailscale::Discovery::Failed(error),
+                };
+            }
+            Message::TailscaleQuery(query) => self.tailscale_query = query,
+            Message::TailscaleUser(user) => self.tailscale_user = user,
+            Message::SelectTailscale(host) => {
+                let valid = matches!(&self.tailscale, tailscale::Discovery::Ready(network)
+                    if network.peers.iter().any(|peer| peer.host == host && peer.online));
+                if valid {
+                    let user = self.tailscale_user.trim();
+                    if !user.is_empty()
+                        && (user.starts_with('-')
+                            || !user
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
+                    {
+                        self.status = "SSH user must contain only letters, numbers, dot, underscore or hyphen.".into();
+                    } else {
+                        self.target = if user.is_empty() {
+                            host
+                        } else {
+                            format!("{user}@{host}")
+                        };
+                        self.tailscale_open = false;
+                        self.connection_open = true;
+                    }
+                }
+            }
             Message::Connect => {
                 self.connection_open = false;
+                self.tailscale_open = false;
+                self.workspace_menu = None;
+                self.rename_workspace = None;
+                self.workspaces_open = true;
                 self.menu_open = false;
                 self.confirm = None;
                 self.renaming = false;
@@ -451,10 +619,12 @@ impl App {
                 self.pane = None;
                 self.pending = None;
                 self.initialized = false;
+                self.commands_online = false;
+                self.display_online = false;
                 self.grids.clear();
                 self.bounds.clear();
                 self.selection = None;
-                self.terminal_focused = false;
+                self.terminal_focused = true;
                 if self
                     .link
                     .tx
@@ -580,21 +750,30 @@ impl App {
                     && let Some(p) = self.current_pane()
                 {
                     let id = p.id;
-                    let bytes = if p.bracketed_paste {
-                        format!("\x1b[200~{s}\x1b[201~").into_bytes()
-                    } else {
-                        s.into_bytes()
-                    };
+                    let bytes = paste_bytes(&s, p.bracketed_paste);
                     self.send(Request::Input { pane: id, bytes });
                 }
             }
             Message::Paste(None) => {}
             Message::Key(key, physical, mods, typed, status) => {
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
-                    && (self.menu_open || self.renaming || self.confirm.is_some())
+                    && (self.menu_open
+                        || self.workspace_menu.is_some()
+                        || self.tailscale_open
+                        || self.renaming
+                        || self.confirm.is_some()
+                        || self.connection_open)
                 {
                     self.menu_open = false;
+                    self.workspace_menu = None;
+                    self.rename_workspace = None;
+                    if self.tailscale_open {
+                        self.tailscale_open = false;
+                        self.terminal_focused = !self.connection_open;
+                        return Task::none();
+                    }
                     self.renaming = false;
+                    self.connection_open = false;
                     self.confirm = None;
                     self.terminal_focused = true;
                     return Task::none();
@@ -604,38 +783,29 @@ impl App {
                     && self.confirm.is_none()
                     && !self.menu_open
                     && !self.renaming
+                    && self.workspace_menu.is_none()
+                    && !self.tailscale_open
                 {
-                    let copy = mods.shift()
-                        && (mods.control() || mods.logo())
-                        && matches!(
-                            key.as_ref(),
-                            keyboard::Key::Character("c") | keyboard::Key::Character("C")
-                        );
-                    let paste = mods.shift()
-                        && (mods.control() || mods.logo())
-                        && matches!(
-                            key.as_ref(),
-                            keyboard::Key::Character("v") | keyboard::Key::Character("V")
-                        )
-                        || mods.logo()
-                            && matches!(
-                                key.as_ref(),
-                                keyboard::Key::Character("v") | keyboard::Key::Character("V")
-                            );
-                    if copy {
-                        if let Some(s) = self.selected_text() {
-                            return clipboard::write(s);
+                    match clipboard_action(&key, mods) {
+                        Some(ClipboardAction::Copy) => {
+                            if let Some(s) = self.selected_text() {
+                                return clipboard::write(s);
+                            }
                         }
-                    } else if paste {
-                        return clipboard::read().map(Message::Paste);
-                    } else if let Some(p) = self.current_pane() {
-                        let id = p.id;
-                        let application_cursor = p.application_cursor;
-                        let typed = terminal_text(&key, physical, mods, typed);
-                        if let Some(bytes) =
-                            key_bytes(&key, mods, typed.as_deref(), application_cursor)
-                        {
-                            self.send(Request::Input { pane: id, bytes });
+                        Some(ClipboardAction::Paste) => {
+                            return clipboard::read().map(Message::Paste);
+                        }
+                        None => {
+                            if let Some(p) = self.current_pane() {
+                                let id = p.id;
+                                let application_cursor = p.application_cursor;
+                                let typed = terminal_text(&key, physical, mods, typed);
+                                if let Some(bytes) =
+                                    key_bytes(&key, mods, typed.as_deref(), application_cursor)
+                                {
+                                    self.send(Request::Input { pane: id, bytes });
+                                }
+                            }
                         }
                     }
                 }
@@ -646,44 +816,77 @@ impl App {
     fn selected_text(&self) -> Option<String> {
         let Selection {
             pane: id,
-            anchor: a,
-            head: b,
+            anchor,
+            head,
         } = self.selection?;
-        if a == b {
+        if anchor == head {
             return None;
         }
         let pane = self.snapshot.as_ref()?.panes.iter().find(|p| p.id == id)?;
-        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        let mut out = String::new();
-        for r in lo.0..=hi.0 {
-            if r > lo.0 {
-                out.push('\n');
-            }
-            let start = if r == lo.0 { lo.1 } else { 0 };
-            let end = if r == hi.0 {
-                hi.1
-            } else {
-                pane.cols.saturating_sub(1)
-            };
-            let mut col = start;
-            for c in pane
-                .cells
-                .iter()
-                .filter(|c| c.row == r && c.col >= start && c.col <= end)
-            {
-                while col < c.col {
-                    out.push(' ');
-                    col += 1;
-                }
-                out.push_str(&c.text);
-                col = c.col.saturating_add(if c.wide { 2 } else { 1 });
-            }
-        }
-        Some(out)
+        Some(selection_text(pane, anchor, head))
+    }
+    /// Typing and live output need both the command and the display connection.
+    fn online(&self) -> bool {
+        self.commands_online && self.display_online
     }
 }
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Text under a selection: one line per row, without the blank cells that pad
+/// each row to the grid width.
+fn selection_text(pane: &Pane, anchor: (u16, u16), head: (u16, u16)) -> String {
+    let (lo, hi) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    let mut out = String::new();
+    for row in lo.0..=hi.0 {
+        let start = if row == lo.0 { lo.1 } else { 0 };
+        let end = if row == hi.0 {
+            hi.1
+        } else {
+            pane.cols.saturating_sub(1)
+        };
+        if row > lo.0 {
+            out.push('\n');
+        }
+        if let Some(line) = pane.lines.iter().find(|line| line.row == row) {
+            out.push_str(&line.text_between(start, end));
+        }
+    }
+    out
+}
+
+/// Bytes sent for pasted text. Bracketed paste drops ESC and ETX: pasted text
+/// must not end the bracket early (running the rest as typed input) or interrupt
+/// the foreground program.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let text = text.replace(['\x1b', '\x03'], "");
+    format!("\x1b[200~{text}\x1b[201~").into_bytes()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClipboardAction {
+    Copy,
+    Paste,
+}
+
+/// Cmd+C/V and Ctrl+Shift+C/V. Plain Ctrl+C and Ctrl+V remain terminal input.
+fn clipboard_action(key: &keyboard::Key, mods: keyboard::Modifiers) -> Option<ClipboardAction> {
+    if !((mods.logo() && !mods.control()) || (mods.control() && mods.shift())) {
+        return None;
+    }
+    match key.as_ref() {
+        keyboard::Key::Character(c) if c.eq_ignore_ascii_case("c") => Some(ClipboardAction::Copy),
+        keyboard::Key::Character(c) if c.eq_ignore_ascii_case("v") => Some(ClipboardAction::Paste),
+        _ => None,
+    }
 }
 
 fn terminal_text(
@@ -902,7 +1105,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::key_bytes;
+    use super::{ClipboardAction, clipboard_action, key_bytes, paste_bytes, selection_text};
     use iced::keyboard::{Key, Modifiers, key::Named};
 
     #[test]
@@ -970,6 +1173,102 @@ mod tests {
                     false
                 ),
                 Some(b"@".to_vec())
+            );
+        }
+    }
+
+    fn pane(rows: &[&str]) -> spooky_core::Pane {
+        let cols = rows
+            .iter()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0);
+        let lines = rows
+            .iter()
+            .enumerate()
+            .map(|(row, text)| spooky_core::Line {
+                row: row as u16,
+                runs: if text.trim_end().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![spooky_core::Run {
+                        col: 0,
+                        text: text.trim_end().to_owned(),
+                        fg: [0; 3],
+                        bg: [0; 3],
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        width: 0,
+                    }]
+                },
+            })
+            .collect();
+        spooky_core::Pane {
+            id: 1,
+            title: String::new(),
+            cols: cols as u16,
+            rows: rows.len() as u16,
+            lines,
+            cursor: spooky_core::Cursor {
+                row: 0,
+                col: 0,
+                visible: false,
+            },
+            exited: false,
+            bracketed_paste: false,
+            application_cursor: false,
+        }
+    }
+
+    #[test]
+    fn copied_selection_drops_the_blank_padding_of_each_row() {
+        let pane = pane(&["foo       ", "bar       "]);
+        assert_eq!(selection_text(&pane, (0, 0), (1, 9)), "foo\nbar");
+        assert_eq!(selection_text(&pane, (1, 2), (0, 0)), "foo\nbar");
+        assert_eq!(selection_text(&pane, (0, 1), (0, 2)), "oo");
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_be_ended_or_interrupted_by_pasted_text() {
+        assert_eq!(
+            paste_bytes("a\x1b[201~rm -rf ~\n\x03", true),
+            b"\x1b[200~a[201~rm -rf ~\n\x1b[201~"
+        );
+        assert_eq!(paste_bytes("a\x1b[b\n", false), b"a\x1b[b\n");
+    }
+
+    #[test]
+    fn clipboard_chords_leave_plain_control_keys_for_the_terminal() {
+        let c = Key::Character("c".into());
+        let v = Key::Character("v".into());
+        let cases = [
+            (&c, Modifiers::LOGO, Some(ClipboardAction::Copy)),
+            (
+                &c,
+                Modifiers::LOGO | Modifiers::SHIFT,
+                Some(ClipboardAction::Copy),
+            ),
+            (
+                &c,
+                Modifiers::CTRL | Modifiers::SHIFT,
+                Some(ClipboardAction::Copy),
+            ),
+            (&v, Modifiers::LOGO, Some(ClipboardAction::Paste)),
+            (
+                &v,
+                Modifiers::CTRL | Modifiers::SHIFT,
+                Some(ClipboardAction::Paste),
+            ),
+            (&c, Modifiers::CTRL, None),
+            (&v, Modifiers::CTRL, None),
+            (&c, Modifiers::empty(), None),
+        ];
+        for (key, modifiers, expected) in cases {
+            assert_eq!(
+                clipboard_action(key, modifiers),
+                expected,
+                "{key:?} with {modifiers:?}"
             );
         }
     }

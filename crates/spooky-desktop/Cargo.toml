@@ -19,7 +19,7 @@ global-hotkey = "0.6"
 rfd = "0.15"
 toml = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "process", "time", "io-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 iced_winit = { version = "0.14", default-features = false }

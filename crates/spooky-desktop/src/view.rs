@@ -1,10 +1,10 @@
 //! Compact native workspace chrome; terminal state remains server-owned.
-use crate::{App, Confirm, Message, chrome::*, terminal};
+use crate::{App, Confirm, Message, chrome::*, tailscale, terminal};
 use iced::{
-    Alignment, Border, Color, Element, Length, Padding,
+    Alignment, Border, Color, Element, Length, Padding, Rectangle, Vector, mouse,
     widget::{
-        Space, button, canvas, column, container, mouse_area, opaque, row, scrollable, stack, text,
-        text_input, tooltip,
+        Space, button, canvas, column, container, float, mouse_area, opaque, row, scrollable,
+        stack, text, text_input, tooltip,
     },
 };
 use spooky_core::{Axis, Layout};
@@ -12,6 +12,56 @@ use std::time::Duration;
 
 const SIDEBAR_WIDTH: f32 = 232.0;
 const HEADER_HEIGHT: f32 = 36.0;
+
+// Capture the click position directly; mouse motion must not publish app updates.
+struct WorkspaceContext(u64);
+
+impl canvas::Program<Message> for WorkspaceContext {
+    type State = ();
+
+    fn update(
+        &self,
+        _: &mut (),
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        if matches!(
+            event,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+        ) && cursor.is_over(bounds)
+        {
+            Some(
+                canvas::Action::publish(Message::WorkspaceMenu(self.0, cursor.position()?))
+                    .and_capture(),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn draw(
+        &self,
+        _: &(),
+        _: &iced::Renderer,
+        _: &iced::Theme,
+        _: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        Vec::new()
+    }
+}
+
+fn menu_style(_: &iced::Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..surface(SIDEBAR)
+    }
+}
 
 fn menu_item(
     kind: Icon,
@@ -29,7 +79,11 @@ fn menu_item(
     .on_press(message)
 }
 
-fn modal<'a>(body: Element<'a, Message>, content: Element<'a, Message>) -> Element<'a, Message> {
+fn modal<'a>(
+    body: Element<'a, Message>,
+    content: Element<'a, Message>,
+    dismiss: Option<Message>,
+) -> Element<'a, Message> {
     let panel = container(content)
         .padding(20)
         .width(380)
@@ -41,15 +95,17 @@ fn modal<'a>(body: Element<'a, Message>, content: Element<'a, Message>) -> Eleme
             },
             ..surface(SIDEBAR)
         });
-    stack![
-        body,
-        opaque(
-            container(panel)
-                .center(Length::Fill)
-                .style(|_| surface(Color::BLACK.scale_alpha(0.45)))
-        )
-    ]
-    .into()
+    let area = mouse_area(
+        container(opaque(panel))
+            .center(Length::Fill)
+            .style(|_| surface(Color::BLACK.scale_alpha(0.45))),
+    );
+    let area = if let Some(message) = dismiss {
+        area.on_press(message)
+    } else {
+        area
+    };
+    stack![body, opaque(area)].into()
 }
 
 impl App {
@@ -142,32 +198,47 @@ impl App {
         } else {
             &self.connected_target
         };
-        let section = row![
-            text("Spaces").size(10).color(MUTED),
-            Space::new().width(Length::Fill),
+        let section = container(text("Spaces").size(10).color(MUTED))
+            .height(22)
+            .align_y(Alignment::Center);
+        let machine = row![
+            button(
+                row![
+                    icon(Icon::Server, MUTED),
+                    text(connection_name).size(10).width(Length::Fill),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([5, 6])
+            .style(quiet)
+            .on_press(Message::ToggleWorkspaces),
             action(Icon::Plus, "New workspace", Message::NewWorkspace),
+            button(
+                row![
+                    dot(if self.online() { SUCCESS } else { MUTED }),
+                    icon(
+                        if self.workspaces_open {
+                            Icon::Chevron
+                        } else {
+                            Icon::ChevronRight
+                        },
+                        MUTED,
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding([5, 6])
+            .style(quiet)
+            .on_press(Message::ToggleWorkspaces),
         ]
         .align_y(Alignment::Center);
-        let machine = button(
-            row![
-                icon(Icon::Server, MUTED),
-                text(connection_name).size(10).width(Length::Fill),
-                dot(if self.snapshot.is_some() {
-                    SUCCESS
-                } else {
-                    MUTED
-                }),
-                icon(Icon::Chevron, MUTED),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding([5, 6])
-        .style(quiet)
-        .on_press(Message::ToggleConnection);
         let mut spaces = column![].spacing(2);
-        if let Some(snapshot) = &self.snapshot {
+        if self.workspaces_open
+            && let Some(snapshot) = &self.snapshot
+        {
             let colors = [
                 SUCCESS,
                 Color::from_rgb8(193, 148, 104),
@@ -202,7 +273,12 @@ impl App {
                 .on_press(Message::Workspace(workspace.id));
                 spaces = spaces.push(
                     tooltip(
-                        item,
+                        stack![
+                            item,
+                            canvas(WorkspaceContext(workspace.id))
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        ],
                         text(&workspace.cwd).size(10),
                         tooltip::Position::Right,
                     )
@@ -214,6 +290,12 @@ impl App {
         if self.connection_open {
             connection = connection
                 .push(text("Connect via SSH").size(10).color(TEXT))
+                .push(
+                    button(text("Browse Tailscale devices").size(10))
+                        .padding([5, 8])
+                        .style(quiet)
+                        .on_press(Message::OpenTailscale),
+                )
                 .push(
                     text_input("user@host or SSH alias", &self.target)
                         .size(11)
@@ -322,15 +404,39 @@ impl App {
         }
     }
 
+    /// Shown when no workspace is selectable: before the first snapshot, or after
+    /// the last workspace was closed.
+    fn empty_state(&self) -> Element<'_, Message> {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.workspaces.is_empty())
+        {
+            container(
+                column![
+                    text("No workspaces").size(12).color(MUTED),
+                    button(text("New workspace").size(11))
+                        .padding([6, 10])
+                        .style(primary)
+                        .on_press(Message::NewWorkspace),
+                ]
+                .spacing(10)
+                .align_x(Alignment::Center),
+            )
+            .center(Length::Fill)
+            .into()
+        } else {
+            container(text("Waiting for session…").size(12).color(MUTED))
+                .center(Length::Fill)
+                .into()
+        }
+    }
+
     pub(super) fn view(&self) -> Element<'_, Message> {
         let content = self
             .active()
             .map(|(_, tab)| self.terminal_layout(&tab.layout))
-            .unwrap_or_else(|| {
-                container(text("Waiting for session…").size(12).color(MUTED))
-                    .center(Length::Fill)
-                    .into()
-            });
+            .unwrap_or_else(|| self.empty_state());
         let grid = self
             .current_pane()
             .map(|p| {
@@ -344,11 +450,7 @@ impl App {
             .unwrap_or_default();
         let footer = container(
             row![
-                dot(if self.snapshot.is_some() {
-                    SUCCESS
-                } else {
-                    MUTED
-                }),
+                dot(if self.online() { SUCCESS } else { MUTED }),
                 text(&self.status)
                     .size(9)
                     .color(MUTED)
@@ -416,14 +518,7 @@ impl App {
             )
             .padding(5)
             .width(200)
-            .style(|_| container::Style {
-                border: Border {
-                    color: BORDER,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..surface(SIDEBAR)
-            });
+            .style(menu_style);
             body = stack![
                 body,
                 opaque(
@@ -441,12 +536,54 @@ impl App {
             ]
             .into();
         }
+        if let Some((id, position)) = self.workspace_menu {
+            let menu = container(
+                column![
+                    menu_item(
+                        Icon::Pencil,
+                        "Rename workspace",
+                        Message::RenameWorkspace(id)
+                    ),
+                    separator(),
+                    menu_item(Icon::Close, "Close workspace", Message::CloseWorkspace(id))
+                        .style(destructive),
+                ]
+                .spacing(2),
+            )
+            .padding(5)
+            .width(200)
+            .style(menu_style);
+            body = stack![
+                body,
+                opaque(
+                    mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                        .on_press(Message::DismissWorkspaceMenu)
+                        .on_right_press(Message::DismissWorkspaceMenu)
+                        .on_scroll(|_| Message::DismissWorkspaceMenu)
+                ),
+                float(opaque(menu)).translate(move |bounds, viewport| {
+                    let left = viewport.x + 4.0;
+                    let top = viewport.y + 4.0;
+                    let right = (viewport.x + viewport.width - bounds.width - 4.0).max(left);
+                    let bottom = (viewport.y + viewport.height - bounds.height - 4.0).max(top);
+                    Vector::new(
+                        position.x.clamp(left, right) - bounds.x,
+                        position.y.clamp(top, bottom) - bounds.y,
+                    )
+                }),
+            ]
+            .into();
+        }
+        if self.tailscale_open {
+            body = modal(body, self.tailscale_picker(), Some(Message::CloseTailscale));
+        }
         if self.renaming {
             body = modal(
                 body,
                 column![
                     text("Rename workspace").size(14).color(TEXT),
                     text_input("Workspace name", &self.rename)
+                        .id("workspace-name")
                         .size(12)
                         .padding(8)
                         .on_input(Message::RenameValue)
@@ -466,16 +603,23 @@ impl App {
                 ]
                 .spacing(14)
                 .into(),
+                None,
             );
         }
         if let Some(confirm) = self.confirm {
             let (title, detail) = match confirm {
                 Confirm::Pane(_) => (
-                    "Close this pane?",
+                    "Close this pane?".to_owned(),
                     "Its shell and running commands will be terminated.",
                 ),
-                Confirm::Workspace(_) => (
-                    "Close this workspace?",
+                Confirm::Workspace(id) => (
+                    format!(
+                        "Close \"{}\"?",
+                        self.snapshot
+                            .as_ref()
+                            .and_then(|s| s.workspaces.iter().find(|w| w.id == id))
+                            .map_or("workspace", |w| w.name.as_str())
+                    ),
                     "Every shell and running command in this workspace will be terminated.",
                 ),
             };
@@ -502,8 +646,99 @@ impl App {
                 ]
                 .spacing(14)
                 .into(),
+                None,
             );
         }
         body
+    }
+
+    fn tailscale_picker(&self) -> Element<'_, Message> {
+        let query = self.tailscale_query.to_lowercase();
+        let user = self.tailscale_user.trim();
+        let user_valid = user.is_empty()
+            || (!user.starts_with('-')
+                && user
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+        let mut devices = column![].spacing(3);
+        match &self.tailscale {
+            tailscale::Discovery::Idle | tailscale::Discovery::Loading => {
+                devices = devices.push(
+                    text("Reading local Tailscale client…")
+                        .size(11)
+                        .color(MUTED),
+                );
+            }
+            tailscale::Discovery::Failed(error) => {
+                devices = devices.push(text(error).size(11).color(TEXT));
+            }
+            tailscale::Discovery::Ready(network) => {
+                let mut shown = 0;
+                for peer in &network.peers {
+                    if !peer.name.to_lowercase().contains(&query) && !peer.host.contains(&query) {
+                        continue;
+                    }
+                    shown += 1;
+                    let entry = button(
+                        row![
+                            dot(if peer.online { SUCCESS } else { MUTED }),
+                            column![
+                                text(&peer.name).size(11).color(if peer.online {
+                                    TEXT
+                                } else {
+                                    MUTED
+                                }),
+                                text(format!(
+                                    "{} · {} · {}",
+                                    peer.host,
+                                    peer.os,
+                                    if peer.online { "online" } else { "offline" }
+                                ))
+                                .size(9)
+                                .color(MUTED),
+                            ]
+                            .spacing(3)
+                            .width(Length::Fill),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(quiet);
+                    devices = devices.push(if peer.online && user_valid {
+                        entry.on_press(Message::SelectTailscale(peer.host.clone()))
+                    } else {
+                        entry
+                    });
+                }
+                if shown == 0 {
+                    devices = devices.push(
+                        text(if network.peers.is_empty() {
+                            "No other devices in this tailnet."
+                        } else {
+                            "No matching devices."
+                        })
+                        .size(11)
+                        .color(MUTED),
+                    );
+                }
+            }
+        }
+        let refresh = button(text("Refresh").size(10))
+            .padding([5, 8])
+            .style(quiet);
+        column![
+            row![
+                text("Tailscale devices").size(14).color(TEXT).width(Length::Fill),
+                action(Icon::Close, "Close Tailscale devices", Message::CloseTailscale),
+            ].align_y(Alignment::Center),
+            text("Uses your installed Tailscale client. Selecting a device prepares SSH; Connect starts the session.").size(10).color(MUTED),
+            text_input("Search devices or IP", &self.tailscale_query).size(11).padding(7).on_input(Message::TailscaleQuery),
+            text_input("SSH user (optional)", &self.tailscale_user).size(11).padding(7).on_input(Message::TailscaleUser),
+            text(if user_valid { "Remote device needs SSH and spooky-server." } else { "Invalid SSH user: use letters, digits, dot, underscore or hyphen." }).size(10).color(MUTED),
+            container(scrollable(devices)).height(240),
+            if matches!(self.tailscale, tailscale::Discovery::Loading) { refresh } else { refresh.on_press(Message::RefreshTailscale) },
+        ].spacing(10).into()
     }
 }

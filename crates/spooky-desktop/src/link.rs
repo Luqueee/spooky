@@ -18,6 +18,12 @@ pub(crate) enum Command {
     Upload(u64, u64, PathBuf),
     Target(u64, String),
 }
+/// One of the two server connections: ordered commands, or the snapshot stream.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Channel {
+    Commands,
+    Display,
+}
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
     Snapshot(u64, Snapshot),
@@ -25,6 +31,7 @@ pub(crate) enum Event {
     Failed(u64, String),
     Uploaded(u64, u64, String),
     Hotkey(u32),
+    Connection(u64, Channel, bool),
 }
 static EVENTS: OnceLock<Mutex<tokio::sync::mpsc::Receiver<Event>>> = OnceLock::new();
 pub(crate) async fn next_event() -> Option<Event> {
@@ -89,6 +96,11 @@ impl Link {
                                         format!("Disconnected: {e}"),
                                     ));
                                     client = None;
+                                    let _ = events.blocking_send(Event::Connection(
+                                        generation,
+                                        Channel::Commands,
+                                        false,
+                                    ));
                                     next_connect = Instant::now() + Duration::from_secs(1);
                                 }
                             }
@@ -118,6 +130,11 @@ impl Link {
                         Ok(c) => {
                             client = Some(c);
                             let _ = events.try_send(Event::Status(generation, "Connected".into()));
+                            let _ = events.blocking_send(Event::Connection(
+                                generation,
+                                Channel::Commands,
+                                true,
+                            ));
                         }
                         Err(e) => {
                             let _ = events
@@ -151,6 +168,7 @@ fn snapshots(
                 generation,
                 format!("Display disconnected: {error:#}"),
             ));
+            let _ = events.blocking_send(Event::Connection(generation, Channel::Display, false));
             // Target changes unpark this thread; no polling while connected.
             thread::park_timeout(Duration::from_secs(1));
         }
@@ -164,6 +182,7 @@ fn stream_snapshots(
     events: &tokio::sync::mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
     let mut client = Client::connect(target)?;
+    events.blocking_send(Event::Connection(generation, Channel::Display, true))?;
     let mut revision = None;
     while matches!(targets.has_changed(), Ok(false)) && !events.is_closed() {
         match client.request(&Request::Snapshot { since: revision })? {

@@ -123,11 +123,11 @@ fn exited_shell_keeps_scrollback_and_invalidates_revision() {
         ));
         let after = server.snapshot();
         assert!(after.revision > before.revision);
-        let text: String = after.panes[0]
-            .cells
-            .iter()
-            .map(|c| c.text.as_str())
-            .collect();
+        let screen = &after.panes[0];
+        let text = (0..screen.rows)
+            .map(|row| screen.row_text(row))
+            .collect::<Vec<_>>()
+            .join("\n");
         if text.contains("FIRSTLINE") {
             break;
         }

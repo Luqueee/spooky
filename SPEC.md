@@ -21,6 +21,7 @@ Creating workspaces, tabs and splits starts real shells. Explicit pane/workspace
 
 - Polished dark interface inspired by Ghostty, without a WebView.
 - Workspace sidebar, tabs, visible split panes and unambiguous keyboard focus.
+- The machine row owns workspace creation and disclosure; neither its name nor its arrow opens SSH. Each workspace exposes rename and confirmed closure through right-click and an explicit actions button.
 - Configurable global dropdown shortcut where supported. Unsupported compositor features must be surfaced.
 - GPU-rendered terminal text, ANSI colors, cursor, wide/combining Unicode and terminal application input modes.
 - Grid resizing updates both terminal state and the PTY. Clipboard paste respects bracketed-paste mode. Text fields must never leak input into shells.
@@ -32,6 +33,8 @@ Creating workspaces, tabs and splits starts real shells. Explicit pane/workspace
 Remote workspaces use SSH to a host with a compatible spooky-server installed. The server runs under the remote user, without privileged installation requirements. Connection loss must not terminate its shells.
 
 Use the user's standard SSH authentication and host verification. No disabled host checks, automatic acceptance of changed keys, implicit agent forwarding, automatic remote installation or password storage. Local and remote target states must not mix, and queued input must not be replayed against a different target.
+
+The native connection UI discovers devices through an already-authenticated local Tailscale client, with search, refresh, online state and optional SSH username. Selecting a device prepares a validated IP destination but does not connect automatically. No VPN embedding, token storage, account changes or remote installation is implied.
 
 ## Captures and attachments
 

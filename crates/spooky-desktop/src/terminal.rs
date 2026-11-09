@@ -93,48 +93,66 @@ impl canvas::Program<Message> for Terminal<'_> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let (cw, ch) = metrics(self.font_size);
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), crate::chrome::BACKGROUND);
-        for c in &self.pane.cells {
-            let pos = Point::new(f32::from(c.col) * cw, f32::from(c.row) * ch);
-            let width = cw * if c.wide { 2.0 } else { 1.0 };
-            let selected = self.selection.is_some_and(|(a, b)| {
-                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                (c.row, c.col) >= lo && (c.row, c.col) <= hi
-            });
-            let bg = if selected {
-                Color::from_rgb8(67, 75, 96)
-            } else {
-                Color::from_rgb8(c.bg[0], c.bg[1], c.bg[2])
-            };
-            frame.fill_rectangle(pos, Size::new(width, ch), bg);
-            let fg = Color::from_rgb8(c.fg[0], c.fg[1], c.fg[2]);
-            if !c.text.is_empty() && c.text != " " {
-                frame.fill_text(canvas::Text {
-                    content: c.text.clone(),
-                    position: pos,
-                    color: fg,
-                    size: self.font_size.into(),
-                    font: Font {
-                        weight: if c.bold {
-                            font::Weight::Bold
-                        } else {
-                            font::Weight::Normal
-                        },
-                        style: if c.italic {
-                            font::Style::Italic
-                        } else {
-                            font::Style::Normal
-                        },
-                        ..TERMINAL_FONT
-                    },
-                    ..Default::default()
-                });
+        let selection = self
+            .selection
+            .map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+        let last_col = self.pane.cols.saturating_sub(1);
+        for line in &self.pane.lines {
+            let y = f32::from(line.row) * ch;
+            for run in &line.runs {
+                if run.bg != spooky_core::DEFAULT_BACKGROUND {
+                    frame.fill_rectangle(
+                        Point::new(f32::from(run.col) * cw, y),
+                        Size::new(f32::from(run.columns()) * cw, ch),
+                        Color::from_rgb8(run.bg[0], run.bg[1], run.bg[2]),
+                    );
+                }
             }
-            if c.underline {
+            if let Some((lo, hi)) = selection
+                && (lo.0..=hi.0).contains(&line.row)
+            {
+                let start = if line.row == lo.0 { lo.1 } else { 0 };
+                let end = if line.row == hi.0 { hi.1 } else { last_col };
                 frame.fill_rectangle(
-                    Point::new(pos.x, pos.y + ch - 2.0),
-                    Size::new(width, 1.0),
-                    fg,
+                    Point::new(f32::from(start) * cw, y),
+                    Size::new(f32::from(end.saturating_sub(start) + 1) * cw, ch),
+                    Color::from_rgb8(67, 75, 96),
                 );
+            }
+            for run in &line.runs {
+                let fg = Color::from_rgb8(run.fg[0], run.fg[1], run.fg[2]);
+                let font = Font {
+                    weight: if run.bold {
+                        font::Weight::Bold
+                    } else {
+                        font::Weight::Normal
+                    },
+                    style: if run.italic {
+                        font::Style::Italic
+                    } else {
+                        font::Style::Normal
+                    },
+                    ..TERMINAL_FONT
+                };
+                for (col, text, _) in run.cells() {
+                    if text != " " {
+                        frame.fill_text(canvas::Text {
+                            content: text.to_owned(),
+                            position: Point::new(f32::from(col) * cw, y),
+                            color: fg,
+                            size: self.font_size.into(),
+                            font,
+                            ..Default::default()
+                        });
+                    }
+                }
+                if run.underline {
+                    frame.fill_rectangle(
+                        Point::new(f32::from(run.col) * cw, y + ch - 2.0),
+                        Size::new(f32::from(run.columns()) * cw, 1.0),
+                        fg,
+                    );
+                }
             }
         }
         if self.pane.cursor.visible {

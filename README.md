@@ -26,14 +26,18 @@ sudo apt-get install libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcom
 ## Sessions and controls
 
 - **Ctrl+Shift+Space:** show/hide the dropdown window where global shortcuts are available.
-- Use **Spaces +** to create a workspace and the sidebar rows to switch workspaces. The compact tab bar provides new tabs, **Attach** and pane capture; hover an icon for its label. The button beside the Spooky brand toggles the sidebar.
+- Use the **+** beside **This computer** (or the current SSH host) to create a workspace on that machine and the sidebar rows to switch workspaces. The compact tab bar provides new tabs, **Attach** and pane capture; hover an icon for its label. The button beside the Spooky brand toggles the sidebar.
+- Click **This computer** (or the current SSH host) or its arrow to collapse/expand its workspace list without changing connections. Creating a workspace expands the list so the new workspace remains visible.
+- Right-click a workspace or use its **…** button for **Rename workspace** and **Close workspace**, including inactive workspaces. Rename opens a focused field; closure confirms the workspace name before terminating its shells. Escape or clicking outside dismisses the action menu.
 - Click a terminal pane to focus it; drag to select text and scroll to navigate history.
-- **Ctrl+Shift+C** / **Cmd+Shift+C:** copy the selected terminal text.
-- **Ctrl+Shift+V** / **Cmd+V:** paste. Applications requesting bracketed paste receive the appropriate delimiters.
+- **Cmd+C** (macOS) or **Ctrl+Shift+C:** copy the selected terminal text, without the blank padding that fills each row. Plain **Ctrl+C** stays the terminal interrupt.
+- **Cmd+V** or **Ctrl+Shift+V:** paste. Applications requesting bracketed paste receive the appropriate delimiters; ESC and ETX characters in the pasted text are dropped so it cannot end the bracket early or interrupt the program.
 - On macOS, **Option** follows the active keyboard layout without a terminal Meta prefix. Option dead keys insert their spacing character immediately (for example, **Option+ñ → `~`** on Spanish keyboards), without requiring Space or composing the next letter. Control+Option chords retain terminal encoding; ordinary accent composition remains unchanged.
 - The **…** popover contains **Split columns / Split rows**, workspace renaming and **Close pane / Close workspace**. Closing asks for confirmation in a modal before terminating shells; Escape dismisses menus and modals without sending the key to the terminal.
 - Closing the GUI is a detach, not session termination. Relaunch to reconnect to the running server.
 - New local workspaces start in your home directory, including when launched from Finder. Tabs and splits inherit their workspace's starting directory. Existing sessions keep their directory; use `cd ~` to return home. SSH workspaces use the remote server's directory, never the local home path.
+- On macOS new shells are login shells, so `~/.zprofile` (PATH, Homebrew) applies even when Spooky is launched from Finder. If neither `LANG` nor `LC_ALL` is set, shells get `LANG=en_US.UTF-8`; set your own in `~/.zprofile` to override. Other platforms run `$SHELL` directly.
+- Typing, pasting or attaching while a pane is scrolled into history returns it to live output. The terminal has keyboard focus at launch. The status dot is green only while both the command and display connections are up; with no workspaces the pane offers **New workspace**.
 
 The server does not survive a system restart. It is an independent multiplexer, not a tmux wrapper; tmux is optional software that can be run inside a pane.
 
@@ -43,7 +47,9 @@ The interface follows the compact Herdr reference: a unified titlebar on macOS, 
 
 ## Remote workspaces
 
-Build/install `spooky-server` on the remote Unix machine and put it on the remote login shell's PATH. Use the same protocol version on both sides. Click **This computer** or **Connect machine** in the sidebar to expand the SSH editor, enter a destination or existing OpenSSH host alias, then select **Connect**. **Local** returns to the local server.
+Build/install `spooky-server` on the remote Unix machine and put it on the remote login shell's PATH. Use the same protocol version on both sides. Click **Connect machine** in the sidebar to open the SSH editor, enter a destination or existing OpenSSH host alias, then select **Connect**. **Local** returns to the local server. Escape, the editor's close button, or hiding the sidebar dismisses the editor and returns keyboard input to the terminal.
+
+**Browse Tailscale devices** opens a native searchable picker using the installed client's `tailscale status --json`. It shows device names, addresses, OS and online/offline state; offline devices cannot be selected. Enter an optional SSH username and select a device to populate the SSH destination, then explicitly press **Connect**. Refresh rereads the local client without blocking the terminal. This is SSH over the existing tailnet, not an embedded VPN or automatic Tailscale SSH setup: Tailscale must already be signed in and connected, and the destination still needs SSH access and a compatible `spooky-server`. Standard SSH identity and host-key rules remain unchanged.
 
 The remote bridge starts/reconnects to the remote session server. Disconnecting SSH or closing the GUI does not close those shells. Standard OpenSSH configuration, identities, agent and host-key verification are used. Connections are noninteractive: authenticate and establish the host key through normal SSH first. Spooky does not disable verification, store passwords or automatically install remote executables.
 
@@ -76,7 +82,7 @@ Unknown fields and invalid values produce an explicit startup error. There is no
 
 Produces `dist/Spooky.app` on macOS or a Linux archive containing both binaries and a desktop entry. The macOS bundle is a local unsigned development distribution, not a notarized release.
 
-The incremental-update transport uses **protocol v2**. Update both client and server, including remote installations. A running v1 server must be stopped explicitly after finishing its sessions; restarting it terminates those shells and loses its in-memory workspaces. Closing only the GUI does not stop it. Spooky rejects incompatible endpoints rather than silently restarting a server.
+The incremental-update transport uses **protocol v3**: a snapshot update carries only the panes that changed and, within each, only the rows that changed. Update both client and server, including remote installations. A running v1 or v2 server must be stopped explicitly after finishing its sessions; restarting it terminates those shells and loses its in-memory workspaces. Closing only the GUI does not stop it. Spooky rejects incompatible endpoints rather than silently restarting a server.
 
 ```sh
 cargo fmt --all -- --check
@@ -102,7 +108,7 @@ See [SPEC.md](SPEC.md) for the product contract, [architecture](docs/architectur
 Verified on macOS arm64:
 
 - Workspace build and release packaging; the unsigned `Spooky.app` launches a native window.
-- `cargo fmt`, strict clippy, 8 automated tests, doc tests and warning-free first-party rustdoc.
+- `cargo fmt`, strict clippy, 10 automated tests, doc tests and warning-free first-party rustdoc.
 - The complete workspace checks with both pinned Rust 1.99.1 and MSRV 1.98.0.
 - Real PTY output, ANSI truecolor, wide Unicode, resize, splits/tabs, explicit closure and reconnect retaining a shell environment variable.
 - Real SSH/SFTP against an isolated loopback sshd with a pinned host key: session detach/reconnect and a filename containing a space/apostrophe. Transferred bytes matched by SHA-256.
@@ -114,7 +120,11 @@ Verified on macOS arm64:
 - Native Option+ñ inserted `~` immediately; subsequent Space, `n` and repeated Option+ñ produced `~ ~n ~~` without duplicates. A shell command received `~/mañana @` unchanged. Conversion regressions cover uncommitted base keys, composed text carried by Space and Option-generated text.
 - Event-driven incremental snapshots reduced median internal key-to-canvas-geometry latency from 49.9 ms to 5.3 ms (maximum 66.5 ms to 7.2 ms) in native 20-key runs with eight panes. The new run used an isolated server with comparable viewport sizes and the same shell configuration; existing user sessions were untouched. These measurements exclude compositor/display presentation. Native input also completed a `stty -echo`/`read` interaction while the snapshot connection waited.
 - A real protocol-v2 bridge received an eight-pane full snapshot followed by a one-pane PTY update; its exit left the isolated session server alive. The regression suite also checks that incremental merging retains unchanged panes, clears erased cells and removes closed panes.
+- Protocol v3 row deltas (isolated server, real shell): a full 300×80 snapshot fell from 3,012,519 to 2,179 bytes and one echoed keystroke from 3,012,519 to 463 bytes, with only the changed row sent. Tests cover convergence of applied updates with a fresh full snapshot across scrolling, erase, styled and wide text, and fail when the server stops recording changed rows. The native window rendered bold, italic, underline, 16-colour and truecolor backgrounds, a wide character and a combining accent from runs; a drag selection was highlighted and Cmd+C copied exactly the selected text. `spooky-server bridge` relayed v3 ping, full snapshot and incremental update over stdio, and its exit left the server running.
+- Native sidebar interaction: machine-name and chevron collapse/expand without opening SSH; the machine-row + creates and reveals a workspace; switching rows selects the correct terminal. Closing the SSH editor with Escape/X or hiding the sidebar restores terminal input.
+- Native workspace context actions: right-click an inactive workspace, rename that exact workspace, cancel closure, then close it with confirmation. Protocol snapshots confirmed that only its workspace and pane IDs disappeared; outside-click and Escape dismissed the action menu.
+- Native Tailscale discovery against the installed, signed-in client: real devices rendered, searching filtered them, selecting a device with a username populated the SSH destination without connecting, invalid usernames disabled selection, and Escape restored terminal input without leaking field text.
 
-**Still unverified:** end-to-end clipboard, PNG-save and global-shortcut interactions, plus real Linux desktops. CI has not been run on GitHub.
+**Still unverified:** a remote session initiated from the Tailscale picker, SSH/SFTP under protocol v3 (the real SSH/SFTP runs above predate it; only the stdio bridge was re-run), end-to-end PNG-save and global-shortcut interactions, plus real Linux desktops. GitHub CI passed for the initial repository version; the sidebar/Tailscale and protocol v3 changes have only been checked locally.
 
 The dependency graph currently reports a future-Rust incompatibility in upstream `block 0.1.6`. First-party clippy and rustdoc pass without suppressing that diagnostic.

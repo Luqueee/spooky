@@ -111,6 +111,7 @@ pub enum Icon {
     Sidebar,
     Server,
     Chevron,
+    ChevronRight,
     Close,
     Pencil,
 }
@@ -200,6 +201,7 @@ impl canvas::Program<Message> for Vector {
                     (3., 8.),
                 ]),
                 Icon::Chevron => line(&[(8., 10.), (12., 14.), (16., 10.)]),
+                Icon::ChevronRight => line(&[(10., 8.), (14., 12.), (10., 16.)]),
                 Icon::Close => {
                     line(&[(6., 6.), (18., 18.)]);
                     line(&[(18., 6.), (6., 18.)]);
