@@ -1,0 +1,31 @@
+[package]
+name = "spooky-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "spooky"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spooky-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "tokio", "advanced-shaping", "x11", "wayland"] }
+global-hotkey = "0.6"
+rfd = "0.15"
+toml = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tokio = { version = "1", features = ["sync"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+iced_winit = { version = "0.14", default-features = false }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSTextInputContext"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry"] }
+
+[lints]
+workspace = true

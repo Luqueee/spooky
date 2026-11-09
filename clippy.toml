@@ -1,0 +1,2 @@
+# Test setup may fail loudly; production propagates errors.
+allow-expect-in-tests = true

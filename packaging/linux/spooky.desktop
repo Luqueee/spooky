@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spooky
+Comment=Persistent GPU terminal workspaces
+Exec=spooky
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=spooky
