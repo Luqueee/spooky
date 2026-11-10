@@ -3309,6 +3309,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spooky-core",
+ "toml",
 ]
 
 [[package]]

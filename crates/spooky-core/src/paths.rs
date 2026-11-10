@@ -62,6 +62,30 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Returns the private directory for state that should outlive a login: the
+/// server log and the saved workspaces, created with mode 0700. With
+/// SPOOKY_SOCKET set it is the socket's own directory, so an isolated instance
+/// never touches the user's real state.
+pub fn state_dir() -> Result<PathBuf> {
+    if env::var_os("SPOOKY_SOCKET").is_some() {
+        return socket_path()?
+            .parent()
+            .map(Path::to_path_buf)
+            .context("socket path has no parent directory");
+    }
+    let home = home_dir()?;
+    let dir = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Spooky")
+    } else {
+        match env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
+            Some(base) if base.is_absolute() => base.join("spooky"),
+            _ => home.join(".local/state/spooky"),
+        }
+    };
+    ensure_private_runtime_dir(&dir)?;
+    Ok(dir)
+}
+
 /// Validates an existing socket path without following symlinks. Returns false
 /// only when the socket does not exist yet.
 pub(crate) fn validate_socket_if_present(path: &Path) -> Result<bool> {

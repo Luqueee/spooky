@@ -1,7 +1,7 @@
 //! Real PTY protocol regressions for detach, emulation and pane-tree lifetime.
 #![cfg(unix)]
 
-use spooky_core::{Axis, Request, Response, Snapshot};
+use spooky_core::{Axis, FindDirection, Layout, Request, Response, Snapshot};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -35,6 +35,11 @@ impl Server {
         fs::create_dir(&dir).unwrap_or_else(|e| panic!("create test directory: {e}"));
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
             .unwrap_or_else(|e| panic!("set permissions: {e}"));
+        Self::start_in(dir, configure)
+    }
+    /// Starts a server over an existing private directory, which is also where
+    /// the server keeps its log and saved workspaces.
+    fn start_in(dir: PathBuf, configure: impl FnOnce(&mut Command)) -> Self {
         let socket = dir.join("s");
         let mut command = Command::new(env!("CARGO_BIN_EXE_spooky-server"));
         configure(&mut command);
@@ -53,6 +58,20 @@ impl Server {
             thread::sleep(Duration::from_millis(10));
         }
         Self { child, dir, socket }
+    }
+    /// Runs a `spooky-server` subcommand against this server's socket.
+    fn cli(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_spooky-server"))
+            .args(args)
+            .env("SPOOKY_SOCKET", &self.socket)
+            .output()
+            .unwrap_or_else(|e| panic!("run spooky-server {args:?}: {e}"))
+    }
+    /// Waits for the server to exit on its own and hands back its directory so a
+    /// replacement can be started over it.
+    fn wait_for_exit(mut self) -> PathBuf {
+        wait_for(|| matches!(self.child.try_wait(), Ok(Some(_))));
+        std::mem::take(&mut self.dir)
     }
     fn connect(&self) -> Connection {
         let stream = UnixStream::connect(&self.socket).unwrap_or_else(|e| panic!("connect: {e}"));
@@ -172,6 +191,77 @@ fn split_and_close_final_panes_keep_tree_consistent() {
     ok(client.request(Request::ClosePane { pane: other }));
     let snapshot = client.snapshot();
     assert!(snapshot.workspaces.is_empty());
+    assert!(snapshot.panes.is_empty());
+}
+
+#[test]
+fn a_tab_is_renamed_and_closed_with_every_shell_it_holds() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some("/".into()),
+    }));
+    let workspace = client.snapshot().workspaces[0].id;
+    ok(client.request(Request::CreateTab {
+        workspace,
+        title: "second".into(),
+    }));
+    let snapshot = client.snapshot();
+    let (first, second) = (
+        snapshot.workspaces[0].tabs[0].clone(),
+        snapshot.workspaces[0].tabs[1].clone(),
+    );
+    let mut first_panes = Vec::new();
+    first.layout.panes(&mut first_panes);
+    ok(client.request(Request::Split {
+        pane: first_panes[0],
+        axis: Axis::Vertical,
+    }));
+    assert_eq!(client.snapshot().panes.len(), 3);
+
+    ok(client.request(Request::RenameTab {
+        tab: first.id,
+        title: "build".into(),
+    }));
+    let titles: Vec<String> = client.snapshot().workspaces[0]
+        .tabs
+        .iter()
+        .map(|tab| tab.title.clone())
+        .collect();
+    assert_eq!(titles, ["build", "second"]);
+    for rejected in [
+        Request::RenameTab {
+            tab: first.id,
+            title: "  ".into(),
+        },
+        Request::RenameTab {
+            tab: u64::MAX,
+            title: "x".into(),
+        },
+        Request::CloseTab { tab: u64::MAX },
+    ] {
+        let response = client.request(rejected);
+        assert!(matches!(response, Response::Error(_)), "{response:?}");
+    }
+
+    ok(client.request(Request::CloseTab { tab: first.id }));
+    let snapshot = client.snapshot();
+    assert_eq!(snapshot.workspaces[0].tabs.len(), 1);
+    let mut remaining = Vec::new();
+    second.layout.panes(&mut remaining);
+    assert_eq!(
+        snapshot.panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+        remaining,
+        "both panes of the closed tab are gone, the other tab's pane is kept"
+    );
+
+    ok(client.request(Request::CloseTab { tab: second.id }));
+    let snapshot = client.snapshot();
+    assert!(
+        snapshot.workspaces.is_empty(),
+        "the last tab takes its workspace with it"
+    );
     assert!(snapshot.panes.is_empty());
 }
 
@@ -456,4 +546,413 @@ fn incremental_updates_converge_to_the_full_screen() {
         mirror.panes[0].lines, full.panes[0].lines,
         "a client that applied every update must show what a fresh client shows"
     );
+}
+
+/// Runs `printf '<escapes>'` in the pane so the terminal receives `escapes`.
+fn emit(client: &mut Connection, pane: u64, escapes: &str) {
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!("printf '{escapes}'\n").into_bytes(),
+    }));
+}
+
+#[test]
+fn mouse_modes_cursor_shape_and_text_styles_reach_the_client() {
+    use spooky_core::{CursorShape, MouseEncoding, MouseTracking};
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "modes".into(),
+        cwd: Some("/".into()),
+    }));
+    let initial = client.snapshot();
+    let pane = initial.panes[0].id;
+    let first = &initial.panes[0];
+    assert_eq!(first.mouse_tracking, MouseTracking::Off);
+    assert_eq!(first.mouse_encoding, MouseEncoding::Normal);
+    assert!(!first.alternate_scroll);
+    assert_eq!(first.cursor.shape, CursorShape::Beam);
+
+    // Drag tracking with SGR reports; the most detailed enabled mode wins.
+    emit(&mut client, pane, "\\033[?1002h\\033[?1006h");
+    wait_for(|| {
+        let p = &client.snapshot().panes[0];
+        p.mouse_tracking == MouseTracking::Drag && p.mouse_encoding == MouseEncoding::Sgr
+    });
+    emit(&mut client, pane, "\\033[?1003h");
+    wait_for(|| client.snapshot().panes[0].mouse_tracking == MouseTracking::Motion);
+    emit(
+        &mut client,
+        pane,
+        "\\033[?1003l\\033[?1002l\\033[?1006l\\033[?1000h\\033[?1005h",
+    );
+    wait_for(|| {
+        let p = &client.snapshot().panes[0];
+        p.mouse_tracking == MouseTracking::Clicks && p.mouse_encoding == MouseEncoding::Utf8
+    });
+
+    // The wheel becomes arrow keys only on the alternate screen, unless disabled.
+    emit(&mut client, pane, "\\033[?1049h");
+    wait_for(|| client.snapshot().panes[0].alternate_scroll);
+    emit(&mut client, pane, "\\033[?1007l");
+    wait_for(|| !client.snapshot().panes[0].alternate_scroll);
+
+    // Applications choose a cursor shape; resetting returns to the steady bar.
+    emit(&mut client, pane, "\\033[4 q");
+    wait_for(|| client.snapshot().panes[0].cursor.shape == CursorShape::Underline);
+    emit(&mut client, pane, "\\033[2 q");
+    wait_for(|| client.snapshot().panes[0].cursor.shape == CursorShape::Block);
+    emit(&mut client, pane, "\\033[0 q");
+    wait_for(|| client.snapshot().panes[0].cursor.shape == CursorShape::Beam);
+
+    // Strikethrough travels as a style; dim darkens the foreground to two thirds.
+    emit(
+        &mut client,
+        pane,
+        "\\033[2J\\033[H\\033[9mS\\033[0m \\033[2;38;2;100;200;50mD\\033[0m",
+    );
+    wait_for(|| {
+        let p = &client.snapshot().panes[0];
+        has_cell(p, "S", |run| run.strikethrough) && has_cell(p, "D", |run| run.fg == [66, 133, 33])
+    });
+}
+
+/// Identity of the first split divider of the first workspace's first tab.
+fn split_id(client: &mut Connection) -> u64 {
+    match client.snapshot().workspaces[0].tabs[0].layout {
+        Layout::Split { id, .. } => id,
+        ref other => panic!("expected a split, got {other:?}"),
+    }
+}
+
+fn split_ratio(client: &mut Connection) -> u16 {
+    match client.snapshot().workspaces[0].tabs[0].layout {
+        Layout::Split { ratio, .. } => ratio,
+        ref other => panic!("expected a split, got {other:?}"),
+    }
+}
+
+#[test]
+fn workspaces_survive_a_server_stop_and_stopping_asks_before_ending_shells() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "alpha".into(),
+        cwd: Some("/".into()),
+    }));
+    let first = client.snapshot();
+    let (workspace, tab, pane) = (
+        first.workspaces[0].id,
+        first.workspaces[0].tabs[0].id,
+        first.panes[0].id,
+    );
+    ok(client.request(Request::Split {
+        pane,
+        axis: Axis::Vertical,
+    }));
+    let split = split_id(&mut client);
+    ok(client.request(Request::SetSplitRatio { split, ratio: 700 }));
+    ok(client.request(Request::RenameTab {
+        tab,
+        title: "build".into(),
+    }));
+
+    // A status query reports what stopping would end.
+    let status = server.cli(&["status"]);
+    assert!(status.status.success());
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        text.contains("1 workspace(s)") && text.contains("2 running"),
+        "{text}"
+    );
+
+    // Stopping while shells run is refused unless forced, and leaves them alone.
+    let refused = server.cli(&["stop"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--force"));
+    assert_eq!(client.snapshot().panes.len(), 2);
+
+    // The layout reaches disk by itself shortly after it changes.
+    let saved = server.dir.join("workspaces.json");
+    wait_for(|| {
+        fs::read_to_string(&saved).is_ok_and(|text| text.contains("build") && text.contains("700"))
+    });
+
+    let stopped = server.cli(&["stop", "--force"]);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let dir = server.wait_for_exit();
+
+    let server = Server::start_in(dir, |_| {});
+    let mut client = server.connect();
+    let restored = client.snapshot();
+    let saved_workspace = &restored.workspaces[0];
+    assert_eq!(
+        (
+            saved_workspace.id,
+            saved_workspace.name.as_str(),
+            saved_workspace.tabs[0].id
+        ),
+        (workspace, "alpha", tab)
+    );
+    assert!(saved_workspace.tabs[0].renamed);
+    assert_eq!(saved_workspace.tabs[0].title, "build");
+    assert_eq!(split_ratio(&mut client), 700);
+    assert_eq!(restored.panes.len(), 2, "every saved pane gets a new shell");
+    assert!(restored.panes.iter().all(|pane| !pane.exited));
+
+    // Identities handed out before the stop are not issued again.
+    let used = restored
+        .panes
+        .iter()
+        .map(|pane| pane.id)
+        .chain([workspace, tab, split_id(&mut client)])
+        .max()
+        .expect("identities");
+    ok(client.request(Request::CreateTab {
+        workspace,
+        title: "later".into(),
+    }));
+    let later = client.snapshot().workspaces[0]
+        .tabs
+        .last()
+        .expect("a tab")
+        .id;
+    assert!(later > used, "tab {later} reuses an identity up to {used}");
+
+    let log = fs::read_to_string(server.dir.join("server.log")).expect("server log");
+    assert!(
+        log.contains("shutdown requested") && log.contains("restored 1 saved workspace(s)"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_divider_moves_only_within_its_bounds() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "divide".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Split {
+        pane,
+        axis: Axis::Horizontal,
+    }));
+    let split = split_id(&mut client);
+    assert_eq!(split_ratio(&mut client), spooky_core::EVEN_SPLIT);
+
+    ok(client.request(Request::SetSplitRatio { split, ratio: 250 }));
+    assert_eq!(split_ratio(&mut client), 250);
+    for ratio in [0, 99, 901, 1000] {
+        let response = client.request(Request::SetSplitRatio { split, ratio });
+        assert!(
+            matches!(response, Response::Error(_)),
+            "{ratio}: {response:?}"
+        );
+    }
+    let unknown = client.request(Request::SetSplitRatio {
+        split: 9999,
+        ratio: 500,
+    });
+    assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
+    assert_eq!(split_ratio(&mut client), 250);
+}
+
+#[test]
+fn osc_52_writes_wait_for_the_client_to_fetch_them() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "clip".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    assert_eq!(client.snapshot().panes[0].clipboard_seq, 0);
+
+    // "hello" in base64, then a second write that replaces it.
+    emit(&mut client, pane, "\\033]52;c;aGVsbG8=\\007");
+    wait_for(|| client.snapshot().panes[0].clipboard_seq == 1);
+    match client.request(Request::Clipboard { pane }) {
+        Response::Clipboard { seq, text } => assert_eq!((seq, text.as_str()), (1, "hello")),
+        other => panic!("expected clipboard text, got {other:?}"),
+    }
+    emit(&mut client, pane, "\\033]52;c;d29ybGQ=\\007");
+    wait_for(|| client.snapshot().panes[0].clipboard_seq == 2);
+    match client.request(Request::Clipboard { pane }) {
+        Response::Clipboard { seq, text } => assert_eq!((seq, text.as_str()), (2, "world")),
+        other => panic!("expected clipboard text, got {other:?}"),
+    }
+}
+
+#[test]
+fn titles_links_blinking_and_focus_reporting_reach_the_client() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "modes".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    assert_eq!(client.snapshot().panes[0].title, "Terminal");
+
+    emit(&mut client, pane, "\\033]0;  my build \\007");
+    wait_for(|| client.snapshot().panes[0].title == "my build");
+
+    // A hyperlink applies to the text between its two OSC 8 sequences only.
+    emit(
+        &mut client,
+        pane,
+        "\\033[2J\\033[H\\033]8;;https://example.com/a\\033\\\\link\\033]8;;\\033\\\\ plain",
+    );
+    wait_for(|| {
+        let p = &client.snapshot().panes[0];
+        has_cell(p, "l", |run| {
+            run.link.as_deref() == Some("https://example.com/a")
+        }) && has_cell(p, "p", |run| run.link.is_none())
+    });
+
+    // DECSCUSR 1 asks for a blinking block, 2 for a steady one.
+    assert!(!client.snapshot().panes[0].cursor.blinking);
+    emit(&mut client, pane, "\\033[1 q");
+    wait_for(|| client.snapshot().panes[0].cursor.blinking);
+    emit(&mut client, pane, "\\033[2 q");
+    wait_for(|| !client.snapshot().panes[0].cursor.blinking);
+
+    assert!(!client.snapshot().panes[0].focus_reporting);
+    emit(&mut client, pane, "\\033[?1004h");
+    wait_for(|| client.snapshot().panes[0].focus_reporting);
+    emit(&mut client, pane, "\\033[?1004l");
+    wait_for(|| !client.snapshot().panes[0].focus_reporting);
+}
+
+#[test]
+fn search_walks_matches_through_the_scrollback_and_scrolls_to_them() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "search".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    // The command line is echoed once before echo is switched off, so it is
+    // written such that only the program's output contains "hit-".
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"stty -echo; p=hi; for i in 1 2 3; do echo ${p}t-$i; seq 1 40; done; echo done-marker\n"
+            .to_vec(),
+    }));
+    wait_for(|| shows_line(&mut client, "done-marker"));
+    assert_eq!(client.snapshot().panes[0].scrolled, 0);
+
+    let find = |client: &mut Connection, query: &str, direction| {
+        client.request(Request::Find {
+            pane,
+            query: query.into(),
+            direction,
+        })
+    };
+    // A fresh backward search starts at the bottom of the screen: hit-3 is the
+    // nearest match above it, out of view, so the viewport moves to it.
+    match find(&mut client, "HIT-", FindDirection::Previous) {
+        Response::Found { current, total } => assert_eq!((current, total), (3, 3)),
+        other => panic!("expected a match, got {other:?}"),
+    }
+    let shown = client.snapshot();
+    let view = &shown.panes[0];
+    assert!(view.scrolled > 0 && view.history >= view.scrolled);
+    let current: Vec<_> = view.highlights.iter().filter(|h| h.current).collect();
+    assert_eq!(current.len(), 1, "{:?}", view.highlights);
+    assert_eq!(view.row_text(current[0].row).trim_end(), "hit-3");
+
+    // Repeating continues from that match and wraps around in both directions.
+    match find(&mut client, "HIT-", FindDirection::Next) {
+        Response::Found { current, total } => assert_eq!((current, total), (1, 3)),
+        other => panic!("expected a match, got {other:?}"),
+    }
+    let shown = client.snapshot();
+    let current: Vec<_> = shown.panes[0]
+        .highlights
+        .iter()
+        .filter(|h| h.current)
+        .collect();
+    assert_eq!(shown.panes[0].row_text(current[0].row).trim_end(), "hit-1");
+    match find(&mut client, "HIT-", FindDirection::Previous) {
+        Response::Found { current, .. } => assert_eq!(current, 3),
+        other => panic!("expected a match, got {other:?}"),
+    }
+
+    assert!(matches!(
+        find(&mut client, "absent text", FindDirection::Next),
+        Response::NotFound
+    ));
+    // An empty query clears the search and its highlights.
+    ok(find(&mut client, "", FindDirection::Next));
+    assert!(client.snapshot().panes[0].highlights.is_empty());
+}
+
+#[test]
+fn new_panes_start_at_the_size_of_the_window_sized_pane() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "size".into(),
+        cwd: Some("/".into()),
+    }));
+    let first = client.snapshot();
+    assert_eq!((first.panes[0].cols, first.panes[0].rows), (80, 24));
+    ok(client.request(Request::Resize {
+        pane: first.panes[0].id,
+        cols: 132,
+        rows: 41,
+    }));
+    let workspace = first.workspaces[0].id;
+    ok(client.request(Request::CreateTab {
+        workspace,
+        title: "next".into(),
+    }));
+    ok(client.request(Request::CreateWorkspace {
+        name: "other".into(),
+        cwd: Some("/".into()),
+    }));
+    let after = client.snapshot();
+    assert!(
+        after
+            .panes
+            .iter()
+            .all(|pane| (pane.cols, pane.rows) == (132, 41)),
+        "{:?}",
+        after
+            .panes
+            .iter()
+            .map(|p| (p.cols, p.rows))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_scrollback_limit_comes_from_the_server_settings() {
+    let config = std::env::temp_dir().join(format!("spooky-config-{}", std::process::id()));
+    fs::create_dir_all(config.join("spooky")).expect("config directory");
+    fs::write(config.join("spooky/server.toml"), "scrollback_lines = 50\n").expect("server.toml");
+    let server = Server::start_with(|command| {
+        command.env("XDG_CONFIG_HOME", &config);
+    });
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "history".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"seq 1 500; echo end-marker\n".to_vec(),
+    }));
+    wait_for(|| shows_line(&mut client, "end-marker"));
+    assert_eq!(client.snapshot().panes[0].history, 50);
+    fs::remove_dir_all(config).expect("cleanup");
 }

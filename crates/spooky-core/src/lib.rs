@@ -9,11 +9,17 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Maximum encoded request or response, including its newline delimiter.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
 pub const DEFAULT_BACKGROUND: [u8; 3] = [34, 37, 46];
+/// Share of a split given to its first side when the split is created, in thousandths.
+pub const EVEN_SPLIT: u16 = 500;
+/// Smallest share either side of a split may keep, in thousandths.
+pub const MIN_SPLIT_SHARE: u16 = 100;
+/// Title of a terminal whose program has not set one.
+pub const DEFAULT_TITLE: &str = "Terminal";
 
 /// Operations on the server-owned workspace tree and terminal state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +50,18 @@ pub enum Request {
         workspace: u64,
         /// New tab's display label.
         title: String,
+    },
+    /// Change a tab's display label.
+    RenameTab {
+        /// Tab identity.
+        tab: u64,
+        /// New display label.
+        title: String,
+    },
+    /// Terminate every pane of a tab and remove it; closing a workspace's last tab removes the workspace.
+    CloseTab {
+        /// Tab to terminate.
+        tab: u64,
     },
     /// Replace a pane leaf with a split containing it and a new shell.
     Split {
@@ -85,6 +103,35 @@ pub enum Request {
         /// Workspace to terminate.
         workspace: u64,
     },
+    /// Move a split divider.
+    SetSplitRatio {
+        /// Split identity from the layout.
+        split: u64,
+        /// Share of the first side in thousandths, within
+        /// [`MIN_SPLIT_SHARE`] and `1000 - MIN_SPLIT_SHARE`.
+        ratio: u16,
+    },
+    /// Search a pane's whole scrollback and move its viewport to the match. A
+    /// new `query` starts at the viewport; repeating it continues from the last
+    /// match, wrapping around. An empty query clears the search.
+    Find {
+        /// Pane to search.
+        pane: u64,
+        /// Text to find, ignoring case.
+        query: String,
+        /// Search order.
+        direction: FindDirection,
+    },
+    /// Read the latest text the pane's application stored with OSC 52.
+    Clipboard {
+        /// Pane whose clipboard write to read.
+        pane: u64,
+    },
+    /// Identify the server and count the shells it holds.
+    Status,
+    /// Stop the server and end every shell. The workspaces are saved and are
+    /// restored, with new shells, by the next server start.
+    Shutdown,
     /// Query protocol compatibility without mutating sessions.
     Ping,
 }
@@ -108,6 +155,68 @@ pub enum Response {
         /// Server wire version.
         version: u32,
     },
+    /// Outcome of [`Request::Find`] when something matched.
+    Found {
+        /// One-based position of the match the viewport moved to.
+        current: u32,
+        /// Matches in the whole scrollback.
+        total: u32,
+    },
+    /// [`Request::Find`] matched nothing.
+    NotFound,
+    /// Text stored by OSC 52.
+    Clipboard {
+        /// The write this is; compare with [`Pane::clipboard_seq`].
+        seq: u64,
+        /// Decoded text, at most [`MAX_CLIPBOARD_BYTES`].
+        text: String,
+    },
+    /// Server identity and load.
+    Status(ServerStatus),
+}
+
+/// Longest OSC 52 write the server keeps, in bytes.
+pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
+/// Search order for [`Request::Find`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FindDirection {
+    /// Toward newer output.
+    Next,
+    /// Toward older output.
+    Previous,
+}
+
+/// What `spooky-server status` and `stop` report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerStatus {
+    /// Process identity.
+    pub pid: u32,
+    /// Wire version the server speaks.
+    pub version: u32,
+    /// Seconds since the server started.
+    pub uptime_secs: u64,
+    /// Workspaces held.
+    pub workspaces: u32,
+    /// Tabs held.
+    pub tabs: u32,
+    /// Shells held, running or exited.
+    pub panes: u32,
+    /// Shells still running.
+    pub running: u32,
+}
+
+/// A search match inside the viewport.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Highlight {
+    /// Viewport row.
+    pub row: u16,
+    /// First matching column.
+    pub start: u16,
+    /// Last matching column, inclusive.
+    pub end: u16,
+    /// Whether this is the match [`Request::Find`] last moved to.
+    pub current: bool,
 }
 
 /// Divider orientation, independent of pixel dimensions.
@@ -124,10 +233,14 @@ pub enum Axis {
 pub enum Layout {
     /// One terminal pane.
     Pane(u64),
-    /// Two equally sized sub-layouts separated by a divider.
+    /// Two sub-layouts separated by a divider.
     Split {
+        /// Server-scoped identity, used to move the divider.
+        id: u64,
         /// Divider orientation.
         axis: Axis,
+        /// Share of the first side in thousandths.
+        ratio: u16,
         /// Top or left subtree.
         first: Box<Layout>,
         /// Bottom or right subtree.
@@ -153,6 +266,28 @@ impl Layout {
             Self::Split { first, second, .. } => first.contains(pane) || second.contains(pane),
         }
     }
+
+    /// Give the split `split` its first side `ratio` thousandths of the space.
+    /// Returns false when the layout holds no such split.
+    pub fn set_ratio(&mut self, split: u64, ratio: u16) -> bool {
+        match self {
+            Self::Pane(_) => false,
+            Self::Split {
+                id,
+                ratio: current,
+                first,
+                second,
+                ..
+            } => {
+                if *id == split {
+                    *current = ratio;
+                    true
+                } else {
+                    first.set_ratio(split, ratio) || second.set_ratio(split, ratio)
+                }
+            }
+        }
+    }
 }
 
 /// A project-level group of terminal tabs.
@@ -175,6 +310,10 @@ pub struct Tab {
     pub id: u64,
     /// Display label.
     pub title: String,
+    /// Whether the user named the tab. An unnamed tab is labelled with its
+    /// terminal's title.
+    #[serde(default)]
+    pub renamed: bool,
     /// Authoritative split tree.
     pub layout: Layout,
 }
@@ -243,6 +382,26 @@ pub struct Pane {
     pub bracketed_paste: bool,
     /// Whether navigation uses application cursor escape sequences.
     pub application_cursor: bool,
+    /// Mouse events the application asked to receive. With [`MouseTracking::Off`]
+    /// the mouse belongs to the terminal (selection, scrollback).
+    pub mouse_tracking: MouseTracking,
+    /// Byte format of mouse reports for this application.
+    pub mouse_encoding: MouseEncoding,
+    /// Wheel movement should be sent as arrow keys: the application is on the
+    /// alternate screen and left alternate scroll (DECSET 1007) enabled.
+    pub alternate_scroll: bool,
+    /// Scrollback lines above the viewport.
+    pub history: u32,
+    /// Lines the viewport is scrolled up from live output; zero at the bottom.
+    pub scrolled: u32,
+    /// Whether the application wants focus in and out reports (DECSET 1004).
+    pub focus_reporting: bool,
+    /// Number of OSC 52 clipboard writes so far; fetch the text with
+    /// [`Request::Clipboard`] when it grows.
+    pub clipboard_seq: u64,
+    /// Search matches inside the viewport.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<Highlight>,
 }
 
 impl Pane {
@@ -259,6 +418,14 @@ impl Pane {
             exited,
             bracketed_paste,
             application_cursor,
+            mouse_tracking,
+            mouse_encoding,
+            alternate_scroll,
+            history,
+            scrolled,
+            focus_reporting,
+            clipboard_seq,
+            highlights,
             ..
         } = update;
         self.title = title;
@@ -268,6 +435,14 @@ impl Pane {
         self.exited = exited;
         self.bracketed_paste = bracketed_paste;
         self.application_cursor = application_cursor;
+        self.mouse_tracking = mouse_tracking;
+        self.mouse_encoding = mouse_encoding;
+        self.alternate_scroll = alternate_scroll;
+        self.history = history;
+        self.scrolled = scrolled;
+        self.focus_reporting = focus_reporting;
+        self.clipboard_seq = clipboard_seq;
+        self.highlights = highlights;
         self.set_lines(lines);
     }
 
@@ -356,10 +531,17 @@ pub struct Run {
     /// Underline styling.
     #[serde(default, skip_serializing_if = "is_false")]
     pub underline: bool,
+    /// Strikethrough styling.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strikethrough: bool,
     /// Zero for one cell per scalar value; otherwise `text` is a single cell
     /// occupying this many columns (1 with combining characters, 2 when wide).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub width: u8,
+    /// OSC 8 hyperlink target the text carries. Untrusted: the application
+    /// chose it, and it may differ from what the text says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 impl Run {
@@ -428,11 +610,50 @@ pub struct Cursor {
     pub col: u16,
     /// False when hidden by the application or outside the viewport.
     pub visible: bool,
+    /// Shape requested by the application.
+    pub shape: CursorShape,
+    /// Whether the application asked for a blinking cursor.
+    pub blinking: bool,
+}
+
+/// Which mouse events an application asked the terminal to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseTracking {
+    /// No reporting.
+    Off,
+    /// Button presses and releases (DECSET 1000).
+    Clicks,
+    /// Clicks plus motion while a button is held (DECSET 1002).
+    Drag,
+    /// Clicks plus all motion (DECSET 1003).
+    Motion,
+}
+
+/// Byte format of mouse reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseEncoding {
+    /// Legacy `CSI M` with one byte per value; positions past column 222 cannot be expressed.
+    Normal,
+    /// Legacy `CSI M` with UTF-8 coded values (DECSET 1005).
+    Utf8,
+    /// `CSI <` decimal reports with distinct release (DECSET 1006).
+    Sgr,
+}
+
+/// Cursor shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CursorShape {
+    /// Fills the cell.
+    Block,
+    /// A bar under the cell.
+    Underline,
+    /// A bar at the left edge of the cell.
+    Beam,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, Line, Pane, Run};
+    use super::{Cursor, CursorShape, Line, MouseEncoding, MouseTracking, Pane, Run};
 
     fn run(col: u16, text: &str, width: u8) -> Run {
         Run {
@@ -443,7 +664,9 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             width,
+            link: None,
         }
     }
 
@@ -458,10 +681,20 @@ mod tests {
                 row: 0,
                 col: 0,
                 visible: true,
+                shape: CursorShape::Beam,
+                blinking: false,
             },
             exited: false,
             bracketed_paste: false,
             application_cursor: false,
+            mouse_tracking: MouseTracking::Off,
+            mouse_encoding: MouseEncoding::Normal,
+            alternate_scroll: false,
+            history: 0,
+            scrolled: 0,
+            focus_reporting: false,
+            clipboard_seq: 0,
+            highlights: Vec::new(),
         }
     }
 

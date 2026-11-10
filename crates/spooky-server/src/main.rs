@@ -1,18 +1,34 @@
 //! Persistent Unix PTY sessions and the SSH stdio bridge.
 
 #[cfg(unix)]
+#[macro_use]
+mod log;
+#[cfg(unix)]
+mod persist;
+#[cfg(unix)]
+mod search;
+
+#[cfg(unix)]
 mod unix {
+    use crate::{
+        log,
+        persist::{self, Saved},
+        search,
+    };
     use alacritty_terminal::{
         event::{Event, EventListener, WindowSize},
         grid::{Dimensions, Scroll},
         term::{Config, Term, TermMode, cell::Flags, point_to_viewport},
-        vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb},
+        vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb},
     };
-    use anyhow::{Context, Result, anyhow, bail};
+    use anyhow::{Context, Result, anyhow, bail, ensure};
     use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+    use serde::Deserialize;
     use spooky_core::{
-        Cursor, Layout, Line, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Pane as PaneSnapshot, Request,
-        Response, Run, Snapshot, Tab, Workspace,
+        Cursor, CursorShape as WireCursorShape, EVEN_SPLIT, FindDirection, Highlight, Layout, Line,
+        MAX_CLIPBOARD_BYTES, MAX_MESSAGE_BYTES, MIN_SPLIT_SHARE, MouseEncoding, MouseTracking,
+        PROTOCOL_VERSION, Pane as PaneSnapshot, Request, Response, Run, ServerStatus, Snapshot,
+        Tab, Workspace,
     };
     use std::{
         collections::BTreeMap,
@@ -30,7 +46,7 @@ mod unix {
             mpsc::{self, SyncSender},
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     const INPUT_QUEUE: usize = 8;
@@ -89,28 +105,77 @@ mod unix {
         }
     }
 
+    /// The latest OSC 52 write by a pane's application and how many there have been.
+    #[derive(Default)]
+    struct Clipboard {
+        text: Mutex<String>,
+        seq: AtomicU64,
+    }
+
+    /// The search a pane is showing: what was asked for and where it stopped.
+    #[derive(Default)]
+    struct FindState {
+        query: String,
+        needle: Vec<char>,
+        current: Option<search::Match>,
+    }
+
+    /// Longest title kept, in characters.
+    const MAX_TITLE_CHARS: usize = 120;
+    /// Search matches reported for one viewport.
+    const MAX_HIGHLIGHTS: usize = 1000;
+
+    /// A terminal-supplied title as safe display text. Titles come from whatever
+    /// runs in the pane, including programs on remote hosts.
+    fn clean_title(title: &str) -> String {
+        let cleaned: String = title
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_TITLE_CHARS)
+            .collect();
+        let cleaned = cleaned.trim();
+        if cleaned.is_empty() {
+            spooky_core::DEFAULT_TITLE.into()
+        } else {
+            cleaned.to_owned()
+        }
+    }
+
     #[derive(Clone)]
     struct Listener {
         pending: Arc<Mutex<Vec<Event>>>,
         title: Arc<Mutex<String>>,
+        clipboard: Arc<Clipboard>,
         revision: Arc<AtomicU64>,
         changes: Arc<Changes>,
+    }
+    impl Listener {
+        fn set_title(&self, title: String) {
+            if let Ok(mut value) = self.title.lock()
+                && *value != title
+            {
+                *value = title;
+                self.changes.advance(&self.revision);
+            }
+        }
+        fn store_clipboard(&self, text: String) {
+            if text.len() > MAX_CLIPBOARD_BYTES {
+                info!("ignored an OSC 52 write of {} bytes", text.len());
+                return;
+            }
+            if let Ok(mut held) = self.clipboard.text.lock() {
+                *held = text;
+                self.clipboard.seq.fetch_add(1, Ordering::AcqRel);
+                self.changes.advance(&self.revision);
+            }
+        }
     }
     impl EventListener for Listener {
         fn send_event(&self, event: Event) {
             match event {
-                Event::Title(title) => {
-                    if let Ok(mut value) = self.title.lock() {
-                        *value = title;
-                        self.changes.advance(&self.revision);
-                    }
-                }
-                Event::ResetTitle => {
-                    if let Ok(mut value) = self.title.lock() {
-                        *value = "Terminal".into();
-                        self.changes.advance(&self.revision);
-                    }
-                }
+                Event::Title(title) => self.set_title(clean_title(&title)),
+                Event::ResetTitle => self.set_title(spooky_core::DEFAULT_TITLE.into()),
+                Event::ClipboardStore(_, text) => self.store_clipboard(text),
                 event @ (Event::PtyWrite(_)
                 | Event::TextAreaSizeRequest(_)
                 | Event::ColorRequest(_, _)
@@ -128,6 +193,7 @@ mod unix {
         id: u64,
         terminal: Arc<Mutex<Term<Listener>>>,
         title: Arc<Mutex<String>>,
+        clipboard: Arc<Clipboard>,
         dimensions: Arc<AtomicU32>,
         exited: Arc<AtomicBool>,
         master: Mutex<Box<dyn MasterPty + Send>>,
@@ -136,18 +202,21 @@ mod unix {
         revision: Arc<AtomicU64>,
         viewport: Mutex<RowCache>,
         changes: Arc<Changes>,
+        find: Mutex<FindState>,
     }
     impl Drop for Pane {
         fn drop(&mut self) {
-            if !self.exited.load(Ordering::Acquire)
-                && let Ok(killer) = self.killer.get_mut()
-            {
-                let _ = killer.kill();
-            }
+            self.terminate();
         }
     }
     impl Pane {
-        fn spawn(id: u64, cwd: &Path, size: Size, changes: Arc<Changes>) -> Result<Arc<Self>> {
+        fn spawn(
+            id: u64,
+            cwd: &Path,
+            size: Size,
+            changes: Arc<Changes>,
+            scrollback: usize,
+        ) -> Result<Arc<Self>> {
             let revision = Arc::new(AtomicU64::new(0));
             let pair = native_pty_system().openpty(size.pty())?;
             let mut reader = pair.master.try_clone_reader()?;
@@ -160,7 +229,8 @@ mod unix {
             drop(pair.slave);
             let killer = child.clone_killer();
             let (writer, rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE);
-            let title = Arc::new(Mutex::new("Terminal".to_string()));
+            let title = Arc::new(Mutex::new(spooky_core::DEFAULT_TITLE.to_string()));
+            let clipboard = Arc::new(Clipboard::default());
             let dimensions = Arc::new(AtomicU32::new(
                 (u32::from(size.rows) << 16) | u32::from(size.cols),
             ));
@@ -168,15 +238,21 @@ mod unix {
             let listener = Listener {
                 pending: pending.clone(),
                 title: title.clone(),
+                clipboard: clipboard.clone(),
                 revision: revision.clone(),
                 changes: changes.clone(),
             };
-            let terminal = Arc::new(Mutex::new(Term::new(Config::default(), &size, listener)));
+            let terminal = Arc::new(Mutex::new(Term::new(
+                terminal_config(scrollback),
+                &size,
+                listener,
+            )));
             let exited = Arc::new(AtomicBool::new(false));
             let pane = Arc::new(Self {
                 id,
                 terminal: terminal.clone(),
                 title,
+                clipboard,
                 dimensions: dimensions.clone(),
                 exited: exited.clone(),
                 master: Mutex::new(pair.master),
@@ -185,6 +261,7 @@ mod unix {
                 revision: revision.clone(),
                 changes: changes.clone(),
                 viewport: Mutex::new(RowCache::default()),
+                find: Mutex::new(FindState::default()),
             });
             thread::spawn(move || {
                 while let Ok(bytes) = rx.recv() {
@@ -301,6 +378,9 @@ mod unix {
                 };
                 let mut fg = color(cell.fg, content.colors);
                 let mut bg = color(cell.bg, content.colors);
+                if cell.flags.contains(Flags::DIM) {
+                    fg = fg.map(|channel| (u16::from(channel) * 2 / 3) as u8);
+                }
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -314,6 +394,7 @@ mod unix {
                 {
                     text.extend(chars);
                 }
+                let link = cell.hyperlink();
                 push_cell(
                     line,
                     point.column.0 as u16,
@@ -324,8 +405,10 @@ mod unix {
                         bold: cell.flags.contains(Flags::BOLD),
                         italic: cell.flags.contains(Flags::ITALIC),
                         underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
                     },
                     cell.flags.contains(Flags::WIDE_CHAR),
+                    link.as_ref().map(|link| link.uri()),
                 );
             }
             // Content and its revision bump are committed together under the
@@ -352,12 +435,19 @@ mod unix {
                     .min(usize::from(size.cols - 1)) as u16,
                 visible: content.cursor.shape != CursorShape::Hidden
                     && cursor_point.is_some_and(|p| p.line < usize::from(size.rows)),
+                shape: match content.cursor.shape {
+                    CursorShape::Underline => WireCursorShape::Underline,
+                    CursorShape::Beam => WireCursorShape::Beam,
+                    _ => WireCursorShape::Block,
+                },
+                blinking: term.cursor_style().blinking,
             };
             let title = self
                 .title
                 .lock()
                 .map_err(|_| anyhow!("title state poisoned"))?
                 .clone();
+            let highlights = self.highlights(&term, size)?;
             Ok(PaneSnapshot {
                 id: self.id,
                 title,
@@ -368,6 +458,16 @@ mod unix {
                 exited: self.exited.load(Ordering::Acquire),
                 bracketed_paste: content.mode.contains(TermMode::BRACKETED_PASTE),
                 application_cursor: content.mode.contains(TermMode::APP_CURSOR),
+                mouse_tracking: mouse_tracking(content.mode),
+                mouse_encoding: mouse_encoding(content.mode),
+                alternate_scroll: content
+                    .mode
+                    .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL),
+                history: term.grid().history_size() as u32,
+                scrolled: content.display_offset as u32,
+                focus_reporting: content.mode.contains(TermMode::FOCUS_IN_OUT),
+                clipboard_seq: self.clipboard.seq.load(Ordering::Acquire),
+                highlights,
             })
         }
         fn resize(&self, size: Size) -> Result<()> {
@@ -400,6 +500,89 @@ mod unix {
                 self.changes.advance(&self.revision);
             }
             Ok(())
+        }
+        /// Ends the shell if it is still running.
+        fn terminate(&self) {
+            if !self.exited.load(Ordering::Acquire)
+                && let Ok(mut killer) = self.killer.lock()
+            {
+                let _ = killer.kill();
+            }
+        }
+        /// Search matches inside the viewport, for the pane's current search.
+        fn highlights(&self, term: &Term<Listener>, size: Size) -> Result<Vec<Highlight>> {
+            let state = self
+                .find
+                .lock()
+                .map_err(|_| anyhow!("search state poisoned"))?;
+            if state.needle.is_empty() {
+                return Ok(Vec::new());
+            }
+            let top = -(term.grid().display_offset() as i32);
+            let bottom = top + i32::from(size.rows) - 1;
+            Ok(search::matches_in(term, &state.needle, top, bottom)
+                .into_iter()
+                .take(MAX_HIGHLIGHTS)
+                .map(|found| Highlight {
+                    row: (found.line - top) as u16,
+                    start: found.start,
+                    end: found.end,
+                    current: state.current == Some(found),
+                })
+                .collect())
+        }
+        /// Searches the whole scrollback and scrolls to the match. An empty
+        /// `query` clears the search.
+        fn find(&self, query: &str, direction: FindDirection) -> Result<Response> {
+            let mut term = self
+                .terminal
+                .lock()
+                .map_err(|_| anyhow!("terminal state poisoned"))?;
+            let mut state = self
+                .find
+                .lock()
+                .map_err(|_| anyhow!("search state poisoned"))?;
+            if query.is_empty() {
+                if !state.query.is_empty() {
+                    *state = FindState::default();
+                    self.changes.advance(&self.revision);
+                }
+                return Ok(Response::Ok);
+            }
+            let needle = search::needle(query);
+            let matches = search::all_matches(&term, &needle);
+            let rows = i32::from(self.size().rows);
+            let top = -(term.grid().display_offset() as i32);
+            let anchor = if state.query == query {
+                state.current
+            } else {
+                None
+            };
+            state.query = query.to_owned();
+            state.needle = needle;
+            let chosen = search::choose(
+                &matches,
+                anchor,
+                direction == FindDirection::Next,
+                top,
+                top + rows - 1,
+            );
+            state.current = chosen.map(|index| matches[index]);
+            if let Some(found) = state.current
+                && (found.line < top || found.line >= top + rows)
+            {
+                // Matches outside the viewport are brought to its middle.
+                let wanted = (rows / 2 - found.line).max(0);
+                term.scroll_display(Scroll::Delta(wanted - (-top)));
+            }
+            self.changes.advance(&self.revision);
+            Ok(match chosen {
+                Some(index) => Response::Found {
+                    current: index as u32 + 1,
+                    total: matches.len() as u32,
+                },
+                None => Response::NotFound,
+            })
         }
     }
 
@@ -441,19 +624,81 @@ mod unix {
         }
     }
 
+    /// Terminal settings. Shells that never request a cursor shape keep the
+    /// steady bar; applications may change it (DECSCUSR) and reset it to this.
+    fn terminal_config(scrollback: usize) -> Config {
+        Config {
+            scrolling_history: scrollback,
+            default_cursor_style: CursorStyle {
+                shape: CursorShape::Beam,
+                blinking: false,
+            },
+            ..Config::default()
+        }
+    }
+
+    /// The most detailed mouse reporting the application enabled.
+    fn mouse_tracking(mode: TermMode) -> MouseTracking {
+        if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseTracking::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseTracking::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseTracking::Clicks
+        } else {
+            MouseTracking::Off
+        }
+    }
+
+    fn mouse_encoding(mode: TermMode) -> MouseEncoding {
+        if mode.contains(TermMode::SGR_MOUSE) {
+            MouseEncoding::Sgr
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::Normal
+        }
+    }
+
     struct Style {
         fg: [u8; 3],
         bg: [u8; 3],
         bold: bool,
         italic: bool,
         underline: bool,
+        strikethrough: bool,
+    }
+
+    /// Hyperlink targets longer than this are dropped.
+    const MAX_LINK_BYTES: usize = 2048;
+
+    /// An OSC 8 target the client may be shown: nonempty, bounded, and free of
+    /// control characters. The application chose it, so it stays untrusted.
+    fn link_target(uri: Option<&str>) -> Option<&str> {
+        uri.filter(|uri| {
+            !uri.is_empty() && uri.len() <= MAX_LINK_BYTES && !uri.chars().any(char::is_control)
+        })
     }
 
     /// Appends one terminal cell to its row. Blank cells on the default background
-    /// are left implicit; neighbouring plain cells with the same style share a run.
-    /// A wide cell or one with combining characters is always a run of its own.
-    fn push_cell(line: &mut Line, col: u16, text: String, style: Style, wide: bool) {
-        if text == " " && style.bg == spooky_core::DEFAULT_BACKGROUND && !style.underline {
+    /// are left implicit; neighbouring plain cells with the same style and link
+    /// share a run. A wide cell or one with combining characters is always a run
+    /// of its own.
+    fn push_cell(
+        line: &mut Line,
+        col: u16,
+        text: String,
+        style: Style,
+        wide: bool,
+        link: Option<&str>,
+    ) {
+        let link = link_target(link);
+        if text == " "
+            && style.bg == spooky_core::DEFAULT_BACKGROUND
+            && !style.underline
+            && !style.strikethrough
+            && link.is_none()
+        {
             return;
         }
         let single = wide || text.chars().nth(1).is_some();
@@ -465,6 +710,8 @@ mod unix {
             && last.bold == style.bold
             && last.italic == style.italic
             && last.underline == style.underline
+            && last.strikethrough == style.strikethrough
+            && last.link.as_deref() == link
             && last.col + last.columns() == col
         {
             last.text.push_str(&text);
@@ -478,7 +725,9 @@ mod unix {
             bold: style.bold,
             italic: style.italic,
             underline: style.underline,
+            strikethrough: style.strikethrough,
             width: if wide { 2 } else { u8::from(single) },
+            link: link.map(str::to_owned),
         });
     }
 
@@ -565,13 +814,116 @@ mod unix {
         workspaces: Vec<Workspace>,
         panes: BTreeMap<u64, Arc<Pane>>,
     }
+
+    /// Per-machine server settings, read from `spooky/server.toml` in the
+    /// configuration directory.
+    #[derive(Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Settings {
+        /// Scrollback lines kept per pane.
+        scrollback_lines: usize,
+    }
+    impl Default for Settings {
+        fn default() -> Self {
+            Self {
+                scrollback_lines: 10_000,
+            }
+        }
+    }
+    impl Settings {
+        const MAX_SCROLLBACK: usize = 1_000_000;
+
+        fn load() -> Result<Self> {
+            let Some(base) = env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            else {
+                return Ok(Self::default());
+            };
+            let path = base.join("spooky/server.toml");
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Self::default());
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("reading {}", path.display()));
+                }
+            };
+            let settings: Self =
+                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+            ensure!(
+                settings.scrollback_lines <= Self::MAX_SCROLLBACK,
+                "{}: scrollback_lines must be at most {}",
+                path.display(),
+                Self::MAX_SCROLLBACK
+            );
+            Ok(settings)
+        }
+    }
+
+    /// How long a burst of layout changes settles before it is written out.
+    const SAVE_DELAY: Duration = Duration::from_millis(300);
+
+    /// Wakes the thread that writes the saved workspaces.
+    #[derive(Default)]
+    struct Saver {
+        dirty: Mutex<bool>,
+        wake: Condvar,
+    }
+    impl Saver {
+        fn mark(&self) {
+            if let Ok(mut dirty) = self.dirty.lock() {
+                *dirty = true;
+                self.wake.notify_one();
+            }
+        }
+        /// Blocks until something was marked, then takes the mark. False once
+        /// the state is unusable.
+        fn take(&self) -> bool {
+            let Ok(mut dirty) = self.dirty.lock() else {
+                return false;
+            };
+            while !*dirty {
+                dirty = match self.wake.wait(dirty) {
+                    Ok(dirty) => dirty,
+                    Err(_) => return false,
+                };
+            }
+            *dirty = false;
+            true
+        }
+    }
+
+    /// The size of the largest pane, which is the window-sized one when nothing
+    /// is split, or `fallback` when no pane exists.
+    fn largest_pane(state: &State, fallback: Size) -> Size {
+        state
+            .panes
+            .values()
+            .map(|pane| pane.size())
+            .max_by_key(|size| u32::from(size.cols) * u32::from(size.rows))
+            .unwrap_or(fallback)
+    }
+
     struct Server {
         state: Mutex<State>,
         changes: Arc<Changes>,
         layout_revision: AtomicU64,
+        settings: Settings,
+        started: Instant,
+        /// Size for new panes while no pane exists to copy one from.
+        fallback_size: Size,
+        state_dir: PathBuf,
+        saver: Saver,
+        /// Serializes writers of the saved workspaces.
+        save_lock: Mutex<()>,
+        /// Set by `Shutdown`; the connection that asked stops the server once it
+        /// has been answered.
+        stop_requested: AtomicBool,
     }
     impl Server {
-        fn new() -> Self {
+        fn new(settings: Settings, state_dir: PathBuf, fallback_size: Size) -> Self {
             Self {
                 state: Mutex::new(State {
                     next_id: 1,
@@ -580,6 +932,13 @@ mod unix {
                 }),
                 changes: Arc::new(Changes::default()),
                 layout_revision: AtomicU64::new(0),
+                settings,
+                started: Instant::now(),
+                fallback_size,
+                state_dir,
+                saver: Saver::default(),
+                save_lock: Mutex::new(()),
+                stop_requested: AtomicBool::new(false),
             }
         }
         fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>> {
@@ -589,6 +948,7 @@ mod unix {
         }
         fn changed(&self) {
             self.changes.advance(&self.layout_revision);
+            self.saver.mark();
         }
         fn reserve_id(&self) -> Result<u64> {
             let mut state = self.lock()?;
@@ -602,6 +962,108 @@ mod unix {
                 .get(&id)
                 .cloned()
                 .context("pane not found")
+        }
+        /// Grid size for a pane that is not a split half.
+        fn pane_size(&self) -> Result<Size> {
+            Ok(largest_pane(&*self.lock()?, self.fallback_size))
+        }
+        fn spawn_pane(&self, id: u64, cwd: &Path, size: Size) -> Result<Arc<Pane>> {
+            Pane::spawn(
+                id,
+                cwd,
+                size,
+                self.changes.clone(),
+                self.settings.scrollback_lines,
+            )
+        }
+        fn status(&self) -> Result<ServerStatus> {
+            let state = self.lock()?;
+            Ok(ServerStatus {
+                pid: std::process::id(),
+                version: PROTOCOL_VERSION,
+                uptime_secs: self.started.elapsed().as_secs(),
+                workspaces: state.workspaces.len() as u32,
+                tabs: state.workspaces.iter().map(|w| w.tabs.len() as u32).sum(),
+                panes: state.panes.len() as u32,
+                running: state
+                    .panes
+                    .values()
+                    .filter(|pane| !pane.exited.load(Ordering::Acquire))
+                    .count() as u32,
+            })
+        }
+        /// Writes the workspaces so the next server can restore them.
+        fn save(&self) -> Result<()> {
+            let _serial = self
+                .save_lock
+                .lock()
+                .map_err(|_| anyhow!("save state poisoned"))?;
+            let (next_id, workspaces, size) = {
+                let state = self.lock()?;
+                (
+                    state.next_id,
+                    state.workspaces.clone(),
+                    largest_pane(&state, self.fallback_size),
+                )
+            };
+            persist::store(
+                &self.state_dir,
+                &Saved::new(next_id, workspaces).sized(size.cols, size.rows),
+            )
+        }
+        /// Rebuilds saved workspaces with fresh shells in their directories. A
+        /// tab whose shells cannot all be started is left out.
+        fn restore(&self, saved: Saved) -> Result<()> {
+            let (cols, rows) = saved.size();
+            let size = Size { cols, rows };
+            let mut state = self.lock()?;
+            state.next_id = saved.next_id;
+            for mut workspace in saved.workspaces {
+                let cwd = restore_cwd(&workspace.cwd);
+                workspace.cwd = cwd.to_string_lossy().into_owned();
+                let mut tabs = Vec::new();
+                for tab in std::mem::take(&mut workspace.tabs) {
+                    let mut ids = Vec::new();
+                    tab.layout.panes(&mut ids);
+                    let spawned = ids
+                        .into_iter()
+                        .map(|id| Ok((id, self.spawn_pane(id, &cwd, size)?)))
+                        .collect::<Result<Vec<_>>>();
+                    match spawned {
+                        Ok(panes) => {
+                            state.panes.extend(panes);
+                            tabs.push(tab);
+                        }
+                        Err(error) => info!(
+                            "left out saved tab {} of workspace {}: {error:#}",
+                            tab.id, workspace.id
+                        ),
+                    }
+                }
+                if !tabs.is_empty() {
+                    workspace.tabs = tabs;
+                    state.workspaces.push(workspace);
+                }
+            }
+            Ok(())
+        }
+        /// Saves the workspaces, ends every shell and exits.
+        fn stop(&self) -> ! {
+            if let Err(error) = self.save() {
+                info!("final save failed: {error:#}");
+            }
+            let panes = self
+                .lock()
+                .map(|mut state| std::mem::take(&mut state.panes))
+                .unwrap_or_default();
+            for pane in panes.values() {
+                pane.terminate();
+            }
+            if let Ok(path) = spooky_core::paths::socket_path() {
+                let _ = fs::remove_file(path);
+            }
+            info!("stopped");
+            std::process::exit(0)
         }
         fn dispatch(&self, request: Request) -> Response {
             match self.execute(request) {
@@ -654,8 +1116,8 @@ mod unix {
                     let workspace = self.reserve_id()?;
                     let tab = self.reserve_id()?;
                     let id = self.reserve_id()?;
-                    let pane =
-                        Pane::spawn(id, &cwd, Size { cols: 80, rows: 24 }, self.changes.clone())?;
+                    let size = self.pane_size()?;
+                    let pane = self.spawn_pane(id, &cwd, size)?;
                     let mut state = self.lock()?;
                     state.panes.insert(id, pane);
                     state.workspaces.push(Workspace {
@@ -664,7 +1126,8 @@ mod unix {
                         cwd: cwd.to_string_lossy().into_owned(),
                         tabs: vec![Tab {
                             id: tab,
-                            title: "Terminal".into(),
+                            title: spooky_core::DEFAULT_TITLE.into(),
+                            renamed: false,
                             layout: Layout::Pane(id),
                         }],
                     });
@@ -696,8 +1159,8 @@ mod unix {
                     };
                     let id = self.reserve_id()?;
                     let tab = self.reserve_id()?;
-                    let pane =
-                        Pane::spawn(id, &cwd, Size { cols: 80, rows: 24 }, self.changes.clone())?;
+                    let size = self.pane_size()?;
+                    let pane = self.spawn_pane(id, &cwd, size)?;
                     let mut state = self.lock()?;
                     let ws = state
                         .workspaces
@@ -707,10 +1170,54 @@ mod unix {
                     ws.tabs.push(Tab {
                         id: tab,
                         title,
+                        renamed: false,
                         layout: Layout::Pane(id),
                     });
                     state.panes.insert(id, pane);
                     self.changed();
+                }
+                Request::RenameTab { tab, title } => {
+                    validate_name(&title)?;
+                    let mut state = self.lock()?;
+                    let tab = state
+                        .workspaces
+                        .iter_mut()
+                        .flat_map(|w| &mut w.tabs)
+                        .find(|t| t.id == tab)
+                        .context("tab not found")?;
+                    tab.title = title;
+                    tab.renamed = true;
+                    self.changed();
+                }
+                Request::CloseTab { tab } => {
+                    let removed = {
+                        let mut state = self.lock()?;
+                        let wi = state
+                            .workspaces
+                            .iter()
+                            .position(|w| w.tabs.iter().any(|t| t.id == tab))
+                            .context("tab not found")?;
+                        let ws = &mut state.workspaces[wi];
+                        let ti = ws
+                            .tabs
+                            .iter()
+                            .position(|t| t.id == tab)
+                            .context("tab not found")?;
+                        let closed = ws.tabs.remove(ti);
+                        if ws.tabs.is_empty() {
+                            state.workspaces.remove(wi);
+                        }
+                        let mut ids = Vec::new();
+                        closed.layout.panes(&mut ids);
+                        let panes = ids
+                            .into_iter()
+                            .filter_map(|id| state.panes.remove(&id))
+                            .collect::<Vec<_>>();
+                        self.changed();
+                        panes
+                    };
+                    // Shells are terminated outside the lock.
+                    drop(removed);
                 }
                 Request::Split { pane, axis } => {
                     let (cwd, size) = {
@@ -724,7 +1231,8 @@ mod unix {
                         (PathBuf::from(&ws.cwd), p.size())
                     };
                     let id = self.reserve_id()?;
-                    let new_pane = Pane::spawn(id, &cwd, size, self.changes.clone())?;
+                    let split = self.reserve_id()?;
+                    let new_pane = self.spawn_pane(id, &cwd, size)?;
                     let mut state = self.lock()?;
                     let tab = state
                         .workspaces
@@ -736,7 +1244,9 @@ mod unix {
                         &mut tab.layout,
                         pane,
                         Layout::Split {
+                            id: split,
                             axis,
+                            ratio: EVEN_SPLIT,
                             first: Box::new(Layout::Pane(pane)),
                             second: Box::new(Layout::Pane(id)),
                         },
@@ -819,6 +1329,48 @@ mod unix {
                         panes
                     };
                     drop(removed);
+                }
+                Request::SetSplitRatio { split, ratio } => {
+                    if !(MIN_SPLIT_SHARE..=1000 - MIN_SPLIT_SHARE).contains(&ratio) {
+                        bail!("split ratio out of range");
+                    }
+                    let mut state = self.lock()?;
+                    let moved = state
+                        .workspaces
+                        .iter_mut()
+                        .flat_map(|w| &mut w.tabs)
+                        .any(|t| t.layout.set_ratio(split, ratio));
+                    if !moved {
+                        bail!("split not found");
+                    }
+                    self.changed();
+                }
+                Request::Find {
+                    pane,
+                    query,
+                    direction,
+                } => {
+                    if query.len() > 1024 {
+                        bail!("search text is too long");
+                    }
+                    return self.pane(pane)?.find(&query, direction);
+                }
+                Request::Clipboard { pane } => {
+                    let pane = self.pane(pane)?;
+                    let (seq, text) = {
+                        let held = pane
+                            .clipboard
+                            .text
+                            .lock()
+                            .map_err(|_| anyhow!("clipboard state poisoned"))?;
+                        (pane.clipboard.seq.load(Ordering::Acquire), held.clone())
+                    };
+                    return Ok(Response::Clipboard { seq, text });
+                }
+                Request::Status => return Ok(Response::Status(self.status()?)),
+                Request::Shutdown => {
+                    info!("shutdown requested");
+                    self.stop_requested.store(true, Ordering::Release);
                 }
             }
             Ok(Response::Ok)
@@ -921,23 +1473,68 @@ mod unix {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).context("checking socket path"),
         }
+        let state_dir = spooky_core::paths::state_dir().context("preparing the state directory")?;
+        log::init(&state_dir).context("opening the server log")?;
+        info!(
+            "starting server (protocol {PROTOCOL_VERSION}, pid {})",
+            std::process::id()
+        );
+        let settings = Settings::load().unwrap_or_else(|error| {
+            info!("using default settings: {error:#}");
+            Settings::default()
+        });
+        let saved = persist::load(&state_dir).unwrap_or_else(|error| {
+            info!("{error:#}");
+            None
+        });
+        let fallback = saved.as_ref().map_or(Size { cols: 80, rows: 24 }, |saved| {
+            let (cols, rows) = saved.size();
+            Size { cols, rows }
+        });
+        let server = Arc::new(Server::new(settings, state_dir, fallback));
+        if let Some(saved) = saved {
+            let count = saved.workspaces.len();
+            match server.restore(saved) {
+                Ok(()) => info!("restored {count} saved workspace(s)"),
+                Err(error) => info!("restoring saved workspaces failed: {error:#}"),
+            }
+        }
         let listener = UnixListener::bind(&path).context("binding server socket")?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        let server = Arc::new(Server::new());
+        let saver = server.clone();
+        thread::spawn(move || save_loop(&saver));
+        info!("listening on {}", path.display());
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let server = server.clone();
                     thread::spawn(move || {
                         if let Err(error) = handle_client(stream, server) {
-                            eprintln!("client: {error:#}");
+                            info!("client connection ended: {error:#}");
                         }
                     });
                 }
-                Err(error) => eprintln!("accept: {error}"),
+                Err(error) => info!("accept failed: {error}"),
             }
         }
         Ok(())
+    }
+    /// Writes the saved workspaces after each burst of layout changes.
+    fn save_loop(server: &Server) {
+        while server.saver.take() {
+            thread::sleep(SAVE_DELAY);
+            if let Err(error) = server.save() {
+                info!("saving workspaces failed: {error:#}");
+            }
+        }
+    }
+    /// The directory a restored workspace's shells start in: the saved one if it
+    /// still exists, otherwise the home directory.
+    fn restore_cwd(saved: &str) -> PathBuf {
+        validated_cwd(Some(saved))
+            .or_else(|_| validated_cwd(env::var("HOME").ok().as_deref()))
+            .or_else(|_| validated_cwd(None))
+            .unwrap_or_else(|_| PathBuf::from("/"))
     }
     fn handle_client(mut stream: UnixStream, server: Arc<Server>) -> Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -961,6 +1558,9 @@ mod unix {
                 Err(e) => Response::Error(format!("invalid request: {e}")),
             };
             write_response(&mut stream, &response)?;
+            if server.stop_requested.load(Ordering::Acquire) {
+                server.stop();
+            }
         }
     }
     fn write_response(output: &mut impl Write, response: &Response) -> Result<()> {
@@ -1009,11 +1609,111 @@ mod unix {
         }
         Ok(())
     }
+    /// The running local server, if any. Never starts one.
+    fn running_server() -> Result<Option<spooky_core::client::Client>> {
+        spooky_core::client::Client::attach_local().context(
+            "talking to the running server; one from an older Spooky cannot be asked to stop, end its process instead",
+        )
+    }
+    fn server_status(client: &mut spooky_core::client::Client) -> Result<ServerStatus> {
+        match client.request(&Request::Status)? {
+            Response::Status(status) => Ok(status),
+            Response::Error(message) => bail!("server refused: {message}"),
+            other => bail!("unexpected reply to status: {other:?}"),
+        }
+    }
+    fn status() -> Result<()> {
+        let Some(mut client) = running_server()? else {
+            println!("no Spooky server is running");
+            return Ok(());
+        };
+        let status = server_status(&mut client)?;
+        println!(
+            "Spooky server pid {}, protocol {}, up {}s: {} workspace(s), {} tab(s), {} shell(s) of which {} running",
+            status.pid,
+            status.version,
+            status.uptime_secs,
+            status.workspaces,
+            status.tabs,
+            status.panes,
+            status.running
+        );
+        Ok(())
+    }
+    /// Stops the local server. Refuses while shells are running unless `force`,
+    /// because stopping ends them.
+    fn stop(force: bool) -> Result<()> {
+        let Some(mut client) = running_server()? else {
+            println!("no Spooky server is running");
+            return Ok(());
+        };
+        let status = server_status(&mut client)?;
+        if status.running > 0 && !force {
+            bail!(
+                "{} shell(s) are running in {} workspace(s) and stopping the server ends them. \
+                 Run `spooky-server stop --force` to stop anyway; the workspaces come back, with \
+                 new shells, the next time a server starts",
+                status.running,
+                status.workspaces
+            );
+        }
+        match client.request(&Request::Shutdown)? {
+            Response::Ok => {}
+            Response::Error(message) => bail!("server refused to stop: {message}"),
+            other => bail!("unexpected reply to shutdown: {other:?}"),
+        }
+        for _ in 0..200 {
+            if matches!(spooky_core::client::Client::attach_local(), Ok(None)) {
+                println!("stopped the Spooky server (pid {})", status.pid);
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        bail!("the server acknowledged the request but is still running after 5 seconds")
+    }
     pub fn main() -> Result<()> {
-        match env::args().nth(1).as_deref().unwrap_or("serve") {
+        let mut args = env::args().skip(1);
+        match args.next().as_deref().unwrap_or("serve") {
             "serve" => serve(),
             "bridge" => bridge(),
-            mode => bail!("unknown server mode: {mode}"),
+            "status" => status(),
+            "stop" => match args.next().as_deref() {
+                None => stop(false),
+                Some("--force") => stop(true),
+                Some(other) => bail!("unknown option for stop: {other}"),
+            },
+            mode => bail!("unknown server mode: {mode} (expected serve, bridge, status or stop)"),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{MAX_LINK_BYTES, MAX_TITLE_CHARS, clean_title, link_target};
+
+        #[test]
+        fn a_title_is_plain_bounded_text_or_the_default() {
+            assert_eq!(
+                clean_title("  vim notes.md \u{7}\u{1b}[31m"),
+                "vim notes.md [31m"
+            );
+            assert_eq!(clean_title("\u{1b}\u{7}   "), "Terminal");
+            assert_eq!(clean_title(""), "Terminal");
+            let long = "é".repeat(MAX_TITLE_CHARS + 50);
+            assert_eq!(clean_title(&long).chars().count(), MAX_TITLE_CHARS);
+        }
+
+        #[test]
+        fn a_link_target_must_be_bounded_and_free_of_control_characters() {
+            assert_eq!(
+                link_target(Some("https://example.com/a?b=c")),
+                Some("https://example.com/a?b=c")
+            );
+            assert_eq!(link_target(None), None);
+            assert_eq!(link_target(Some("")), None);
+            assert_eq!(link_target(Some("https://exa\u{7}mple.com")), None);
+            assert_eq!(link_target(Some("https://example.com/\n")), None);
+            let long = format!("https://example.com/{}", "a".repeat(MAX_LINK_BYTES));
+            assert_eq!(link_target(Some(&long)), None);
         }
     }
 }

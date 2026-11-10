@@ -1,22 +1,51 @@
 //! Compact native workspace chrome; terminal state remains server-owned.
-use crate::{App, Confirm, Message, chrome::*, tailscale, terminal};
+use crate::{
+    App, Confirm, ContextTarget, Message,
+    chrome::*,
+    divider::{Divider, THICKNESS},
+    tailscale, terminal,
+};
 use iced::{
-    Alignment, Border, Color, Element, Length, Padding, Rectangle, Vector, mouse,
+    Alignment, Border, Color, Element, Length, Padding, Point, Rectangle, Vector, mouse,
     widget::{
         Space, button, canvas, column, container, float, mouse_area, opaque, row, scrollable,
         stack, text, text_input, tooltip,
     },
 };
-use spooky_core::{Axis, Layout};
+use spooky_core::{Axis, FindDirection, Layout};
 use std::time::Duration;
 
+/// Padding around each terminal pane. The divider geometry accounts for it.
+pub(crate) const PANE_PADDING_X: f32 = 9.0;
+pub(crate) const PANE_PADDING_Y: f32 = 7.0;
 const SIDEBAR_WIDTH: f32 = 232.0;
 const HEADER_HEIGHT: f32 = 36.0;
+/// Width of a tab's close button plus the gap before it: a tab that is not selected
+/// keeps this much room so selecting tabs never moves or resizes the others.
+const TAB_CLOSE_SLOT: f32 = 23.0;
 
-// Capture the click position directly; mouse motion must not publish app updates.
-struct WorkspaceContext(u64);
+/// What the split buttons say; the shortcut differs by platform.
+const SPLIT_COLUMNS: &str = if cfg!(target_os = "macos") {
+    "Split columns (⌘D)"
+} else {
+    "Split columns (Ctrl+Shift+D)"
+};
+const SPLIT_ROWS: &str = if cfg!(target_os = "macos") {
+    "Split rows (⇧⌘D)"
+} else {
+    "Split rows (Ctrl+Shift+Alt+D)"
+};
+const NEW_TAB: &str = if cfg!(target_os = "macos") {
+    "New tab (⌘T)"
+} else {
+    "New tab (Ctrl+Shift+T)"
+};
 
-impl canvas::Program<Message> for WorkspaceContext {
+/// A transparent canvas that turns a right-click into a message carrying the
+/// click position. Mouse motion publishes nothing, so it costs no updates.
+struct RightClick<F>(F);
+
+impl<F: Fn(Point) -> Message> canvas::Program<Message> for RightClick<F> {
     type State = ();
 
     fn update(
@@ -31,10 +60,7 @@ impl canvas::Program<Message> for WorkspaceContext {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
         ) && cursor.is_over(bounds)
         {
-            Some(
-                canvas::Action::publish(Message::WorkspaceMenu(self.0, cursor.position()?))
-                    .and_capture(),
-            )
+            Some(canvas::Action::publish((self.0)(cursor.position()?)).and_capture())
         } else {
             None
         }
@@ -139,23 +165,62 @@ impl App {
         if let Some((workspace, _)) = self.active() {
             for tab in &workspace.tabs {
                 let selected = self.tab == Some(tab.id);
+                let id = tab.id;
+                let label = button(
+                    row![
+                        icon(Icon::Terminal, if selected { TEXT } else { MUTED }),
+                        text(self.tab_label(tab)).size(11)
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .padding(Padding {
+                    top: 5.0,
+                    right: if selected { 9.0 } else { 9.0 + TAB_CLOSE_SLOT },
+                    bottom: 5.0,
+                    left: 9.0,
+                })
+                .style(move |t, s| selectable(selected, t, s))
+                .on_press(Message::Tab(id));
+                // Only the selected tab shows its close button; a middle click
+                // closes any tab and a right-click opens its menu. Closing always
+                // confirms first.
+                let entry = if selected {
+                    row![
+                        label,
+                        action(Icon::Close, "Close tab", Message::AskCloseTab(id))
+                    ]
+                    .spacing(1)
+                    .align_y(Alignment::Center)
+                } else {
+                    row![label].align_y(Alignment::Center)
+                };
                 tabs = tabs.push(
-                    button(
-                        row![
-                            icon(Icon::Terminal, if selected { TEXT } else { MUTED }),
-                            text(&tab.title).size(11)
-                        ]
-                        .spacing(6)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([5, 9])
-                    .style(move |t, s| selectable(selected, t, s))
-                    .on_press(Message::Tab(tab.id)),
+                    mouse_area(stack![
+                        entry,
+                        canvas(RightClick(move |at| Message::ContextMenu(
+                            ContextTarget::Tab(id),
+                            at
+                        )))
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    ])
+                    .on_middle_press(Message::AskCloseTab(id)),
                 );
             }
         }
         let controls = row![
-            action(Icon::Plus, "New tab", Message::NewTab),
+            action(
+                Icon::SplitColumns,
+                SPLIT_COLUMNS,
+                Message::Split(Axis::Vertical)
+            ),
+            action(
+                Icon::SplitRows,
+                SPLIT_ROWS,
+                Message::Split(Axis::Horizontal)
+            ),
+            action(Icon::Plus, NEW_TAB, Message::NewTab),
             button(
                 row![icon(Icon::Paperclip, MUTED), text("Attach").size(10)]
                     .spacing(5)
@@ -247,6 +312,7 @@ impl App {
             ];
             for workspace in &snapshot.workspaces {
                 let selected = self.workspace == Some(workspace.id);
+                let workspace_id = workspace.id;
                 let color = colors[workspace.id as usize % colors.len()];
                 let badge = container(icon(Icon::Folder, color))
                     .padding(2)
@@ -275,9 +341,12 @@ impl App {
                     tooltip(
                         stack![
                             item,
-                            canvas(WorkspaceContext(workspace.id))
-                                .width(Length::Fill)
-                                .height(Length::Fill),
+                            canvas(RightClick(move |at| Message::ContextMenu(
+                                ContextTarget::Workspace(workspace_id),
+                                at
+                            )))
+                            .width(Length::Fill)
+                            .height(Length::Fill),
                         ],
                         text(&workspace.cwd).size(10),
                         tooltip::Position::Right,
@@ -360,53 +429,130 @@ impl App {
                 let selection = self
                     .selection
                     .and_then(|s| (s.pane == *id).then_some((s.anchor, s.head)));
-                container(
-                    canvas(terminal::Terminal {
-                        pane,
-                        font_size: self.config.font_size,
-                        focused: self.terminal_focused && selected,
-                        selection,
-                    })
+                let quick: Element<'_, Message> =
+                    if self.hover_pane == Some(*id) && self.context_menu.is_none() {
+                        self.pane_actions(*id, pane.scrolled > 0)
+                    } else {
+                        Space::new().into()
+                    };
+                // The overlay slot is always present so hovering never rebuilds the
+                // terminal canvas beneath it.
+                mouse_area(stack![
+                    container(
+                        canvas(terminal::Terminal {
+                            pane,
+                            font_size: self.config.font_size,
+                            focused: self.terminal_focused && selected,
+                            selection,
+                            cursor_on: !(selected && self.blink_wanted()) || self.blink_on,
+                        })
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    )
+                    .padding([PANE_PADDING_Y, PANE_PADDING_X])
                     .width(Length::Fill)
-                    .height(Length::Fill),
-                )
-                .padding([7, 9])
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| container::Style {
-                    border: Border {
-                        color: BORDER,
-                        width: 1.0,
-                        radius: 0.0.into(),
-                    },
-                    ..surface(BACKGROUND)
-                })
+                    .height(Length::Fill)
+                    .style(|_| surface(BACKGROUND)),
+                    quick
+                ])
+                .on_enter(Message::HoverPane(*id, true))
+                .on_exit(Message::HoverPane(*id, false))
                 .into()
             }
             Layout::Split {
+                id,
                 axis,
+                ratio,
                 first,
                 second,
-            } => match axis {
-                Axis::Horizontal => {
-                    column![self.terminal_layout(first), self.terminal_layout(second)]
-                        .spacing(6)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .into()
-                }
-                Axis::Vertical => row![self.terminal_layout(first), self.terminal_layout(second)]
-                    .spacing(6)
+            } => {
+                // A divider being dragged shows where it is now, not where the
+                // server last saw it.
+                let ratio = self
+                    .split_drag
+                    .filter(|(split, _)| split == id)
+                    .map_or(*ratio, |(_, ratio)| ratio);
+                let side = |layout, share: u16| {
+                    let (width, height) = match axis {
+                        Axis::Horizontal => (Length::Fill, Length::FillPortion(share)),
+                        Axis::Vertical => (Length::FillPortion(share), Length::Fill),
+                    };
+                    container(self.terminal_layout(layout))
+                        .width(width)
+                        .height(height)
+                };
+                let divider = canvas(Divider {
+                    split: *id,
+                    axis: *axis,
+                });
+                match axis {
+                    Axis::Horizontal => column![
+                        side(first, ratio),
+                        divider.width(Length::Fill).height(THICKNESS),
+                        side(second, 1000 - ratio)
+                    ]
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into(),
-            },
+                    Axis::Vertical => row![
+                        side(first, ratio),
+                        divider.width(THICKNESS).height(Length::Fill),
+                        side(second, 1000 - ratio)
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                }
+            }
         }
+    }
+
+    /// The quick actions in the corner of the pane under the pointer, which act
+    /// on that pane. `scrolled` moves them under the scroll position label.
+    fn pane_actions(&self, id: u64, scrolled: bool) -> Element<'_, Message> {
+        let cluster = container(
+            row![
+                action(
+                    Icon::SplitColumns,
+                    SPLIT_COLUMNS,
+                    Message::SplitPane(id, Axis::Vertical)
+                ),
+                action(
+                    Icon::SplitRows,
+                    SPLIT_ROWS,
+                    Message::SplitPane(id, Axis::Horizontal)
+                ),
+                action(Icon::Close, "Close pane", Message::AskClosePaneOf(id)),
+            ]
+            .spacing(1),
+        )
+        .padding(2)
+        .style(|_| container::Style {
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..surface(SIDEBAR.scale_alpha(0.94))
+        });
+        container(cluster)
+            .align_right(Length::Fill)
+            .align_top(Length::Fill)
+            .padding(Padding {
+                top: if scrolled { 30.0 } else { 6.0 },
+                right: 12.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+            .into()
     }
 
     /// Shown when no workspace is selectable: before the first snapshot, or after
     /// the last workspace was closed.
     fn empty_state(&self) -> Element<'_, Message> {
+        if let Some((reason, retrying)) = &self.unreachable {
+            return self.unreachable_state(reason, *retrying);
+        }
         if self
             .snapshot
             .as_ref()
@@ -432,6 +578,93 @@ impl App {
         }
     }
 
+    /// Shown while a target cannot be reached: what failed, and the way out. The
+    /// way back to this computer is always offered for a remote target.
+    fn unreachable_state(&self, reason: &str, retrying: bool) -> Element<'_, Message> {
+        let remote = !self.connected_target.is_empty();
+        let title = if remote {
+            format!("Cannot connect to {}", self.connected_target)
+        } else {
+            "Cannot reach the local server".to_owned()
+        };
+        let mut actions = row![
+            button(text("Retry").size(11))
+                .padding([6, 10])
+                .style(primary)
+                .on_press(Message::Retry)
+        ]
+        .spacing(6);
+        if remote {
+            actions = actions.push(
+                button(text("Use this computer").size(11))
+                    .padding([6, 10])
+                    .style(quiet)
+                    .on_press(Message::Local),
+            );
+        }
+        let mut card = column![
+            text(title).size(13),
+            text(reason.to_owned()).size(11).color(MUTED),
+        ]
+        .spacing(8)
+        .max_width(520)
+        .align_x(Alignment::Center);
+        if retrying {
+            card = card.push(text("Retrying automatically…").size(10).color(MUTED));
+        }
+        container(card.push(actions).spacing(10))
+            .center(Length::Fill)
+            .into()
+    }
+
+    /// What the footer says: the target of a link under the pointer, else the status.
+    fn footer_text(&self) -> String {
+        match &self.hover_link {
+            Some(target) => format!("↗ {target}"),
+            None => self.status.clone(),
+        }
+    }
+
+    /// The scrollback search strip above the terminal.
+    fn search_bar(&self) -> Option<Element<'_, Message>> {
+        let search = self.search.as_ref()?;
+        let result = match search.result {
+            None => String::new(),
+            Some(None) => "No matches".to_owned(),
+            Some(Some((current, total))) => format!("{current} of {total}"),
+        };
+        Some(
+            container(
+                row![
+                    icon(Icon::Search, MUTED),
+                    text_input("Find in scrollback", &search.query)
+                        .id("search-input")
+                        .size(11)
+                        .padding([4, 6])
+                        .on_input(Message::SearchInput)
+                        .on_submit(Message::SearchStep(FindDirection::Next)),
+                    text(result).size(10).color(MUTED),
+                    action(
+                        Icon::ChevronUp,
+                        "Previous match",
+                        Message::SearchStep(FindDirection::Previous)
+                    ),
+                    action(
+                        Icon::Chevron,
+                        "Next match",
+                        Message::SearchStep(FindDirection::Next)
+                    ),
+                    action(Icon::Close, "Close search", Message::SearchClose),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([4, 10])
+            .style(|_| surface(SIDEBAR))
+            .into(),
+        )
+    }
+
     pub(super) fn view(&self) -> Element<'_, Message> {
         let content = self
             .active()
@@ -451,11 +684,14 @@ impl App {
         let footer = container(
             row![
                 dot(if self.online() { SUCCESS } else { MUTED }),
-                text(&self.status)
-                    .size(9)
-                    .color(MUTED)
-                    .width(Length::Fill)
-                    .wrapping(text::Wrapping::None),
+                container(
+                    text(self.footer_text())
+                        .size(9)
+                        .color(MUTED)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Length::Fill)
+                .clip(true),
                 text(grid).size(9).color(MUTED),
                 Space::new().width(10),
                 text(&self.config.shortcut).size(9).color(MUTED),
@@ -467,16 +703,19 @@ impl App {
         .height(20)
         .align_y(Alignment::Center)
         .style(|_| surface(SIDEBAR));
-        let main = column![
-            container(content)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| surface(SIDEBAR)),
-            separator(),
-            footer,
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill);
+        let mut main = column![].width(Length::Fill).height(Length::Fill);
+        if let Some(bar) = self.search_bar() {
+            main = main.push(bar).push(separator());
+        }
+        let main = main
+            .push(
+                container(content)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| surface(SIDEBAR)),
+            )
+            .push(separator())
+            .push(footer);
         let body: Element<'_, Message> = if self.sidebar_open {
             row![
                 self.sidebar(),
@@ -509,10 +748,23 @@ impl App {
                     ),
                     separator(),
                     menu_item(Icon::Pencil, "Rename workspace", Message::Rename),
+                    menu_item(
+                        Icon::Pencil,
+                        "Rename tab",
+                        Message::RenameTab(self.tab.unwrap_or_default())
+                    ),
                     separator(),
                     menu_item(Icon::Close, "Close pane", Message::AskClosePane).style(destructive),
+                    menu_item(
+                        Icon::Close,
+                        "Close tab",
+                        Message::AskCloseTab(self.tab.unwrap_or_default())
+                    )
+                    .style(destructive),
                     menu_item(Icon::Close, "Close workspace", Message::AskCloseWorkspace)
                         .style(destructive),
+                    separator(),
+                    menu_item(Icon::Close, "Quit Spooky", Message::Quit),
                 ]
                 .spacing(2),
             )
@@ -536,9 +788,9 @@ impl App {
             ]
             .into();
         }
-        if let Some((id, position)) = self.workspace_menu {
-            let menu = container(
-                column![
+        if let Some((target, position)) = self.context_menu {
+            let items = match target {
+                ContextTarget::Workspace(id) => column![
                     menu_item(
                         Icon::Pencil,
                         "Rename workspace",
@@ -547,19 +799,51 @@ impl App {
                     separator(),
                     menu_item(Icon::Close, "Close workspace", Message::CloseWorkspace(id))
                         .style(destructive),
-                ]
-                .spacing(2),
-            )
-            .padding(5)
-            .width(200)
-            .style(menu_style);
+                ],
+                ContextTarget::Tab(id) => column![
+                    menu_item(Icon::Pencil, "Rename tab", Message::RenameTab(id)),
+                    menu_item(Icon::Plus, "New tab", Message::NewTab),
+                    separator(),
+                    menu_item(Icon::Close, "Close tab", Message::AskCloseTab(id))
+                        .style(destructive),
+                ],
+                ContextTarget::Pane(id) => {
+                    let mut copy = menu_item(Icon::Copy, "Copy", Message::Copy);
+                    if self.selected_text().is_none() {
+                        copy = copy.on_press_maybe(None);
+                    }
+                    column![
+                        copy,
+                        menu_item(Icon::Paste, "Paste", Message::PasteClipboard),
+                        menu_item(Icon::Search, "Find in scrollback", Message::SearchOpen),
+                        separator(),
+                        menu_item(
+                            Icon::SplitColumns,
+                            "Split columns",
+                            Message::SplitPane(id, Axis::Vertical)
+                        ),
+                        menu_item(
+                            Icon::SplitRows,
+                            "Split rows",
+                            Message::SplitPane(id, Axis::Horizontal)
+                        ),
+                        separator(),
+                        menu_item(Icon::Close, "Close pane", Message::AskClosePaneOf(id))
+                            .style(destructive),
+                    ]
+                }
+            };
+            let menu = container(items.spacing(2))
+                .padding(5)
+                .width(200)
+                .style(menu_style);
             body = stack![
                 body,
                 opaque(
                     mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
-                        .on_press(Message::DismissWorkspaceMenu)
-                        .on_right_press(Message::DismissWorkspaceMenu)
-                        .on_scroll(|_| Message::DismissWorkspaceMenu)
+                        .on_press(Message::DismissContextMenu)
+                        .on_right_press(Message::DismissContextMenu)
+                        .on_scroll(|_| Message::DismissContextMenu)
                 ),
                 float(opaque(menu)).translate(move |bounds, viewport| {
                     let left = viewport.x + 4.0;
@@ -581,13 +865,26 @@ impl App {
             body = modal(
                 body,
                 column![
-                    text("Rename workspace").size(14).color(TEXT),
-                    text_input("Workspace name", &self.rename)
-                        .id("workspace-name")
-                        .size(12)
-                        .padding(8)
-                        .on_input(Message::RenameValue)
-                        .on_submit(Message::RenameSubmit),
+                    text(if self.rename_tab.is_some() {
+                        "Rename tab"
+                    } else {
+                        "Rename workspace"
+                    })
+                    .size(14)
+                    .color(TEXT),
+                    text_input(
+                        if self.rename_tab.is_some() {
+                            "Tab name"
+                        } else {
+                            "Workspace name"
+                        },
+                        &self.rename
+                    )
+                    .id("workspace-name")
+                    .size(12)
+                    .padding(8)
+                    .on_input(Message::RenameValue)
+                    .on_submit(Message::RenameSubmit),
                     row![
                         Space::new().width(Length::Fill),
                         button(text("Cancel").size(11))
@@ -608,9 +905,48 @@ impl App {
         }
         if let Some(confirm) = self.confirm {
             let (title, detail) = match confirm {
-                Confirm::Pane(_) => (
-                    "Close this pane?".to_owned(),
-                    "Its shell and running commands will be terminated.",
+                Confirm::Pane(pane) => {
+                    // The server removes a tab with its last pane, and a workspace with its last tab.
+                    let located = self.snapshot.as_ref().and_then(|s| {
+                        s.workspaces.iter().find_map(|w| {
+                            w.tabs
+                                .iter()
+                                .find(|t| t.layout.contains(pane))
+                                .map(|t| (w, t))
+                        })
+                    });
+                    match located {
+                        Some((w, t))
+                            if matches!(t.layout, Layout::Pane(_)) && w.tabs.len() == 1 =>
+                        {
+                            (
+                                format!("Close \"{}\"?", w.name),
+                                "This is its only pane, so the workspace closes and its shell is terminated.",
+                            )
+                        }
+                        Some((_, t)) if matches!(t.layout, Layout::Pane(_)) => (
+                            format!("Close tab \"{}\"?", t.title),
+                            "This is its only pane, so the tab closes and its shell is terminated.",
+                        ),
+                        _ => (
+                            "Close this pane?".to_owned(),
+                            "Its shell and running commands will be terminated.",
+                        ),
+                    }
+                }
+                Confirm::Tab(id) => (
+                    format!(
+                        "Close tab \"{}\"?",
+                        self.snapshot
+                            .as_ref()
+                            .and_then(|s| s
+                                .workspaces
+                                .iter()
+                                .flat_map(|w| &w.tabs)
+                                .find(|t| t.id == id))
+                            .map_or("tab", |t| t.title.as_str())
+                    ),
+                    "Every shell and running command in this tab will be terminated. Closing a workspace's last tab closes the workspace.",
                 ),
                 Confirm::Workspace(id) => (
                     format!(

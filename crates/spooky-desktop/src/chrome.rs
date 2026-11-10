@@ -114,6 +114,10 @@ pub enum Icon {
     ChevronRight,
     Close,
     Pencil,
+    Search,
+    ChevronUp,
+    Copy,
+    Paste,
 }
 
 struct Vector {
@@ -202,6 +206,8 @@ impl canvas::Program<Message> for Vector {
                 ]),
                 Icon::Chevron => line(&[(8., 10.), (12., 14.), (16., 10.)]),
                 Icon::ChevronRight => line(&[(10., 8.), (14., 12.), (10., 16.)]),
+                Icon::ChevronUp => line(&[(8., 14.), (12., 10.), (16., 14.)]),
+                Icon::Search => line(&[(15.5, 15.5), (20., 20.)]),
                 Icon::Close => {
                     line(&[(6., 6.), (18., 18.)]);
                     line(&[(18., 6.), (6., 18.)]);
@@ -227,6 +233,14 @@ impl canvas::Program<Message> for Vector {
                         p.line_to(Point::new(x, y));
                     }
                 }
+                Icon::Copy => {
+                    line(&[(9., 9.), (20., 9.), (20., 20.), (9., 20.), (9., 9.)]);
+                    line(&[(5., 15.), (5., 4.), (15., 4.), (15., 9.)]);
+                }
+                Icon::Paste => {
+                    line(&[(5., 5.), (19., 5.), (19., 21.), (5., 21.), (5., 5.)]);
+                    line(&[(9., 3.), (15., 3.), (15., 7.), (9., 7.), (9., 3.)]);
+                }
                 Icon::More => {}
             }
         });
@@ -238,6 +252,7 @@ impl canvas::Program<Message> for Vector {
                 }
             }
             Icon::Camera => frame.stroke(&canvas::Path::circle(Point::new(12., 14.), 3.5), stroke),
+            Icon::Search => frame.stroke(&canvas::Path::circle(Point::new(11., 11.), 6.), stroke),
             Icon::More => {
                 for x in [5., 12., 19.] {
                     frame.fill(&canvas::Path::circle(Point::new(x, 12.), 1.1), self.color);

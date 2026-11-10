@@ -13,19 +13,24 @@ Spooky is a native, GPU-rendered dropdown terminal with persistent project works
 
 A workspace has a display name, a server-side working directory and ordered tabs. Each tab has a binary split layout whose leaves identify terminal panes. A pane owns a shell, a PTY and terminal state.
 
-The server is the authority. Closing/hiding the GUI disconnects or hides the client without terminating the shells. Reconnecting restores the existing terminal state and workspace tree. Server termination or operating-system restart does not preserve running processes.
+The server is the authority. Closing/hiding the GUI disconnects or hides the client without terminating the shells. Reconnecting restores the existing terminal state and workspace tree. Server termination or operating-system restart does not preserve running processes, but the server saves the workspace tree (names, directories, tabs, splits and divider positions) and rebuilds it with new shells at its next start; a damaged saved file is set aside, never half restored. Stopping a server that has running shells needs an explicit force. The server keeps an operational log and reports its status without a GUI.
 
-Creating workspaces, tabs and splits starts real shells. Explicit pane/workspace closure is destructive and requires frontend confirmation. Process exit remains visible rather than fabricating a live terminal.
+Creating workspaces, tabs and splits starts real shells. Explicit pane, tab and workspace closure is destructive and requires frontend confirmation that states what will really close (the last pane closes its tab; the last tab closes its workspace). Process exit remains visible rather than fabricating a live terminal.
 
 ## Frontend
 
 - Polished dark interface inspired by Ghostty, without a WebView.
-- Workspace sidebar, tabs, visible split panes and unambiguous keyboard focus.
+- Workspace sidebar, tabs that can be renamed and closed, visible split panes and unambiguous keyboard focus. Application shortcuts drive workspaces, tabs and panes through the same actions as the buttons; plain Ctrl combinations remain terminal input.
+- Every shortcut action is reachable with the mouse: split, new tab and close buttons, a close button on the selected tab, quick actions on the pane under the pointer, and right-click menus for workspaces, tabs and panes. A program that tracks the mouse keeps the right-click. Closing keeps its confirmation.
+- Split dividers are a single line that can be dragged and reset to even halves; the position belongs to the server and is shared by every client. Tabs show the title their terminal sets until renamed.
+- Scrollback search (highlighted matches, next/previous with wrap-around, closable with Escape), a scrollback position indicator, and a configurable scrollback size.
+- Links: Cmd/Ctrl+click opens OSC 8 and plain `http(s)` URLs, only for `http`, `https` and `mailto`, with the real target visible before opening. OSC 52 clipboard writes are honoured and announced, can be turned off, and clipboard reads are never answered. Output never causes a command to run.
 - The machine row owns workspace creation and disclosure; neither its name nor its arrow opens SSH. Each workspace exposes rename and confirmed closure through right-click and an explicit actions button.
-- Configurable global dropdown shortcut where supported. Unsupported compositor features must be surfaced.
-- GPU-rendered terminal text, ANSI colors, cursor, wide/combining Unicode and terminal application input modes.
+- Configurable global dropdown shortcut where supported. Its effect follows the window's real state: it hides a focused window and brings a hidden, minimized or covered one forward, centred against the top of its display and focused. While the shortcut is registered, closing the window hides it and the macOS Dock icon is optional; without a shortcut, closing quits so the window cannot be stranded. Unsupported compositor features must be surfaced.
+- GPU-rendered terminal text, ANSI colors, cursor (shape and blinking), wide/combining Unicode and terminal application input modes, including mouse and focus reporting.
 - Grid resizing updates both terminal state and the PTY. Clipboard paste respects bracketed-paste mode. Text fields must never leak input into shells.
 - Copy selection and scrollback navigation.
+- Packaging produces a signed application bundle with an icon on macOS (ad-hoc by default, Developer ID and notarization when configured) and an archive on Linux.
 - Network/process operations do not block the GUI thread.
 
 ## Remote module
@@ -44,4 +49,4 @@ This does not mean every terminal program accepts image attachments. Agent-speci
 
 ## Acceptance evidence
 
-Launch the real server with a PTY; observe command output, ANSI/Unicode state, resize, multiple panes/tabs, process exit and reconnect preserving environment/cwd. Exercise SSH and transfer with real SSH/SFTP, not a mock command. Launch the native frontend and observe rendered terminal output and interaction. Document each platform and scenario actually exercised, with unavailable checks explicit.
+Launch the real server with a PTY; observe command output, ANSI/Unicode state, resize, multiple panes/tabs, process exit and reconnect preserving environment/cwd. Stop and restart the server and observe the saved workspace tree return with new shells. Exercise SSH and transfer with real SSH/SFTP, not a mock command. Launch the native frontend and observe rendered terminal output and interaction, including divider dragging, search, link handling and clipboard writes. Document each platform and scenario actually exercised, with unavailable checks explicit.
