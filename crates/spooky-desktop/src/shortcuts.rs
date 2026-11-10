@@ -1,4 +1,4 @@
-//! Application shortcuts: the chords that drive workspaces, tabs and panes.
+//! Application shortcuts: the chords that map to a [`Command`].
 //!
 //! macOS uses Cmd; other platforms use Ctrl+Shift so plain Ctrl combinations stay
 //! terminal input. The letter chords that need a second variant (split rows,
@@ -6,39 +6,12 @@
 //! workspace selection adds Alt on both. Digits and brackets are matched by
 //! physical key so they work on any keyboard layout.
 
+use crate::commands::Command;
 use iced::keyboard::{
     Key, Modifiers,
     key::{Code, Named, Physical},
 };
 use spooky_core::Axis;
-
-/// What a chord asks the application to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Shortcut {
-    NewTab,
-    NewWorkspace,
-    Split(Axis),
-    ClosePane,
-    CloseWorkspace,
-    /// A zero-based tab position; position 8 means the last tab.
-    Tab(usize),
-    NextTab,
-    PreviousTab,
-    /// A zero-based workspace position; position 8 means the last workspace.
-    Workspace(usize),
-    NextWorkspace,
-    PreviousWorkspace,
-    RenameTab,
-    RenameWorkspace,
-    ToggleSidebar,
-    /// Open the scrollback search, or focus it when it is open.
-    Find,
-    FindNext,
-    FindPrevious,
-    /// Open the settings page.
-    Settings,
-    Quit,
-}
 
 /// Whether the platform's primary chord modifiers are held: Cmd on macOS,
 /// Ctrl+Shift elsewhere.
@@ -52,14 +25,14 @@ pub(crate) fn primary(mods: Modifiers) -> bool {
 
 /// The shortcut for a key press, if it is one. Digits and brackets are read from
 /// the physical key.
-pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option<Shortcut> {
+pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option<Command> {
     let macos = cfg!(target_os = "macos");
     // Ctrl+Tab cycles tabs everywhere.
     if matches!(key, Key::Named(Named::Tab)) && mods.control() && !mods.logo() && !mods.alt() {
         return Some(if mods.shift() {
-            Shortcut::PreviousTab
+            Command::PreviousTab
         } else {
-            Shortcut::NextTab
+            Command::NextTab
         });
     }
     if !primary(mods) {
@@ -72,30 +45,30 @@ pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option
 
     if let Some(position) = digit(physical) {
         return if workspace_digit {
-            Some(Shortcut::Workspace(position))
+            Some(Command::Workspace(position))
         } else if tab_digit {
-            Some(Shortcut::Tab(position))
+            Some(Command::Tab(position))
         } else {
             None
         };
     }
     match physical {
         Physical::Code(Code::BracketRight) if macos && mods.shift() && !alt => {
-            return Some(Shortcut::NextTab);
+            return Some(Command::NextTab);
         }
         Physical::Code(Code::BracketLeft) if macos && mods.shift() && !alt => {
-            return Some(Shortcut::PreviousTab);
+            return Some(Command::PreviousTab);
         }
         Physical::Code(Code::Comma) if !alt && !(macos && mods.shift()) => {
-            return Some(Shortcut::Settings);
+            return Some(Command::Settings);
         }
         _ => {}
     }
     match key {
-        Key::Named(Named::PageDown) if !macos && !alt => return Some(Shortcut::NextTab),
-        Key::Named(Named::PageUp) if !macos && !alt => return Some(Shortcut::PreviousTab),
-        Key::Named(Named::ArrowDown) if alt => return Some(Shortcut::NextWorkspace),
-        Key::Named(Named::ArrowUp) if alt => return Some(Shortcut::PreviousWorkspace),
+        Key::Named(Named::PageDown) if !macos && !alt => return Some(Command::NextTab),
+        Key::Named(Named::PageUp) if !macos && !alt => return Some(Command::PreviousTab),
+        Key::Named(Named::ArrowDown) if alt => return Some(Command::NextWorkspace),
+        Key::Named(Named::ArrowUp) if alt => return Some(Command::PreviousWorkspace),
         _ => {}
     }
     let Key::Character(text) = key else {
@@ -106,19 +79,21 @@ pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option
     }
     let second = if macos { mods.shift() } else { alt };
     match (text.to_ascii_lowercase().as_str(), second) {
-        ("t", false) => Some(Shortcut::NewTab),
-        ("n", false) => Some(Shortcut::NewWorkspace),
-        ("d", false) => Some(Shortcut::Split(Axis::Vertical)),
-        ("d", true) => Some(Shortcut::Split(Axis::Horizontal)),
-        ("w", false) => Some(Shortcut::ClosePane),
-        ("w", true) => Some(Shortcut::CloseWorkspace),
-        ("r", false) => Some(Shortcut::RenameTab),
-        ("r", true) => Some(Shortcut::RenameWorkspace),
-        ("b", false) => Some(Shortcut::ToggleSidebar),
-        ("f", false) => Some(Shortcut::Find),
-        ("g", false) => Some(Shortcut::FindNext),
-        ("g", true) => Some(Shortcut::FindPrevious),
-        ("q", false) => Some(Shortcut::Quit),
+        ("t", false) => Some(Command::NewTab),
+        ("n", false) => Some(Command::NewWorkspace),
+        ("d", false) => Some(Command::Split(Axis::Vertical)),
+        ("d", true) => Some(Command::Split(Axis::Horizontal)),
+        ("w", false) => Some(Command::ClosePane),
+        ("w", true) => Some(Command::CloseWorkspace),
+        ("r", false) => Some(Command::RenameTab),
+        ("r", true) => Some(Command::RenameWorkspace),
+        ("b", false) => Some(Command::ToggleSidebar),
+        ("f", false) => Some(Command::Find),
+        ("g", false) => Some(Command::FindNext),
+        ("g", true) => Some(Command::FindPrevious),
+        ("q", false) => Some(Command::Quit),
+        // Cmd+Shift+P on macOS, Ctrl+Shift+P elsewhere.
+        ("p", shift_or_alt) if shift_or_alt == macos => Some(Command::Palette),
         _ => None,
     }
 }
@@ -248,7 +223,7 @@ pub(crate) fn cycle(ids: &[u64], current: Option<u64>, forward: bool) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{Shortcut, cycle, hotkey_text, nth, shortcut};
+    use super::{Command, cycle, hotkey_text, nth, shortcut};
     use iced::keyboard::{
         Key, Modifiers,
         key::{Code, Named, Physical},
@@ -268,7 +243,7 @@ mod tests {
         Modifiers::ALT
     };
 
-    fn letter(text: &str, mods: Modifiers) -> Option<Shortcut> {
+    fn letter(text: &str, mods: Modifiers) -> Option<Command> {
         shortcut(
             &Key::Character(text.into()),
             Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
@@ -280,25 +255,42 @@ mod tests {
     fn letter_chords_drive_tabs_workspaces_and_panes() {
         let with_second = PRIMARY.union(SECOND);
         let cases = [
-            ("t", PRIMARY, Shortcut::NewTab),
-            ("n", PRIMARY, Shortcut::NewWorkspace),
-            ("d", PRIMARY, Shortcut::Split(Axis::Vertical)),
-            ("d", with_second, Shortcut::Split(Axis::Horizontal)),
-            ("w", PRIMARY, Shortcut::ClosePane),
-            ("w", with_second, Shortcut::CloseWorkspace),
-            ("r", PRIMARY, Shortcut::RenameTab),
-            ("r", with_second, Shortcut::RenameWorkspace),
-            ("b", PRIMARY, Shortcut::ToggleSidebar),
-            ("q", PRIMARY, Shortcut::Quit),
-            ("f", PRIMARY, Shortcut::Find),
-            ("g", PRIMARY, Shortcut::FindNext),
-            ("g", with_second, Shortcut::FindPrevious),
+            ("t", PRIMARY, Command::NewTab),
+            ("n", PRIMARY, Command::NewWorkspace),
+            ("d", PRIMARY, Command::Split(Axis::Vertical)),
+            ("d", with_second, Command::Split(Axis::Horizontal)),
+            ("w", PRIMARY, Command::ClosePane),
+            ("w", with_second, Command::CloseWorkspace),
+            ("r", PRIMARY, Command::RenameTab),
+            ("r", with_second, Command::RenameWorkspace),
+            ("b", PRIMARY, Command::ToggleSidebar),
+            ("q", PRIMARY, Command::Quit),
+            ("f", PRIMARY, Command::Find),
+            ("g", PRIMARY, Command::FindNext),
+            ("g", with_second, Command::FindPrevious),
         ];
         for (text, mods, expected) in cases {
             assert_eq!(letter(text, mods), Some(expected), "{text} {mods:?}");
         }
         // The shifted letter reaches the app as an uppercase character.
-        assert_eq!(letter("T", PRIMARY), Some(Shortcut::NewTab));
+        assert_eq!(letter("T", PRIMARY), Some(Command::NewTab));
+    }
+
+    #[test]
+    fn the_palette_chord_is_command_shift_p_or_ctrl_shift_p() {
+        let chord = if cfg!(target_os = "macos") {
+            Modifiers::LOGO | Modifiers::SHIFT
+        } else {
+            Modifiers::CTRL | Modifiers::SHIFT
+        };
+        assert_eq!(letter("p", chord), Some(Command::Palette));
+        // Without its second modifier, and as plain terminal input, it is not ours.
+        assert_eq!(letter("p", Modifiers::CTRL), None);
+        if cfg!(target_os = "macos") {
+            assert_eq!(letter("p", Modifiers::LOGO), None);
+        } else {
+            assert_eq!(letter("p", chord | Modifiers::ALT), None);
+        }
     }
 
     #[test]
@@ -326,11 +318,11 @@ mod tests {
         let nine = Physical::Code(Code::Digit9);
         // A layout where the 1 key types "&".
         let key = Key::Character("&".into());
-        assert_eq!(shortcut(&key, one, PRIMARY), Some(Shortcut::Tab(0)));
-        assert_eq!(shortcut(&key, nine, PRIMARY), Some(Shortcut::Tab(8)));
+        assert_eq!(shortcut(&key, one, PRIMARY), Some(Command::Tab(0)));
+        assert_eq!(shortcut(&key, nine, PRIMARY), Some(Command::Tab(8)));
         assert_eq!(
             shortcut(&key, one, PRIMARY.union(Modifiers::ALT)),
-            Some(Shortcut::Workspace(0))
+            Some(Command::Workspace(0))
         );
         assert_eq!(shortcut(&key, one, Modifiers::empty()), None);
     }
@@ -358,16 +350,16 @@ mod tests {
                 PRIMARY,
             )
         };
-        assert_eq!(next_tab, Some(Shortcut::NextTab));
+        assert_eq!(next_tab, Some(Command::NextTab));
         let down = shortcut(
             &Key::Named(Named::ArrowDown),
             Physical::Code(Code::ArrowDown),
             PRIMARY.union(Modifiers::ALT),
         );
-        assert_eq!(down, Some(Shortcut::NextWorkspace));
+        assert_eq!(down, Some(Command::NextWorkspace));
         for (mods, expected) in [
-            (Modifiers::CTRL, Shortcut::NextTab),
-            (Modifiers::CTRL | Modifiers::SHIFT, Shortcut::PreviousTab),
+            (Modifiers::CTRL, Command::NextTab),
+            (Modifiers::CTRL | Modifiers::SHIFT, Command::PreviousTab),
         ] {
             let key = Key::Named(Named::Tab);
             assert_eq!(
@@ -401,7 +393,7 @@ mod tests {
     fn the_settings_chord_is_read_from_the_comma_key() {
         let comma = Physical::Code(Code::Comma);
         let key = Key::Character(",".into());
-        assert_eq!(shortcut(&key, comma, PRIMARY), Some(Shortcut::Settings));
+        assert_eq!(shortcut(&key, comma, PRIMARY), Some(Command::Settings));
         assert_eq!(shortcut(&key, comma, Modifiers::empty()), None);
         assert_eq!(shortcut(&key, comma, Modifiers::CTRL), None);
     }

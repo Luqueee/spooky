@@ -3,7 +3,9 @@
 //! which composes them, and talk through messages and small traits it implements.
 
 pub(crate) mod attachments;
+pub(crate) mod connection;
 pub(crate) mod hyperlinks;
+pub(crate) mod palette;
 pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod splits;

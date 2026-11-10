@@ -1,6 +1,7 @@
 //! Compact native workspace chrome; terminal state remains server-owned.
+use super::{App, Confirm, ContextTarget, Message};
+use crate::commands::Command;
 use crate::{
-    App, Confirm, ContextTarget, Message,
     features::splits::{Divider, THICKNESS},
     terminal,
     ui::*,
@@ -150,7 +151,7 @@ impl App {
         brand = brand.push(action(
             Icon::Sidebar,
             "Toggle sidebar",
-            Message::ToggleSidebar,
+            Message::Run(Command::ToggleSidebar),
         ));
         let brand = container(brand)
             .padding([0, 7])
@@ -213,14 +214,14 @@ impl App {
             action(
                 Icon::SplitColumns,
                 SPLIT_COLUMNS,
-                Message::Split(Axis::Vertical)
+                Message::Run(Command::Split(Axis::Vertical))
             ),
             action(
                 Icon::SplitRows,
                 SPLIT_ROWS,
-                Message::Split(Axis::Horizontal)
+                Message::Run(Command::Split(Axis::Horizontal))
             ),
-            action(Icon::Plus, NEW_TAB, Message::NewTab),
+            action(Icon::Plus, NEW_TAB, Message::Run(Command::NewTab)),
             button(
                 row![icon(Icon::Paperclip, MUTED), text("Attach").size(10)]
                     .spacing(5)
@@ -228,13 +229,11 @@ impl App {
             )
             .padding([5, 7])
             .style(quiet)
-            .on_press(Message::Attachments(
-                crate::features::attachments::Message::Attach,
-            )),
+            .on_press(Message::Run(Command::Attach)),
             action(
                 Icon::Camera,
                 "Capture active pane",
-                Message::Attachments(crate::features::attachments::Message::Capture),
+                Message::Run(Command::Capture),
             ),
             action(Icon::More, "Workspace actions", Message::ToggleMenu),
         ]
@@ -264,10 +263,10 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let connection_name = if self.connected_target.is_empty() {
+        let connection_name = if !self.connection.is_remote() {
             "This computer"
         } else {
-            &self.connected_target
+            self.connection.connected_target()
         };
         let section = container(text("Spaces").size(10).color(MUTED))
             .height(22)
@@ -285,7 +284,11 @@ impl App {
             .padding([5, 6])
             .style(quiet)
             .on_press(Message::ToggleWorkspaces),
-            action(Icon::Plus, "New workspace", Message::NewWorkspace),
+            action(
+                Icon::Plus,
+                "New workspace",
+                Message::Run(Command::NewWorkspace)
+            ),
             button(
                 row![
                     dot(if self.online() { SUCCESS } else { MUTED }),
@@ -374,7 +377,7 @@ impl App {
                         )),
                 )
                 .push(
-                    text_input("user@host or SSH alias", &self.target)
+                    text_input("user@host or SSH alias", self.connection.target())
                         .size(11)
                         .padding(6)
                         .on_input(Message::TargetValue)
@@ -555,8 +558,8 @@ impl App {
     /// Shown when no workspace is selectable: before the first snapshot, or after
     /// the last workspace was closed.
     fn empty_state(&self) -> Element<'_, Message> {
-        if let Some((reason, retrying)) = &self.unreachable {
-            return self.unreachable_state(reason, *retrying);
+        if let Some((reason, retrying)) = self.connection.unreachable() {
+            return self.unreachable_state(reason, retrying);
         }
         if self
             .snapshot
@@ -569,7 +572,7 @@ impl App {
                     button(text("New workspace").size(11))
                         .padding([6, 10])
                         .style(primary)
-                        .on_press(Message::NewWorkspace),
+                        .on_press(Message::Run(Command::NewWorkspace)),
                 ]
                 .spacing(10)
                 .align_x(Alignment::Center),
@@ -586,9 +589,9 @@ impl App {
     /// Shown while a target cannot be reached: what failed, and the way out. The
     /// way back to this computer is always offered for a remote target.
     fn unreachable_state(&self, reason: &str, retrying: bool) -> Element<'_, Message> {
-        let remote = !self.connected_target.is_empty();
+        let remote = self.connection.is_remote();
         let title = if remote {
-            format!("Cannot connect to {}", self.connected_target)
+            format!("Cannot connect to {}", self.connection.connected_target())
         } else {
             "Cannot reach the local server".to_owned()
         };
@@ -630,7 +633,7 @@ impl App {
         }
     }
 
-    pub(super) fn view(&self) -> Element<'_, Message> {
+    pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = if self.settings.is_open() {
             crate::features::settings::view(&self.settings, &self.config, self.hotkeys.is_some())
         } else {
@@ -709,37 +712,43 @@ impl App {
                     menu_item(
                         Icon::SplitColumns,
                         "Split columns",
-                        Message::Split(Axis::Vertical)
+                        Message::Run(Command::Split(Axis::Vertical))
                     ),
                     menu_item(
                         Icon::SplitRows,
                         "Split rows",
-                        Message::Split(Axis::Horizontal)
+                        Message::Run(Command::Split(Axis::Horizontal))
                     ),
                     separator(),
-                    menu_item(Icon::Pencil, "Rename workspace", Message::Rename),
                     menu_item(
                         Icon::Pencil,
-                        "Rename tab",
-                        Message::RenameTab(self.tab.unwrap_or_default())
+                        "Rename workspace",
+                        Message::Run(Command::RenameWorkspace)
                     ),
+                    menu_item(Icon::Pencil, "Rename tab", Message::Run(Command::RenameTab)),
                     separator(),
-                    menu_item(Icon::Close, "Close pane", Message::AskClosePane).style(destructive),
+                    menu_item(Icon::Close, "Close pane", Message::Run(Command::ClosePane))
+                        .style(destructive),
                     menu_item(
                         Icon::Close,
                         "Close tab",
                         Message::AskCloseTab(self.tab.unwrap_or_default())
                     )
                     .style(destructive),
-                    menu_item(Icon::Close, "Close workspace", Message::AskCloseWorkspace)
-                        .style(destructive),
+                    menu_item(
+                        Icon::Close,
+                        "Close workspace",
+                        Message::Run(Command::CloseWorkspace)
+                    )
+                    .style(destructive),
                     separator(),
                     menu_item(
-                        Icon::Settings,
-                        "Settings…",
-                        Message::Settings(crate::features::settings::Message::Open)
+                        Icon::Search,
+                        "Command palette…",
+                        Message::Run(Command::Palette)
                     ),
-                    menu_item(Icon::Close, "Quit Spooky", Message::Quit),
+                    menu_item(Icon::Settings, "Settings…", Message::Run(Command::Settings)),
+                    menu_item(Icon::Close, "Quit Spooky", Message::Run(Command::Quit)),
                 ]
                 .spacing(2),
             )
@@ -777,23 +786,23 @@ impl App {
                 ],
                 ContextTarget::Tab(id) => column![
                     menu_item(Icon::Pencil, "Rename tab", Message::RenameTab(id)),
-                    menu_item(Icon::Plus, "New tab", Message::NewTab),
+                    menu_item(Icon::Plus, "New tab", Message::Run(Command::NewTab)),
                     separator(),
                     menu_item(Icon::Close, "Close tab", Message::AskCloseTab(id))
                         .style(destructive),
                 ],
                 ContextTarget::Pane(id) => {
-                    let mut copy = menu_item(Icon::Copy, "Copy", Message::Copy);
+                    let mut copy = menu_item(Icon::Copy, "Copy", Message::Run(Command::Copy));
                     if self.selected_text().is_none() {
                         copy = copy.on_press_maybe(None);
                     }
                     column![
                         copy,
-                        menu_item(Icon::Paste, "Paste", Message::PasteClipboard),
+                        menu_item(Icon::Paste, "Paste", Message::Run(Command::Paste)),
                         menu_item(
                             Icon::Search,
                             "Find in scrollback",
-                            Message::Search(crate::features::search::Message::Open)
+                            Message::Run(Command::Find)
                         ),
                         separator(),
                         menu_item(
@@ -844,6 +853,13 @@ impl App {
                 Some(Message::Tailscale(
                     crate::features::tailscale::Message::Close,
                 )),
+            );
+        }
+        if let Some(content) = crate::features::palette::view(&self.palette) {
+            body = modal(
+                body,
+                content,
+                Some(Message::Palette(crate::features::palette::Message::Close)),
             );
         }
         if self.renaming {

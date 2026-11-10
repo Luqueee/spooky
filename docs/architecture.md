@@ -10,11 +10,21 @@ The GUI never owns the lifetime of a shell. The server never needs a display ser
 
 ## Source layout
 
-The layout of `spooky-desktop` (reached one step at a time; see [mods](mods.md), phase 0). Entries marked "to move" are still flat files:
+The layout of `spooky-desktop` (see [mods](mods.md), phase 0):
 
 ```
 src/
-  main.rs            startup, and for now the application state (App) and its update loop
+  main.rs            startup: the window settings and the iced application
+  app/               the application: App owns the shared state and composes the features
+    mod.rs           App, Message, and the dispatch of every message to the file that handles it
+    dropdown.rs      showing, hiding and placing the window; the global shortcut
+    connection.rs    events from the server connection, connecting and retargeting
+    workspaces.rs    workspaces, tabs and panes: creating, selecting, renaming, closing, reconciling with the snapshot
+    input.rs         keyboard, clipboard, selection and shortcuts
+    grid.rs          fitting panes to their area; divider geometry
+    features.rs      adapters that apply a feature's messages and outcomes to App
+    subscription.rs  the subscriptions: server events, keys, window events, blink
+    view.rs          the interface
   features/          one folder per feature, each with its own state, message type, update logic and view
     settings/        mod.rs (state, changes, effects), page.rs (the view)
     window/          dropdown.rs (placement, focus-loss rule), hotkey.rs (the global shortcut)
@@ -23,12 +33,15 @@ src/
     splits/          mod.rs (the dragged ratio, throttled sends), divider.rs (the divider widget)
     search/          mod.rs (the query, what was asked and answered), view.rs (the strip)
     attachments/     mod.rs (file dialog, dropped files, quoted path insertion, pane capture)
+    palette/         mod.rs (the query, the highlight, the command to run), view.rs (the list)
+    connection/      mod.rs (target, generation, channel state, why a target is unreachable; the link's threads stay in link.rs)
   terminal/          canvas.rs (draws a pane), pointer.rs, input.rs (keys, paste, focus reports), copy.rs (selection, OSC 52 writes), links.rs (finding links in output)
   ui/                theme.rs (colours, styles), icons.rs (vector icons and icon buttons)
   platform/          macos/{app.rs, keyboard.rs}: code that exists because of one operating system
   config.rs          the typed config.toml model, shared by every feature
-  to move:           view.rs and the rest of App (into app/), link.rs (the server connection, into features/connection),
-                     shortcuts.rs, tabs.rs, layout.rs, test_support.rs
+  commands.rs        the command registry: ids, titles, the palette's list and its matching
+  link.rs            the server connection: its two threads and the events they report to App
+  shortcuts.rs, tabs.rs, layout.rs   pure helpers with their own tests; test_support.rs  test fixtures
 ```
 
 `spooky-server` and `spooky-core` follow the same rules:
