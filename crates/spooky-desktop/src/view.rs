@@ -666,10 +666,13 @@ impl App {
     }
 
     pub(super) fn view(&self) -> Element<'_, Message> {
-        let content = self
-            .active()
-            .map(|(_, tab)| self.terminal_layout(&tab.layout))
-            .unwrap_or_else(|| self.empty_state());
+        let content = if self.settings.is_some() {
+            self.settings_page()
+        } else {
+            self.active()
+                .map(|(_, tab)| self.terminal_layout(&tab.layout))
+                .unwrap_or_else(|| self.empty_state())
+        };
         let grid = self
             .current_pane()
             .map(|p| {
@@ -704,7 +707,9 @@ impl App {
         .align_y(Alignment::Center)
         .style(|_| surface(SIDEBAR));
         let mut main = column![].width(Length::Fill).height(Length::Fill);
-        if let Some(bar) = self.search_bar() {
+        if self.settings.is_none()
+            && let Some(bar) = self.search_bar()
+        {
             main = main.push(bar).push(separator());
         }
         let main = main
@@ -764,6 +769,7 @@ impl App {
                     menu_item(Icon::Close, "Close workspace", Message::AskCloseWorkspace)
                         .style(destructive),
                     separator(),
+                    menu_item(Icon::Settings, "Settings…", Message::OpenSettings),
                     menu_item(Icon::Close, "Quit Spooky", Message::Quit),
                 ]
                 .spacing(2),

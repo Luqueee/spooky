@@ -6,6 +6,8 @@ A native Rust dropdown terminal with persistent workspaces, tabs and split panes
 
 macOS is the initial runtime target. Linux is included in CI and packaging, but must be validated on real X11/Wayland desktops before claiming equivalent integration. Windows is deferred; future support must not require WSL.
 
+Mods (extensions for commands, status items, settings and panels) are designed in `docs/mods.md` and not implemented yet.
+
 ## Run from source
 
 Install Rust through rustup. The repository pins Rust 1.99.1 and declares Rust 1.98 as its minimum supported version.
@@ -25,8 +27,9 @@ sudo apt-get install libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcom
 
 ## Sessions and controls
 
-- **Ctrl+Shift+Space** (configurable): show/hide the dropdown window where global shortcuts are available. The window appears centred against the top edge of its display and takes keyboard focus. Pressed while the window is focused, the shortcut hides it; when it is hidden, minimized or behind another app, it brings the window forward instead. While the shortcut is registered the close button hides the window rather than quitting, and on macOS Spooky runs without a Dock icon (`dock_icon = true` keeps it). Without the shortcut (Wayland, or one that could not be registered) closing quits, so the window can never be stranded. **Cmd+Q** (macOS), **Ctrl+Shift+Q** or **Quit Spooky** in the **…** popover exits the GUI; sessions keep running.
+- **Ctrl+Shift+Space** (configurable): show/hide the dropdown window where global shortcuts are available. The window opens as wide as the display and half as tall (configurable, see **Settings**), flush against the top edge, and takes keyboard focus. Pressed while the window is focused, the shortcut hides it; when it is hidden, minimized or behind another app, it brings the window forward instead. While the shortcut is registered the close button hides the window rather than quitting, and on macOS Spooky runs without a Dock icon (`dock_icon = true` keeps it). Without the shortcut (Wayland, or one that could not be registered) closing quits, so the window can never be stranded. **Cmd+Q** (macOS), **Ctrl+Shift+Q** or **Quit Spooky** in the **…** popover exits the GUI; sessions keep running.
 - With the shortcut registered the window is created hidden, already at its top-centre position, and shown without macOS's scale-in animation, so opening it moves and resizes nothing. Measured at launch on an isolated instance (1100 px window) with a 1 ms geometry poll: before, the window appeared at the wrong place, grew about 2 % over roughly 100 ms and then jumped 160 px sideways (the distance depends on the window and display width); now it appears once, at its final frame. Reveals by the global shortcut use the same placement and animation setting but were not measured: synthetic key presses do not reach a global hotkey.
+- **Settings** (**Cmd+,**, Ctrl+Shift+, on Linux, or **Settings…** in the **…** popover) replaces the terminal with a page of the options below, grouped as Window, Shortcut and Terminal. Every change applies immediately and is written to `config.toml`: window size (percent of the display or pixels, with *Full screen / Top half / Top third* presets), what the window does when another app is clicked (nothing, hide, or stay on top), the Dock icon, the global shortcut (press **Record**, then the new keys; the new shortcut is registered before the old one is released, so a refusal keeps the working one), font size, cursor blinking and OSC 52 writes. A change that cannot be applied or saved is explained in the page's header. **Escape**, **Done**, or choosing a tab or workspace goes back to the terminal. Saving rewrites the whole file, so comments in it are not kept. The scrollback size belongs to the server and is not on the page.
 - Use the **+** beside **This computer** (or the current SSH host) to create a workspace on that machine and the sidebar rows to switch workspaces. The compact tab bar provides new tabs, **Attach** and pane capture; hover an icon for its label. The button beside the Spooky brand toggles the sidebar.
 - Click **This computer** (or the current SSH host) or its arrow to collapse/expand its workspace list without changing connections. Creating a workspace expands the list so the new workspace remains visible.
 - Right-click a workspace or use its **…** button for **Rename workspace** and **Close workspace**, including inactive workspaces. Rename opens a focused field; closure confirms the workspace name before terminating its shells. Escape or clicking outside dismisses the action menu.
@@ -62,6 +65,7 @@ Application shortcuts:
 | Select workspace 1–9, next, previous | Cmd+Option+1…9, ↓, ↑ | Ctrl+Shift+Alt+1…9, ↓, ↑ |
 | Toggle sidebar / quit | Cmd+B / Cmd+Q | Ctrl+Shift+B / Ctrl+Shift+Q |
 | Find in scrollback / next / previous | Cmd+F / Cmd+G / Cmd+Shift+G | Ctrl+Shift+F / Ctrl+Shift+G / Ctrl+Shift+Alt+G |
+| Settings | Cmd+, | Ctrl+Shift+, |
 
 Plain Ctrl combinations stay terminal input. Digits and brackets are matched by physical key, so they work on any layout. Shortcuts do not fire while a dialog or text field has the keyboard, except the search chords while the search field has it. The Linux column follows the same scheme but has not been run on Linux.
 
@@ -93,20 +97,29 @@ The transfer runs on its own thread, so typing and output continue; one upload r
 
 ## Configuration
 
-Create `$XDG_CONFIG_HOME/spooky/config.toml`, or `~/.config/spooky/config.toml` when XDG_CONFIG_HOME is unset:
+Open **Settings** (Cmd+,) to change these, or create `$XDG_CONFIG_HOME/spooky/config.toml` (`~/.config/spooky/config.toml` when XDG_CONFIG_HOME is unset) yourself. Every key is optional; an unknown key or an out-of-range value is an error at startup, not a silent default:
 
 ```toml
-font_size = 12.0
-width = 1440.0
-height = 900.0
+font_size = 12.0            # 8 to 48
+size = "percent"            # "percent" or "pixels"
+width_percent = 100.0       # 30 to 100, of the display (on macOS, of the area below the menu bar and Dock)
+height_percent = 50.0       # 20 to 100
+# width = 1440.0            # pixels, 400 to 4096, used when size = "pixels"
+# height = 900.0            # pixels, 200 to 2160
 shortcut = "Ctrl+Shift+Space"
 dock_icon = false
 osc52 = "write"
+cursor_blink = true
+on_blur = "none"            # "none", "hide" or "top"
 ```
+
+A file that sets `width` or `height` and no `size` keeps meaning pixels, as before this key existed. A percent window is never smaller than 720 × 440 px. The size is applied when the window opens and when a size setting changes; a window you resized by hand keeps its size when the shortcut shows it again.
 
 `dock_icon` only matters on macOS and only while the global shortcut is registered: by default Spooky then runs as an accessory app, with no Dock icon or menu bar, and the shortcut is the way back to a hidden window.
 
-`osc52` is `"write"` (programs may set the clipboard) or `"off"`.
+`on_blur` is what happens when another app takes the keyboard focus: `"none"` leaves the window where it is, `"top"` keeps it above every other window, and `"hide"` hides it (the global shortcut brings it back, so `"hide"` is refused without one). A native file dialog opened by Spooky does not count as clicking away.
+
+`osc52` is `"write"` (programs may set the clipboard) or `"off"`. `cursor_blink = false` keeps every cursor solid.
 
 The server reads its own file, `spooky/server.toml` in the same directory, on each machine it runs on (including a remote one):
 
@@ -175,8 +188,9 @@ Verified on macOS arm64:
 - Real OpenSSH under protocol v5 on an isolated loopback sshd: a remote workspace connected through the GUI and showed its shell, a tab was renamed there, and **Attach** uploaded a 3 MB file named `it's a shot.png` through the native file dialog and inserted the quoted remote path without Enter. The same upload function run directly against that sshd delivered identical bytes (SHA-256) into a mode-700 directory; a failed transfer (unreadable source) left nothing behind; a stale upload directory (older than seven days) was swept while a fresh one was kept. Unit tests with stand-in `ssh`/`sftp` cover cleanup after failure and cancellation, the sweep leaving unrelated directories alone, size-based timeouts and shell quoting; removing the cleanup call makes two of them fail.
 - Server lifecycle (isolated servers, real PTYs): `status` and `stop` against a live server (stop refused while shells ran, `--force` stopped it); a replacement server restored the workspace, renamed tab, divider position and fresh shells without reusing identities, and the saved file was written by itself shortly after each change. The native window relaunched onto a server that had been killed outright showed its workspace again (`restored 1 saved workspace(s)` in `server.log`). A damaged `workspaces.json` is set aside as `.corrupt` and never half restored; new panes start at the size of the window-sized pane; `scrollback_lines` in `server.toml` bounded a pane's history; a full log rotates and keeps one generation (unit and protocol tests).
 - Native window (isolated instance, real shell, protocol v6): a tab took the title set by `printf '\033]0;…'`; Cmd+click on an OSC 8 link to a `file:` target was refused in the footer, and on a plain URL opened it without its trailing full stop; an OSC 52 write set the system clipboard and the footer said so (the clipboard was put back afterwards); a DECSCUSR 1 cursor alternated between two frames while a steady one did not; `cat -v` with DECSET 1004 printed `^[[O` then `^[[I` as the keyboard focus left and returned; Cmd+F found three matches in the scrollback and highlighted them, and Enter, Cmd+G and Cmd+Shift+G moved between them with wrap-around without typing a letter into the field; a divider was dragged (the second pane grew from 57 to 82 columns) and a double-click restored even halves. Unit and protocol tests cover URL detection (brackets, sentence punctuation, word boundaries), the openable-scheme table, search matching and walking, divider geometry, OSC 52 baseline handling and focus-report routing.
+- Settings page (isolated instance with its own server, config directory and shortcut; background clicks and key presses): the **…** menu entry, **Cmd+,**, **Escape** and choosing a tab each opened or closed it. A font-size change refitted the pane (footer 174 × 25 to 149 × 22) and was written to the file together with a cursor-blink change. **Record** refused a bare letter with its reason and took `Ctrl+Alt+Shift+F8`, which was saved. *Top third* and *Full screen* resized the live window (Full screen came to exactly the display height below the menu bar, 1512 × 949 on a 1512 × 982 display; Top third came to the 440 px minimum), *Pixels* gave 1440 × 900 and the default opened as 1512 × 475. *Stay on top* moved the window from layer 0 to layer 3 and *Nothing* back; the Dock switch changed the activation policy from accessory to regular and back. With `on_blur = "hide"` the window hid when a focus-taking click handed focus back to the previous app. Unit tests cover the file format (round trip, old pixel-size files, mistakes are errors, percent sizing and the minimum), the recorder's key spelling against the global-hotkey parser, the **Cmd+,** chord, the presets and the focus-loss rule.
 - Packaging: `scripts/package.sh` built the bundle and zip in 22 s from a warm cache. Developer ID signing and notarization are scripted but have not been run: there are no credentials here.
 
-**Still unverified:** a remote session initiated from the Tailscale picker, SSH to a host other than loopback, mouse reporting, focus reporting and OSC 52 with real vim, htop or tmux (the checks used `cat -v` and `printf`), the Shift bypass with a physical keyboard, end-to-end PNG-save, dropping a file onto the window, the dropdown on a second display (it appears on the display the window is already on, not under the cursor) or in a fullscreen Space, Developer ID signing and notarization, plus real Linux desktops for the dropdown, shortcuts and everything else. **Not implemented:** hiding on loss of focus; input-method composition (iced's canvas cannot request an input method, so it needs a custom widget, and testing it needs a CJK input source enabled); search across a wrapped line; URLs wrapped onto two rows; per-pane directories in saved workspaces (a restored shell starts in its workspace's directory). GitHub CI passed for the initial repository version; everything since has only been checked locally.
+**Still unverified:** a remote session initiated from the Tailscale picker, SSH to a host other than loopback, mouse reporting, focus reporting and OSC 52 with real vim, htop or tmux (the checks used `cat -v` and `printf`), the Shift bypass with a physical keyboard, end-to-end PNG-save, dropping a file onto the window, the dropdown on a second display (it appears on the display the window is already on, not under the cursor) or in a fullscreen Space, Developer ID signing and notarization, plus real Linux desktops for the dropdown, shortcuts and everything else. From the settings page specifically: a press of a *newly recorded* global shortcut (the registration succeeded, but synthetic key presses cannot trigger a global hotkey), and `on_blur = "hide"` followed by a reveal with the real shortcut, where a focus event arriving right after the reveal could hide the window again. **Not implemented:** input-method composition (iced's canvas cannot request an input method, so it needs a custom widget, and testing it needs a CJK input source enabled); search across a wrapped line; URLs wrapped onto two rows; per-pane directories in saved workspaces (a restored shell starts in its workspace's directory); theme and colors on the settings page. GitHub CI passed for the previous commit (quality and package on macOS and Linux); the settings page has only been checked locally.
 
 The dependency graph currently reports a future-Rust incompatibility in upstream `block 0.1.6`. First-party clippy and rustdoc pass without suppressing that diagnostic.

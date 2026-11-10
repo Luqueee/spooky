@@ -35,6 +35,8 @@ pub(crate) enum Shortcut {
     Find,
     FindNext,
     FindPrevious,
+    /// Open the settings page.
+    Settings,
     Quit,
 }
 
@@ -83,6 +85,9 @@ pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option
         }
         Physical::Code(Code::BracketLeft) if macos && mods.shift() && !alt => {
             return Some(Shortcut::PreviousTab);
+        }
+        Physical::Code(Code::Comma) if !alt && !(macos && mods.shift()) => {
+            return Some(Shortcut::Settings);
         }
         _ => {}
     }
@@ -137,6 +142,88 @@ fn digit(physical: Physical) -> Option<usize> {
     })
 }
 
+/// The global-shortcut spelling of a key that may be bound system-wide.
+fn hotkey_key_name(code: Code) -> Option<String> {
+    let fixed = match code {
+        Code::Space => "Space",
+        Code::Enter => "Enter",
+        Code::Tab => "Tab",
+        Code::ArrowUp => "Up",
+        Code::ArrowDown => "Down",
+        Code::ArrowLeft => "Left",
+        Code::ArrowRight => "Right",
+        _ => "",
+    };
+    if !fixed.is_empty() {
+        return Some(fixed.to_owned());
+    }
+    // Letters, digits and function keys are named like their `Code` variants.
+    let name = format!("{code:?}");
+    let short = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .filter(|rest| rest.len() == 1 && rest.chars().all(|c| c.is_ascii_alphanumeric()))
+            .map(str::to_owned)
+    };
+    short("Key").or_else(|| short("Digit")).or_else(|| {
+        let number = name.strip_prefix('F')?;
+        (!number.is_empty() && number.chars().all(|c| c.is_ascii_digit())).then_some(name)
+    })
+}
+
+/// The spelling of a key press recorded as a new global shortcut (`"F10"`,
+/// `"Ctrl+Shift+Space"`). `None` while only modifiers are held, and the reason when
+/// the press cannot be a system-wide shortcut: a plain letter would take that key from
+/// every other application.
+pub(crate) fn hotkey_text(
+    key: &Key,
+    physical: Physical,
+    mods: Modifiers,
+) -> Option<Result<String, &'static str>> {
+    if matches!(
+        key,
+        Key::Named(
+            Named::Control
+                | Named::Shift
+                | Named::Alt
+                | Named::AltGraph
+                | Named::Super
+                | Named::Meta
+                | Named::Hyper
+                | Named::CapsLock
+                | Named::Fn
+                | Named::FnLock
+        )
+    ) {
+        return None;
+    }
+    let Some(name) = (match physical {
+        Physical::Code(code) => hotkey_key_name(code),
+        Physical::Unidentified(_) => None,
+    }) else {
+        return Some(Err("That key cannot be a global shortcut"));
+    };
+    let function_key = name.len() > 1 && name.starts_with('F') && name[1..].parse::<u8>().is_ok();
+    if !function_key && !(mods.control() || mods.alt() || mods.logo()) {
+        return Some(Err(
+            "Hold Ctrl, Alt or Cmd with the key, or use a function key",
+        ));
+    }
+    let mut text = String::new();
+    for (held, label) in [
+        (mods.control(), "Ctrl"),
+        (mods.alt(), "Alt"),
+        (mods.shift(), "Shift"),
+        (mods.logo(), "Cmd"),
+    ] {
+        if held {
+            text.push_str(label);
+            text.push('+');
+        }
+    }
+    text.push_str(&name);
+    Some(Ok(text))
+}
+
 /// The item at `position`, where position 8 (the 9 key) means the last item, as in browsers.
 pub(crate) fn nth(ids: &[u64], position: usize) -> Option<u64> {
     if position == 8 {
@@ -161,7 +248,7 @@ pub(crate) fn cycle(ids: &[u64], current: Option<u64>, forward: bool) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{Shortcut, cycle, nth, shortcut};
+    use super::{Shortcut, cycle, hotkey_text, nth, shortcut};
     use iced::keyboard::{
         Key, Modifiers,
         key::{Code, Named, Physical},
@@ -308,5 +395,88 @@ mod tests {
         assert_eq!(nth(&ids, 5), None);
         assert_eq!(nth(&ids, 8), Some(30));
         assert_eq!(nth(&[], 8), None);
+    }
+
+    #[test]
+    fn the_settings_chord_is_read_from_the_comma_key() {
+        let comma = Physical::Code(Code::Comma);
+        let key = Key::Character(",".into());
+        assert_eq!(shortcut(&key, comma, PRIMARY), Some(Shortcut::Settings));
+        assert_eq!(shortcut(&key, comma, Modifiers::empty()), None);
+        assert_eq!(shortcut(&key, comma, Modifiers::CTRL), None);
+    }
+
+    #[test]
+    fn a_recorded_press_becomes_a_shortcut_the_system_accepts() {
+        use global_hotkey::hotkey::HotKey;
+        let press = |key: Key, code: Code, mods| hotkey_text(&key, Physical::Code(code), mods);
+        let cases = [
+            (Key::Named(Named::F10), Code::F10, Modifiers::empty(), "F10"),
+            (
+                Key::Named(Named::Space),
+                Code::Space,
+                Modifiers::CTRL | Modifiers::SHIFT,
+                "Ctrl+Shift+Space",
+            ),
+            (
+                Key::Character("k".into()),
+                Code::KeyK,
+                Modifiers::LOGO | Modifiers::SHIFT,
+                "Shift+Cmd+K",
+            ),
+            (
+                Key::Character("1".into()),
+                Code::Digit1,
+                Modifiers::ALT,
+                "Alt+1",
+            ),
+            (
+                Key::Named(Named::ArrowDown),
+                Code::ArrowDown,
+                Modifiers::CTRL | Modifiers::ALT,
+                "Ctrl+Alt+Down",
+            ),
+        ];
+        for (key, code, mods, expected) in cases {
+            let text = press(key, code, mods)
+                .expect("a key was pressed")
+                .expect("usable");
+            assert_eq!(text, expected);
+            assert!(text.parse::<HotKey>().is_ok(), "{text} must parse");
+        }
+    }
+
+    #[test]
+    fn a_press_that_would_take_a_typing_key_from_every_app_is_refused() {
+        let letter = |mods| {
+            hotkey_text(
+                &Key::Character("a".into()),
+                Physical::Code(Code::KeyA),
+                mods,
+            )
+        };
+        assert!(
+            matches!(letter(Modifiers::empty()), Some(Err(_))),
+            "bare letter"
+        );
+        assert!(
+            matches!(letter(Modifiers::SHIFT), Some(Err(_))),
+            "shift and a letter"
+        );
+        // Holding only a modifier is not an answer yet.
+        assert!(
+            hotkey_text(
+                &Key::Named(Named::Control),
+                Physical::Code(Code::ControlLeft),
+                Modifiers::CTRL
+            )
+            .is_none()
+        );
+        // A key with no stable identity cannot be registered.
+        let unknown = Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified);
+        assert!(matches!(
+            hotkey_text(&Key::Character("a".into()), unknown, Modifiers::CTRL),
+            Some(Err(_))
+        ));
     }
 }

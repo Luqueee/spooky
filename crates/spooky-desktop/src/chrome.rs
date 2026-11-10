@@ -114,6 +114,7 @@ pub enum Icon {
     ChevronRight,
     Close,
     Pencil,
+    Settings,
     Search,
     ChevronUp,
     Copy,
@@ -221,6 +222,11 @@ impl canvas::Program<Message> for Vector {
                     (5., 16.),
                     (9., 20.),
                 ]),
+                Icon::Settings => {
+                    line(&[(4., 7.), (20., 7.)]);
+                    line(&[(4., 12.), (20., 12.)]);
+                    line(&[(4., 17.), (20., 17.)]);
+                }
                 Icon::Ghost => {
                     p.move_to(Point::new(5., 20.));
                     p.line_to(Point::new(5., 10.));
@@ -256,6 +262,11 @@ impl canvas::Program<Message> for Vector {
             Icon::More => {
                 for x in [5., 12., 19.] {
                     frame.fill(&canvas::Path::circle(Point::new(x, 12.), 1.1), self.color);
+                }
+            }
+            Icon::Settings => {
+                for (x, y) in [(9., 7.), (15., 12.), (9., 17.)] {
+                    frame.fill(&canvas::Path::circle(Point::new(x, y), 2.2), self.color);
                 }
             }
             _ => {}

@@ -1,6 +1,7 @@
 //! Native GPU frontend for persistent Spooky sessions.
 
 mod chrome;
+mod config;
 mod divider;
 mod link;
 mod links;
@@ -9,11 +10,13 @@ mod macos_app;
 #[cfg(target_os = "macos")]
 mod macos_keyboard;
 mod pointer;
+mod settings;
 mod shortcuts;
 mod tailscale;
 mod terminal;
 mod view;
 
+use config::{Config, OnBlur, Osc52, SizeMode};
 use iced::{Point, Rectangle, Size, Subscription, Task, clipboard, event, keyboard, window};
 use link::{Channel, Command, Event, Link};
 use shortcuts::Shortcut;
@@ -26,65 +29,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// What programs in a terminal may do to the clipboard with OSC 52.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Osc52 {
-    /// Programs may set the clipboard. Reading it is never allowed.
-    Write,
-    /// Clipboard requests from programs are ignored.
-    Off,
-}
-#[derive(Clone, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Config {
-    font_size: f32,
-    width: f32,
-    height: f32,
-    shortcut: String,
-    /// Keep a Dock icon on macOS. By default Spooky runs without one, like other
-    /// dropdown terminals, whenever the global shortcut is available to bring it back.
-    dock_icon: bool,
-    /// Whether a program's OSC 52 request may set the clipboard: `"write"` (the
-    /// default; the footer says when it happens) or `"off"`.
-    osc52: Osc52,
-}
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            font_size: 12.0,
-            width: 1440.0,
-            height: 900.0,
-            shortcut: "Ctrl+Shift+Space".into(),
-            dock_icon: false,
-            osc52: Osc52::Write,
-        }
-    }
-}
-impl Config {
-    fn load() -> anyhow::Result<Self> {
-        let home = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))
-            .ok_or_else(|| anyhow::anyhow!("Cannot determine configuration directory"))?;
-        let path = home.join("spooky/config.toml");
-        let config: Self = match std::fs::read_to_string(&path) {
-            Ok(s) => toml::from_str(&s).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(e) => return Err(anyhow::anyhow!("{}: {e}", path.display())),
-        };
-        if !(8.0..=48.0).contains(&config.font_size)
-            || !(400.0..=4096.0).contains(&config.width)
-            || !(200.0..=2160.0).contains(&config.height)
-        {
-            anyhow::bail!(
-                "Invalid font_size or window dimensions in {}",
-                path.display()
-            );
-        }
-        Ok(config)
-    }
-}
 #[derive(Clone, Debug)]
 enum Message {
     Tick,
@@ -170,6 +114,41 @@ enum Message {
     HoverPane(u64, bool),
     Copy,
     PasteClipboard,
+    OpenSettings,
+    CloseSettings,
+    Setting(Change),
+}
+/// A change made on the settings page.
+#[derive(Clone, Copy, Debug)]
+enum Change {
+    FontSize(f32),
+    Size(SizeMode),
+    WidthPercent(f32),
+    HeightPercent(f32),
+    WidthPixels(f32),
+    HeightPixels(f32),
+    /// Width and height as percentages of the display.
+    Preset(f32, f32),
+    OnBlur(OnBlur),
+    DockIcon(bool),
+    CursorBlink(bool),
+    Osc52(bool),
+    RecordShortcut,
+    CancelRecording,
+    ResetShortcut,
+}
+/// The settings page while it is open.
+#[derive(Default)]
+struct SettingsPage {
+    /// Waiting for the keys of a new global shortcut.
+    recording: bool,
+    /// Why the last change was refused or could not be saved.
+    problem: Option<String>,
+}
+/// The registered global shortcut, with the manager that owns the registration.
+struct Hotkeys {
+    manager: global_hotkey::GlobalHotKeyManager,
+    registered: global_hotkey::hotkey::HotKey,
 }
 #[derive(Clone, Copy)]
 enum Confirm {
@@ -262,9 +241,19 @@ struct App {
     modifiers: keyboard::Modifiers,
     /// The pane under the pointer, which shows its quick actions.
     hover_pane: Option<u64>,
+    /// The global shortcut, when the session allows one.
+    hotkeys: Option<Hotkeys>,
+    /// The settings page, while it is open.
+    settings: Option<SettingsPage>,
+    /// The configured window size has not been applied yet: it needs the display.
+    size_pending: bool,
+    /// A native file dialog is open, so losing the focus to it is not "clicking away".
+    dialog_open: bool,
 }
 impl App {
-    fn new(config: Config, status: String, hotkey_id: Option<u32>) -> (Self, Task<Message>) {
+    fn new(config: Config, status: String, hotkeys: Option<Hotkeys>) -> (Self, Task<Message>) {
+        let hotkey_id = hotkeys.as_ref().map(|keys| keys.registered.id());
+        let size_pending = config.size_mode() == SizeMode::Percent;
         (
             Self {
                 config,
@@ -314,6 +303,10 @@ impl App {
                 focus_reported: None,
                 modifiers: keyboard::Modifiers::default(),
                 hover_pane: None,
+                hotkeys,
+                settings: None,
+                size_pending,
+                dialog_open: false,
             },
             window::latest().map(|id| id.map(Message::Opened).unwrap_or(Message::Tick)),
         )
@@ -495,6 +488,7 @@ impl App {
                 .search
                 .as_ref()
                 .map(|_| Message::SearchStep(FindDirection::Previous)),
+            Shortcut::Settings => Some(Message::OpenSettings),
             Shortcut::Quit => Some(Message::Quit),
         };
         message.map_or_else(Task::none, Task::done)
@@ -533,16 +527,44 @@ impl App {
                     };
                 }
             }
-            Message::WindowFocus(focused) => self.focused = focused,
+            Message::WindowFocus(focused) => {
+                self.focused = focused;
+                if !focused
+                    && hides_on_blur(
+                        self.config.on_blur,
+                        self.hidden,
+                        self.dialog_open,
+                        self.hotkey_id.is_some(),
+                    )
+                    && let Some(id) = self.window
+                {
+                    return self.hide(id);
+                }
+            }
             Message::Present(id, monitor, size) => {
                 self.hidden = false;
-                self.terminal_focused = true;
+                if self.settings.is_none() {
+                    self.terminal_focused = true;
+                }
+                // The configured size is applied the first time the display is known
+                // and after a setting changes it; a later reveal only re-centres, so a
+                // window the user resized keeps its size.
+                let target = match monitor {
+                    Some(monitor) if self.size_pending => {
+                        self.size_pending = false;
+                        self.config.window_size(usable_area(monitor))
+                    }
+                    _ => size,
+                };
                 let mut tasks = vec![
                     window::set_mode(id, window::Mode::Windowed),
                     window::minimize(id, false),
                     window::gain_focus(id),
                 ];
-                if let Some(at) = dropdown_origin(monitor, size) {
+                if target != size {
+                    tasks.insert(0, window::resize(id, target));
+                }
+                if let Some(at) = dropdown_origin(monitor, target) {
                     tasks.insert(0, window::move_to(id, at));
                 }
                 return Task::batch(tasks);
@@ -633,9 +655,7 @@ impl App {
                     #[cfg(target_os = "macos")]
                     {
                         macos_app::show_windows_instantly();
-                        if !self.config.dock_icon {
-                            macos_app::hide_dock_icon();
-                        }
+                        macos_app::set_dock_icon(self.config.dock_icon);
                     }
                     return self.reveal(id);
                 }
@@ -656,6 +676,7 @@ impl App {
                 }
             }
             Message::NewWorkspace => {
+                self.close_settings();
                 self.workspaces_open = true;
                 let ids = self
                     .snapshot
@@ -667,6 +688,7 @@ impl App {
                 self.create_workspace(format!("Workspace {n}"));
             }
             Message::NewTab => {
+                self.close_settings();
                 self.context_menu = None;
                 if let Some((w, _)) = self.active() {
                     let id = w.id;
@@ -686,6 +708,7 @@ impl App {
                 }
             }
             Message::SplitPane(pane, axis) => {
+                self.close_settings();
                 self.menu_open = false;
                 self.context_menu = None;
                 if let Some(ids) = self
@@ -699,6 +722,7 @@ impl App {
                 }
             }
             Message::Workspace(id) => {
+                self.close_settings();
                 self.context_menu = None;
                 self.connection_open = false;
                 self.terminal_focused = true;
@@ -711,6 +735,7 @@ impl App {
                 }
             }
             Message::Tab(id) => {
+                self.close_settings();
                 self.context_menu = None;
                 self.tab = Some(id);
                 self.pane = None;
@@ -979,6 +1004,7 @@ impl App {
             Message::Upload => {
                 let pane = self.pane;
                 if pane.is_some() {
+                    self.dialog_open = true;
                     return Task::perform(
                         async {
                             rfd::AsyncFileDialog::new()
@@ -991,6 +1017,7 @@ impl App {
                 }
             }
             Message::Drop(path) | Message::Picked(Some(path)) => {
+                self.dialog_open = false;
                 if let Some(p) = self.pane {
                     if self
                         .link
@@ -1004,20 +1031,10 @@ impl App {
                     }
                 }
             }
-            Message::Picked(None) => {}
+            Message::Picked(None) => self.dialog_open = false,
             Message::Bounds(p, b) => {
                 self.bounds.insert(p, b);
-                let (cw, ch) = terminal::metrics(self.config.font_size);
-                let cols = ((b.width / cw).floor() as u16).max(1);
-                let rows = ((b.height / ch).floor() as u16).max(1);
-                if self.grids.get(&p) != Some(&(cols, rows)) {
-                    self.grids.insert(p, (cols, rows));
-                    self.send(Request::Resize {
-                        pane: p,
-                        cols,
-                        rows,
-                    });
-                }
+                self.fit(p, b);
             }
             Message::FocusPane(pane, report) => {
                 self.pane = Some(pane);
@@ -1058,6 +1075,7 @@ impl App {
                 }
             }
             Message::Captured(shot, b) => {
+                self.dialog_open = true;
                 return Task::perform(
                     async move {
                         let scale = shot.scale_factor;
@@ -1089,6 +1107,7 @@ impl App {
                 );
             }
             Message::Saved(result) => {
+                self.dialog_open = false;
                 self.status = match result {
                     Ok(p) => format!("Saved capture: {p}"),
                     Err(e) => format!("Capture: {e}"),
@@ -1122,6 +1141,14 @@ impl App {
                 self.context_menu = None;
                 return clipboard::read().map(Message::Paste);
             }
+            Message::OpenSettings => {
+                self.menu_open = false;
+                self.context_menu = None;
+                self.settings.get_or_insert_with(SettingsPage::default);
+                self.terminal_focused = false;
+            }
+            Message::CloseSettings => self.close_settings(),
+            Message::Setting(change) => return self.change_setting(change),
             Message::Blink => self.blink_on = !self.blink_on,
             Message::LinkHover(target) => self.hover_link = target,
             Message::OpenLink(target) => {
@@ -1189,6 +1216,9 @@ impl App {
             }
             Message::Key(key, physical, mods, typed, status) => {
                 self.blink_on = true;
+                if self.settings.as_ref().is_some_and(|page| page.recording) {
+                    return self.record_shortcut(&key, physical, mods);
+                }
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
                     && self.search.is_some()
                     && !(self.menu_open
@@ -1221,6 +1251,12 @@ impl App {
                     self.connection_open = false;
                     self.confirm = None;
                     self.terminal_focused = true;
+                    return Task::none();
+                }
+                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                    && self.settings.is_some()
+                {
+                    self.close_settings();
                     return Task::none();
                 }
                 let chord = shortcuts::shortcut(&key, physical, mods);
@@ -1313,12 +1349,211 @@ impl App {
     }
     /// Whether the selected pane's blinking cursor should be animating.
     fn blink_wanted(&self) -> bool {
-        self.focused
+        self.config.cursor_blink
+            && self.focused
             && self.terminal_focused
             && !self.hidden
             && self
                 .current_pane()
                 .is_some_and(|p| p.cursor.blinking && p.cursor.visible && !p.exited)
+    }
+    /// Tells the server the grid a pane's area holds, when that changed.
+    fn fit(&mut self, pane: u64, area: Rectangle) {
+        let (cw, ch) = terminal::metrics(self.config.font_size);
+        let cols = ((area.width / cw).floor() as u16).max(1);
+        let rows = ((area.height / ch).floor() as u16).max(1);
+        if self.grids.get(&pane) != Some(&(cols, rows)) {
+            self.grids.insert(pane, (cols, rows));
+            self.send(Request::Resize { pane, cols, rows });
+        }
+    }
+    /// Refits every pane after the font changed: the areas stay, the grids do not.
+    fn refit_grids(&mut self) {
+        let areas: Vec<(u64, Rectangle)> = self
+            .bounds
+            .iter()
+            .map(|(pane, area)| (*pane, *area))
+            .collect();
+        for (pane, area) in areas {
+            self.fit(pane, area);
+        }
+    }
+    fn close_settings(&mut self) {
+        if self.settings.take().is_some() {
+            self.terminal_focused = true;
+        }
+    }
+    fn settings_problem(&mut self, problem: Option<String>) {
+        if let Some(page) = self.settings.as_mut() {
+            page.problem = problem;
+        }
+    }
+    /// Applies a change from the settings page: checks it, saves the file and updates
+    /// whatever shows the value, without a restart.
+    fn change_setting(&mut self, change: Change) -> Task<Message> {
+        let mut next = self.config.clone();
+        let clamp = |value: f32, range: &std::ops::RangeInclusive<f32>| {
+            value.clamp(*range.start(), *range.end())
+        };
+        match change {
+            Change::FontSize(value) => next.font_size = clamp(value, &config::FONT_SIZE),
+            Change::Size(mode) => next.size = Some(mode),
+            Change::WidthPercent(value) => {
+                next.size = Some(SizeMode::Percent);
+                next.width_percent = clamp(value, &config::WIDTH_PERCENT);
+            }
+            Change::HeightPercent(value) => {
+                next.size = Some(SizeMode::Percent);
+                next.height_percent = clamp(value, &config::HEIGHT_PERCENT);
+            }
+            Change::WidthPixels(value) => {
+                next.size = Some(SizeMode::Pixels);
+                next.width = Some(clamp(value, &config::WIDTH_PX));
+            }
+            Change::HeightPixels(value) => {
+                next.size = Some(SizeMode::Pixels);
+                next.height = Some(clamp(value, &config::HEIGHT_PX));
+            }
+            Change::Preset(width, height) => {
+                next.size = Some(SizeMode::Percent);
+                next.width_percent = width;
+                next.height_percent = height;
+            }
+            Change::OnBlur(on_blur) => {
+                if on_blur == OnBlur::Hide && self.hotkey_id.is_none() {
+                    self.settings_problem(Some(
+                        "Hiding needs the global shortcut, which is not available here".into(),
+                    ));
+                    return Task::none();
+                }
+                next.on_blur = on_blur;
+            }
+            Change::DockIcon(show) => next.dock_icon = show,
+            Change::CursorBlink(on) => next.cursor_blink = on,
+            Change::Osc52(on) => next.osc52 = if on { Osc52::Write } else { Osc52::Off },
+            Change::RecordShortcut => {
+                if self.hotkeys.is_none() {
+                    self.settings_problem(Some(
+                        "The global shortcut is not available in this session".into(),
+                    ));
+                } else if let Some(page) = self.settings.as_mut() {
+                    page.recording = true;
+                    page.problem = None;
+                }
+                return Task::none();
+            }
+            Change::CancelRecording => {
+                if let Some(page) = self.settings.as_mut() {
+                    page.recording = false;
+                }
+                return Task::none();
+            }
+            Change::ResetShortcut => return self.change_shortcut(Config::default().shortcut),
+        }
+        self.apply_config(next)
+    }
+    /// Checks and saves `next`, then updates whatever shows each value that changed.
+    fn apply_config(&mut self, next: Config) -> Task<Message> {
+        if let Err(problem) = next.validate() {
+            self.settings_problem(Some(problem));
+            return Task::none();
+        }
+        let previous = std::mem::replace(&mut self.config, next);
+        let saved = self.config.save();
+        self.settings_problem(saved.err().map(|error| format!("Not saved: {error:#}")));
+        let mut tasks = Vec::new();
+        if previous.font_size != self.config.font_size {
+            self.refit_grids();
+        }
+        let size = |config: &Config| {
+            (
+                config.size_mode(),
+                config.width_px(),
+                config.height_px(),
+                config.width_percent,
+                config.height_percent,
+            )
+        };
+        if size(&previous) != size(&self.config) {
+            self.size_pending = true;
+            if let Some(id) = self.window {
+                tasks.push(self.reveal(id));
+            }
+        }
+        if previous.on_blur != self.config.on_blur
+            && let Some(id) = self.window
+        {
+            tasks.push(window::set_level(id, level_for(self.config.on_blur)));
+        }
+        #[cfg(target_os = "macos")]
+        if previous.dock_icon != self.config.dock_icon {
+            // Without a global shortcut nothing could bring a buried window back.
+            macos_app::set_dock_icon(self.config.dock_icon || self.hotkey_id.is_none());
+        }
+        Task::batch(tasks)
+    }
+    /// Binds the global shortcut to `text` and saves it. A refusal leaves the working
+    /// shortcut in place.
+    fn change_shortcut(&mut self, text: String) -> Task<Message> {
+        match self.register_shortcut(&text) {
+            Ok(()) => {
+                let mut next = self.config.clone();
+                next.shortcut = text;
+                self.apply_config(next)
+            }
+            Err(problem) => {
+                self.settings_problem(Some(problem));
+                Task::none()
+            }
+        }
+    }
+    /// Registers the new shortcut before releasing the old one, so there is never a
+    /// moment (or a failure) that leaves the window without a way back.
+    fn register_shortcut(&mut self, text: &str) -> Result<(), String> {
+        let hotkey: global_hotkey::hotkey::HotKey =
+            text.parse().map_err(|error| format!("{text}: {error}"))?;
+        let keys = self
+            .hotkeys
+            .as_mut()
+            .ok_or_else(|| "The global shortcut is not available in this session".to_owned())?;
+        if keys.registered != hotkey {
+            keys.manager
+                .register(hotkey)
+                .map_err(|error| format!("Cannot use {text}: {error}"))?;
+            // The old binding is released only now. Failing to release it is not a
+            // reason to refuse the new one.
+            let _ = keys.manager.unregister(keys.registered);
+            keys.registered = hotkey;
+        }
+        self.hotkey_id = Some(hotkey.id());
+        Ok(())
+    }
+    /// Takes a key press as the new global shortcut while the settings page records one.
+    fn record_shortcut(
+        &mut self,
+        key: &keyboard::Key,
+        physical: keyboard::key::Physical,
+        mods: keyboard::Modifiers,
+    ) -> Task<Message> {
+        if *key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+            if let Some(page) = self.settings.as_mut() {
+                page.recording = false;
+            }
+            return Task::none();
+        }
+        match shortcuts::hotkey_text(key, physical, mods) {
+            None => Task::none(),
+            Some(Err(problem)) => {
+                self.settings_problem(Some(problem.to_owned()));
+                Task::none()
+            }
+            Some(Ok(text)) => {
+                if let Some(page) = self.settings.as_mut() {
+                    page.recording = false;
+                }
+                self.change_shortcut(text)
+            }
+        }
     }
     /// Tells programs that asked for it (DECSET 1004) when the keyboard focus
     /// reaches or leaves their pane.
@@ -1471,6 +1706,30 @@ fn dropdown_origin(monitor: Option<Size>, window: Size) -> Option<Point> {
 /// falls back to the top-left corner.
 fn initial_position(window: Size, monitor: Size) -> Point {
     dropdown_origin(Some(monitor), window).unwrap_or(Point::ORIGIN)
+}
+/// Whether losing the keyboard focus should hide the window: only when asked to, while
+/// the window is shown, no native dialog took the focus, and the global shortcut can
+/// bring it back.
+fn hides_on_blur(on_blur: OnBlur, hidden: bool, dialog_open: bool, has_shortcut: bool) -> bool {
+    on_blur == OnBlur::Hide && !hidden && !dialog_open && has_shortcut
+}
+/// The part of the display `monitor` that a window may cover. On macOS that leaves out
+/// the menu bar and a visible Dock, so a "full height" window does not hang below the
+/// screen; elsewhere the whole display is used.
+fn usable_area(monitor: Size) -> Size {
+    #[cfg(target_os = "macos")]
+    if let Some((width, height)) = macos_app::usable_area() {
+        return Size::new(width.min(monitor.width), height.min(monitor.height));
+    }
+    monitor
+}
+/// The window level a focus-loss behaviour calls for.
+fn level_for(on_blur: OnBlur) -> window::Level {
+    if on_blur == OnBlur::Top {
+        window::Level::AlwaysOnTop
+    } else {
+        window::Level::Normal
+    }
 }
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -1818,24 +2077,31 @@ fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid global shortcut: {e}"))?;
     let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let (manager, hotkey_id, status) = if wayland {
-        (None,None,"Wayland: global shortcuts and positioning are unavailable; use your compositor's shortcut".to_owned())
+    let (hotkeys, status) = if wayland {
+        (None,"Wayland: global shortcuts and positioning are unavailable; use your compositor's shortcut".to_owned())
     } else {
         match global_hotkey::GlobalHotKeyManager::new().and_then(|manager| {
             manager.register(shortcut)?;
             Ok(manager)
         }) {
             Ok(manager) => (
-                Some(manager),
-                Some(shortcut.id()),
-                "Starting session…".into(),
+                Some(Hotkeys {
+                    manager,
+                    registered: shortcut,
+                }),
+                "Starting session…".to_owned(),
             ),
-            Err(e) => (None, None, format!("Global shortcut unavailable: {e}")),
+            Err(e) => (None, format!("Global shortcut unavailable: {e}")),
         }
     };
-    let size = Size::new(config.width, config.height);
+    let dropdown = hotkeys.is_some();
+    let size = config.initial_size();
+    let level = level_for(config.on_blur);
+    // The application state owns the shortcut registration; the boot function hands
+    // it over once.
+    let hotkeys = std::cell::Cell::new(hotkeys);
     let result = iced::application(
-        move || App::new(config.clone(), status.clone(), hotkey_id),
+        move || App::new(config.clone(), status.clone(), hotkeys.take()),
         App::update,
         App::view,
     )
@@ -1845,7 +2111,8 @@ fn main() -> anyhow::Result<()> {
     .default_font(iced::Font::MONOSPACE)
     .window(window::Settings {
         size,
-        min_size: Some(Size::new(720.0, 440.0)),
+        min_size: Some(config::MIN_WINDOW),
+        level,
         #[cfg(target_os = "macos")]
         platform_specific: window::settings::PlatformSpecific {
             title_hidden: true,
@@ -1854,13 +2121,12 @@ fn main() -> anyhow::Result<()> {
         },
         // With the global shortcut the window starts hidden, and is shown (placed,
         // focused) by the same path as every later reveal.
-        visible: hotkey_id.is_none(),
+        visible: !dropdown,
         position: window::Position::SpecificWith(initial_position),
         exit_on_close_request: false,
         ..Default::default()
     })
     .run();
-    drop(manager);
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -1868,8 +2134,8 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         ClipboardAction, ContextTarget, MAX_TAB_LABEL, clipboard_action, context_target_exists,
-        dropdown_origin, find_split, focus_reports, is_chord_echo, key_bytes, label_for,
-        new_clipboard_writes, paste_bytes, selection_text,
+        dropdown_origin, find_split, focus_reports, hides_on_blur, is_chord_echo, key_bytes,
+        label_for, new_clipboard_writes, paste_bytes, selection_text,
     };
     use iced::{
         Point, Size,
@@ -1890,6 +2156,27 @@ mod tests {
             "a window wider than its display starts at the left edge"
         );
         assert_eq!(dropdown_origin(None, window), None);
+    }
+
+    #[test]
+    fn losing_focus_hides_only_a_shown_window_that_can_come_back() {
+        use crate::config::OnBlur;
+        // (on_blur, hidden, dialog_open, has_shortcut)
+        assert!(hides_on_blur(OnBlur::Hide, false, false, true));
+        assert!(!hides_on_blur(OnBlur::None, false, false, true));
+        assert!(!hides_on_blur(OnBlur::Top, false, false, true));
+        assert!(
+            !hides_on_blur(OnBlur::Hide, true, false, true),
+            "already hidden"
+        );
+        assert!(
+            !hides_on_blur(OnBlur::Hide, false, true, true),
+            "a file dialog took the focus, not another app"
+        );
+        assert!(
+            !hides_on_blur(OnBlur::Hide, false, false, false),
+            "without the global shortcut a hidden window is lost"
+        );
     }
 
     #[test]

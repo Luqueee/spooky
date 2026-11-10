@@ -26,12 +26,18 @@ Creating workspaces, tabs and splits starts real shells. Explicit pane, tab and 
 - Scrollback search (highlighted matches, next/previous with wrap-around, closable with Escape), a scrollback position indicator, and a configurable scrollback size.
 - Links: Cmd/Ctrl+click opens OSC 8 and plain `http(s)` URLs, only for `http`, `https` and `mailto`, with the real target visible before opening. OSC 52 clipboard writes are honoured and announced, can be turned off, and clipboard reads are never answered. Output never causes a command to run.
 - The machine row owns workspace creation and disclosure; neither its name nor its arrow opens SSH. Each workspace exposes rename and confirmed closure through right-click and an explicit actions button.
-- Configurable global dropdown shortcut where supported. Its effect follows the window's real state: it hides a focused window and brings a hidden, minimized or covered one forward, centred against the top of its display and focused. While the shortcut is registered, closing the window hides it and the macOS Dock icon is optional; without a shortcut, closing quits so the window cannot be stranded. Unsupported compositor features must be surfaced.
+- Configurable global dropdown shortcut where supported. Its effect follows the window's real state: it hides a focused window and brings a hidden, minimized or covered one forward, anchored to the top of its display and focused. While the shortcut is registered, closing the window hides it and the macOS Dock icon is optional; without a shortcut, closing quits so the window cannot be stranded. Unsupported compositor features must be surfaced.
+- The dropdown's size is configurable as a share of the usable display (default full width, half height) or in pixels. What the window does when another application takes the focus is configurable: nothing (default), hide, or stay on top. Hiding requires a working global shortcut and does not trigger while one of Spooky's own file dialogs has the focus.
+- A settings page, reached from the keyboard and the mouse, exposes window size, focus-loss behaviour, Dock icon, global shortcut (recorded from a key press, never leaving the application without a working shortcut), font size, cursor blinking and OSC 52 writes. Changes apply immediately, are saved to `config.toml`, and a refused or unsaved change is explained. Invalid files are errors rather than silent defaults.
 - GPU-rendered terminal text, ANSI colors, cursor (shape and blinking), wide/combining Unicode and terminal application input modes, including mouse and focus reporting.
 - Grid resizing updates both terminal state and the PTY. Clipboard paste respects bracketed-paste mode. Text fields must never leak input into shells.
 - Copy selection and scrollback navigation.
 - Packaging produces a signed application bundle with an icon on macOS (ad-hoc by default, Developer ID and notarization when configured) and an archive on Linux.
 - Network/process operations do not block the GUI thread.
+
+## Mods (planned)
+
+Not implemented; the design is in `docs/mods.md`. Mods are user-installed extensions (commands, status items, settings sections, panels, session events) built on the same command and contribution registry as Spooky's own features. A mod never blocks the GUI thread or stops a terminal session, runs only after the user enables it, and can do only what its granted capabilities allow; output never causes a mod to write to a pane unless a separate capability was granted. There is no marketplace, automatic download or automatic update.
 
 ## Remote module
 

@@ -24,7 +24,7 @@ tokio = { version = "1", features = ["sync", "process", "time", "io-util"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 iced_winit = { version = "0.14", default-features = false }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSTextInputContext", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSScreen", "NSTextInputContext", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSGeometry"] }
 
 [lints]
