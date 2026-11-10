@@ -31,6 +31,24 @@ src/
                      shortcuts.rs, tabs.rs, layout.rs, test_support.rs
 ```
 
+`spooky-server` and `spooky-core` follow the same rules:
+
+```
+spooky-server/src/
+  main.rs      module list and the entry point (Unix only)
+  cli.rs       serve, bridge, status and stop: argument dispatch and the control commands
+  daemon.rs    the socket: single-instance lock, accept loop, one request per line, the save thread
+  server.rs    Server: the shared state, request execution, save and restore, shutdown
+  state.rs     State (workspaces, panes, identities), layout edits, and the validation of names, sizes and directories
+  pane/        mod.rs (a pane: PTY, emulator, listener, snapshot), render.rs (rows and the row cache), shell.rs (the shell command)
+  settings.rs  server.toml; persist.rs (saved workspaces); search.rs (scrollback matches); log.rs
+spooky-core/src/
+  lib.rs       the wire protocol
+  paths.rs     the own-user socket and state directories
+  client/      mod.rs (Client and Target), local.rs (Unix socket), ssh.rs (SSH child and its helpers),
+               upload.rs (SFTP transfers), framing.rs (bounded JSON lines), errors.rs (Cancelled, Unrecoverable)
+```
+
 Rules: a feature is a folder; features do not import one another (they meet in `App`, which composes them, and talk through messages and small traits `App` implements, such as `settings::Shortcuts`); the shared leaf modules (`config`, `ui`, `platform`) depend on no feature; tests live beside the code they test. A feature reports what the rest of the application must do as data (`settings::Effect`) instead of reaching into it, which is also what lets its logic be tested without a display. The same rules will apply to mods.
 
 ## Transport
