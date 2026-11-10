@@ -18,7 +18,7 @@ static SCANCODES: LazyLock<HashMap<Physical, u16>> = LazyLock::new(|| {
         .collect()
 });
 
-pub(super) fn option_text(physical: Physical, modifiers: Modifiers) -> Option<String> {
+pub(crate) fn option_text(physical: Physical, modifiers: Modifiers) -> Option<String> {
     let code = *SCANCODES.get(&physical)?;
     let mut flags = NSEventModifierFlags::Option;
     flags.set(NSEventModifierFlags::Shift, modifiers.shift());

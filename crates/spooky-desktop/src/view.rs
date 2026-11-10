@@ -1,9 +1,9 @@
 //! Compact native workspace chrome; terminal state remains server-owned.
 use crate::{
     App, Confirm, ContextTarget, Message,
-    chrome::*,
-    divider::{Divider, THICKNESS},
-    tailscale, terminal,
+    features::splits::{Divider, THICKNESS},
+    terminal,
+    ui::*,
 };
 use iced::{
     Alignment, Border, Color, Element, Length, Padding, Point, Rectangle, Vector, mouse,
@@ -12,7 +12,7 @@ use iced::{
         stack, text, text_input, tooltip,
     },
 };
-use spooky_core::{Axis, FindDirection, Layout};
+use spooky_core::{Axis, Layout};
 use std::time::Duration;
 
 /// Padding around each terminal pane. The divider geometry accounts for it.
@@ -228,8 +228,14 @@ impl App {
             )
             .padding([5, 7])
             .style(quiet)
-            .on_press(Message::Upload),
-            action(Icon::Camera, "Capture active pane", Message::Capture),
+            .on_press(Message::Attachments(
+                crate::features::attachments::Message::Attach,
+            )),
+            action(
+                Icon::Camera,
+                "Capture active pane",
+                Message::Attachments(crate::features::attachments::Message::Capture),
+            ),
             action(Icon::More, "Workspace actions", Message::ToggleMenu),
         ]
         .spacing(3)
@@ -363,7 +369,9 @@ impl App {
                     button(text("Browse Tailscale devices").size(10))
                         .padding([5, 8])
                         .style(quiet)
-                        .on_press(Message::OpenTailscale),
+                        .on_press(Message::Tailscale(
+                            crate::features::tailscale::Message::Open,
+                        )),
                 )
                 .push(
                     text_input("user@host or SSH alias", &self.target)
@@ -468,10 +476,7 @@ impl App {
             } => {
                 // A divider being dragged shows where it is now, not where the
                 // server last saw it.
-                let ratio = self
-                    .split_drag
-                    .filter(|(split, _)| split == id)
-                    .map_or(*ratio, |(_, ratio)| ratio);
+                let ratio = self.splits.dragged_ratio(*id).unwrap_or(*ratio);
                 let side = |layout, share: u16| {
                     let (width, height) = match axis {
                         Axis::Horizontal => (Length::Fill, Length::FillPortion(share)),
@@ -619,55 +624,15 @@ impl App {
 
     /// What the footer says: the target of a link under the pointer, else the status.
     fn footer_text(&self) -> String {
-        match &self.hover_link {
+        match self.hyperlinks.hover() {
             Some(target) => format!("↗ {target}"),
             None => self.status.clone(),
         }
     }
 
-    /// The scrollback search strip above the terminal.
-    fn search_bar(&self) -> Option<Element<'_, Message>> {
-        let search = self.search.as_ref()?;
-        let result = match search.result {
-            None => String::new(),
-            Some(None) => "No matches".to_owned(),
-            Some(Some((current, total))) => format!("{current} of {total}"),
-        };
-        Some(
-            container(
-                row![
-                    icon(Icon::Search, MUTED),
-                    text_input("Find in scrollback", &search.query)
-                        .id("search-input")
-                        .size(11)
-                        .padding([4, 6])
-                        .on_input(Message::SearchInput)
-                        .on_submit(Message::SearchStep(FindDirection::Next)),
-                    text(result).size(10).color(MUTED),
-                    action(
-                        Icon::ChevronUp,
-                        "Previous match",
-                        Message::SearchStep(FindDirection::Previous)
-                    ),
-                    action(
-                        Icon::Chevron,
-                        "Next match",
-                        Message::SearchStep(FindDirection::Next)
-                    ),
-                    action(Icon::Close, "Close search", Message::SearchClose),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            )
-            .padding([4, 10])
-            .style(|_| surface(SIDEBAR))
-            .into(),
-        )
-    }
-
     pub(super) fn view(&self) -> Element<'_, Message> {
-        let content = if self.settings.is_some() {
-            self.settings_page()
+        let content = if self.settings.is_open() {
+            crate::features::settings::view(&self.settings, &self.config, self.hotkeys.is_some())
         } else {
             self.active()
                 .map(|(_, tab)| self.terminal_layout(&tab.layout))
@@ -707,8 +672,8 @@ impl App {
         .align_y(Alignment::Center)
         .style(|_| surface(SIDEBAR));
         let mut main = column![].width(Length::Fill).height(Length::Fill);
-        if self.settings.is_none()
-            && let Some(bar) = self.search_bar()
+        if !self.settings.is_open()
+            && let Some(bar) = crate::features::search::view(&self.search)
         {
             main = main.push(bar).push(separator());
         }
@@ -769,7 +734,11 @@ impl App {
                     menu_item(Icon::Close, "Close workspace", Message::AskCloseWorkspace)
                         .style(destructive),
                     separator(),
-                    menu_item(Icon::Settings, "Settings…", Message::OpenSettings),
+                    menu_item(
+                        Icon::Settings,
+                        "Settings…",
+                        Message::Settings(crate::features::settings::Message::Open)
+                    ),
                     menu_item(Icon::Close, "Quit Spooky", Message::Quit),
                 ]
                 .spacing(2),
@@ -821,7 +790,11 @@ impl App {
                     column![
                         copy,
                         menu_item(Icon::Paste, "Paste", Message::PasteClipboard),
-                        menu_item(Icon::Search, "Find in scrollback", Message::SearchOpen),
+                        menu_item(
+                            Icon::Search,
+                            "Find in scrollback",
+                            Message::Search(crate::features::search::Message::Open)
+                        ),
                         separator(),
                         menu_item(
                             Icon::SplitColumns,
@@ -864,8 +837,14 @@ impl App {
             ]
             .into();
         }
-        if self.tailscale_open {
-            body = modal(body, self.tailscale_picker(), Some(Message::CloseTailscale));
+        if self.tailscale.is_open() {
+            body = modal(
+                body,
+                crate::features::tailscale::view(&self.tailscale),
+                Some(Message::Tailscale(
+                    crate::features::tailscale::Message::Close,
+                )),
+            );
         }
         if self.renaming {
             body = modal(
@@ -992,95 +971,5 @@ impl App {
             );
         }
         body
-    }
-
-    fn tailscale_picker(&self) -> Element<'_, Message> {
-        let query = self.tailscale_query.to_lowercase();
-        let user = self.tailscale_user.trim();
-        let user_valid = user.is_empty()
-            || (!user.starts_with('-')
-                && user
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
-        let mut devices = column![].spacing(3);
-        match &self.tailscale {
-            tailscale::Discovery::Idle | tailscale::Discovery::Loading => {
-                devices = devices.push(
-                    text("Reading local Tailscale client…")
-                        .size(11)
-                        .color(MUTED),
-                );
-            }
-            tailscale::Discovery::Failed(error) => {
-                devices = devices.push(text(error).size(11).color(TEXT));
-            }
-            tailscale::Discovery::Ready(network) => {
-                let mut shown = 0;
-                for peer in &network.peers {
-                    if !peer.name.to_lowercase().contains(&query) && !peer.host.contains(&query) {
-                        continue;
-                    }
-                    shown += 1;
-                    let entry = button(
-                        row![
-                            dot(if peer.online { SUCCESS } else { MUTED }),
-                            column![
-                                text(&peer.name).size(11).color(if peer.online {
-                                    TEXT
-                                } else {
-                                    MUTED
-                                }),
-                                text(format!(
-                                    "{} · {} · {}",
-                                    peer.host,
-                                    peer.os,
-                                    if peer.online { "online" } else { "offline" }
-                                ))
-                                .size(9)
-                                .color(MUTED),
-                            ]
-                            .spacing(3)
-                            .width(Length::Fill),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding(8)
-                    .width(Length::Fill)
-                    .style(quiet);
-                    devices = devices.push(if peer.online && user_valid {
-                        entry.on_press(Message::SelectTailscale(peer.host.clone()))
-                    } else {
-                        entry
-                    });
-                }
-                if shown == 0 {
-                    devices = devices.push(
-                        text(if network.peers.is_empty() {
-                            "No other devices in this tailnet."
-                        } else {
-                            "No matching devices."
-                        })
-                        .size(11)
-                        .color(MUTED),
-                    );
-                }
-            }
-        }
-        let refresh = button(text("Refresh").size(10))
-            .padding([5, 8])
-            .style(quiet);
-        column![
-            row![
-                text("Tailscale devices").size(14).color(TEXT).width(Length::Fill),
-                action(Icon::Close, "Close Tailscale devices", Message::CloseTailscale),
-            ].align_y(Alignment::Center),
-            text("Uses your installed Tailscale client. Selecting a device prepares SSH; Connect starts the session.").size(10).color(MUTED),
-            text_input("Search devices or IP", &self.tailscale_query).size(11).padding(7).on_input(Message::TailscaleQuery),
-            text_input("SSH user (optional)", &self.tailscale_user).size(11).padding(7).on_input(Message::TailscaleUser),
-            text(if user_valid { "Remote device needs SSH and spooky-server." } else { "Invalid SSH user: use letters, digits, dot, underscore or hyphen." }).size(10).color(MUTED),
-            container(scrollable(devices)).height(240),
-            if matches!(self.tailscale, tailscale::Discovery::Loading) { refresh } else { refresh.on_press(Message::RefreshTailscale) },
-        ].spacing(10).into()
     }
 }

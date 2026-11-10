@@ -4,7 +4,7 @@ use std::{collections::HashMap, net::IpAddr, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command};
 
 #[derive(Clone, Debug)]
-pub(super) struct Peer {
+pub(crate) struct Peer {
     pub name: String,
     pub host: String,
     pub online: bool,
@@ -12,12 +12,12 @@ pub(super) struct Peer {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Network {
+pub(crate) struct Network {
     pub peers: Vec<Peer>,
 }
 
 #[derive(Default)]
-pub(super) enum Discovery {
+pub(crate) enum Discovery {
     #[default]
     Idle,
     Loading,
@@ -167,7 +167,7 @@ async fn run() -> Result<Network, String> {
     )
 }
 
-pub(super) async fn discover() -> Result<Network, String> {
+pub(crate) async fn discover() -> Result<Network, String> {
     tokio::time::timeout(Duration::from_secs(10), run())
         .await
         .map_err(|_| {

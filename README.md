@@ -156,7 +156,7 @@ The Rust lint/toolchain policy and `AGENTS.md` were adapted from the authorized 
 
 - `crates/spooky-core`: versioned protocol, secure local IPC and SSH/SFTP client.
 - `crates/spooky-server`: persistent PTYs, terminal emulation and workspace tree.
-- `crates/spooky-desktop`: GPU rendering, focus/input, clipboard and native window/file integration.
+- `crates/spooky-desktop`: GPU rendering, focus/input, clipboard and native window/file integration, organised as `features/` (one folder per feature) plus shared modules.
 
 See [SPEC.md](SPEC.md) for the product contract, [architecture](docs/architecture.md) for module boundaries, and [AGENTS.md](AGENTS.md) for contributor/AI rules.
 
@@ -165,7 +165,7 @@ See [SPEC.md](SPEC.md) for the product contract, [architecture](docs/architectur
 Verified on macOS arm64:
 
 - Workspace build and release packaging; the ad-hoc signed `Spooky.app` verifies with `codesign --verify --strict` and carries its icon.
-- `cargo fmt`, strict clippy, 82 automated tests, doc tests and warning-free first-party rustdoc.
+- `cargo fmt`, strict clippy, 118 automated tests, doc tests and warning-free first-party rustdoc.
 - The complete workspace checks with both pinned Rust 1.99.1 and MSRV 1.98.0.
 - Real PTY output, ANSI truecolor, wide Unicode, resize, splits/tabs, explicit closure and reconnect retaining a shell environment variable.
 - Real SSH/SFTP against an isolated loopback sshd with a pinned host key: session detach/reconnect and a filename containing a space/apostrophe. Transferred bytes matched by SHA-256.

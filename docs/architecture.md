@@ -8,6 +8,31 @@
 
 The GUI never owns the lifetime of a shell. The server never needs a display server or GPU.
 
+## Source layout
+
+The layout of `spooky-desktop` (reached one step at a time; see [mods](mods.md), phase 0). Entries marked "to move" are still flat files:
+
+```
+src/
+  main.rs            startup, and for now the application state (App) and its update loop
+  features/          one folder per feature, each with its own state, message type, update logic and view
+    settings/        mod.rs (state, changes, effects), page.rs (the view)
+    window/          dropdown.rs (placement, focus-loss rule), hotkey.rs (the global shortcut)
+    tailscale/       mod.rs (picker state, messages, the choice it makes), discovery.rs (the client), view.rs
+    hyperlinks/      mod.rs (which links may be opened, the link under the pointer)
+    splits/          mod.rs (the dragged ratio, throttled sends), divider.rs (the divider widget)
+    search/          mod.rs (the query, what was asked and answered), view.rs (the strip)
+    attachments/     mod.rs (file dialog, dropped files, quoted path insertion, pane capture)
+  terminal/          canvas.rs (draws a pane), pointer.rs, input.rs (keys, paste, focus reports), copy.rs (selection, OSC 52 writes), links.rs (finding links in output)
+  ui/                theme.rs (colours, styles), icons.rs (vector icons and icon buttons)
+  platform/          macos/{app.rs, keyboard.rs}: code that exists because of one operating system
+  config.rs          the typed config.toml model, shared by every feature
+  to move:           view.rs and the rest of App (into app/), link.rs (the server connection, into features/connection),
+                     shortcuts.rs, tabs.rs, layout.rs, test_support.rs
+```
+
+Rules: a feature is a folder; features do not import one another (they meet in `App`, which composes them, and talk through messages and small traits `App` implements, such as `settings::Shortcuts`); the shared leaf modules (`config`, `ui`, `platform`) depend on no feature; tests live beside the code they test. A feature reports what the rest of the application must do as data (`settings::Effect`) instead of reaching into it, which is also what lets its logic be tested without a display. The same rules will apply to mods.
+
 ## Transport
 
 Local requests use a private Unix-domain socket in an owner-only directory. A client can start the sibling spooky-server executable, or an explicit SPOOKY_SERVER path. SPOOKY_SOCKET supports isolated environments and tests.

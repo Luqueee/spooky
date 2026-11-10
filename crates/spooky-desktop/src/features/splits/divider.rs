@@ -2,8 +2,13 @@
 
 use crate::{
     Message,
-    chrome::{ACCENT, BACKGROUND, BORDER},
+    ui::{ACCENT, BACKGROUND, BORDER},
 };
+
+/// The message a divider sends.
+fn tell(message: super::Message) -> Message {
+    Message::Splits(message)
+}
 use iced::{Point, Rectangle, Size, Theme, mouse, widget::canvas};
 use spooky_core::{Axis, MIN_SPLIT_SHARE};
 use std::time::{Duration, Instant};
@@ -61,25 +66,29 @@ impl canvas::Program<Message> for Divider {
                 if again {
                     state.dragging = false;
                     return Some(
-                        canvas::Action::publish(Message::ResetSplit(self.split)).and_capture(),
+                        canvas::Action::publish(tell(super::Message::Reset(self.split)))
+                            .and_capture(),
                     );
                 }
                 state.dragging = true;
                 Some(
-                    canvas::Action::publish(Message::DragSplit(self.split, cursor.position()?))
-                        .and_capture(),
+                    canvas::Action::publish(tell(super::Message::Drag(
+                        self.split,
+                        cursor.position()?,
+                    )))
+                    .and_capture(),
                 )
             }
             // The pointer may leave the thin divider while it is dragged.
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => Some(
-                canvas::Action::publish(Message::DragSplit(self.split, cursor.position()?))
+                canvas::Action::publish(tell(super::Message::Drag(self.split, cursor.position()?)))
                     .and_capture(),
             ),
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
                 if state.dragging =>
             {
                 state.dragging = false;
-                Some(canvas::Action::publish(Message::EndSplitDrag).and_capture())
+                Some(canvas::Action::publish(tell(super::Message::End)).and_capture())
             }
             _ => None,
         }

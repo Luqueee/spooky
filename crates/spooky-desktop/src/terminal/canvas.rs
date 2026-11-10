@@ -1,7 +1,6 @@
-use crate::{
-    ContextTarget, Message, links,
-    pointer::{self, Action, Button},
-};
+use super::links;
+use super::pointer::{self, Action, Button};
+use crate::{ContextTarget, Message};
 use iced::{Color, Font, Point, Rectangle, Size, Theme, font, keyboard, mouse, widget::canvas};
 use spooky_core::{CursorShape, MouseTracking, Pane};
 
@@ -249,7 +248,7 @@ impl canvas::Program<Message> for Terminal<'_> {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let (cw, ch) = metrics(self.font_size);
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), crate::chrome::BACKGROUND);
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), crate::ui::BACKGROUND);
         let selection = self
             .selection
             .map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
@@ -339,7 +338,7 @@ impl canvas::Program<Message> for Terminal<'_> {
                     f32::from(link.row) * ch + ch - 2.0,
                 ),
                 Size::new(f32::from(link.end.saturating_sub(link.start) + 1) * cw, 1.0),
-                crate::chrome::ACCENT,
+                crate::ui::ACCENT,
             );
         }
         if self.pane.cursor.visible && self.cursor_on {
@@ -348,7 +347,7 @@ impl canvas::Program<Message> for Terminal<'_> {
                 f32::from(self.pane.cursor.row) * ch,
             );
             let color = if self.focused {
-                crate::chrome::ACCENT
+                crate::ui::ACCENT
             } else {
                 Color::from_rgb8(100, 110, 125)
             };
@@ -393,19 +392,19 @@ impl canvas::Program<Message> for Terminal<'_> {
             frame.fill_rectangle(
                 Point::new(bounds.width - 4.0, (track - thumb) * from_top),
                 Size::new(3.0, thumb),
-                crate::chrome::MUTED.scale_alpha(0.7),
+                crate::ui::MUTED.scale_alpha(0.7),
             );
             let label = format!("↑ {} of {} lines", self.pane.scrolled, self.pane.history);
             let width = label.chars().count() as f32 * 6.2 + 14.0;
             frame.fill_rectangle(
                 Point::new(bounds.width - width - 12.0, 4.0),
                 Size::new(width, 18.0),
-                crate::chrome::SIDEBAR.scale_alpha(0.9),
+                crate::ui::SIDEBAR.scale_alpha(0.9),
             );
             frame.fill_text(canvas::Text {
                 content: label,
                 position: Point::new(bounds.width - width - 5.0, 8.0),
-                color: crate::chrome::TEXT,
+                color: crate::ui::TEXT,
                 size: 10.0.into(),
                 font: TERMINAL_FONT,
                 ..Default::default()
