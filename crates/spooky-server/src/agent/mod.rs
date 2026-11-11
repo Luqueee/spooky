@@ -8,6 +8,7 @@
 //! stored and shown, never acted on, and only a user action answers a question it asks.
 
 mod omp;
+mod path;
 mod transcript;
 
 pub(crate) use transcript::Transcript;

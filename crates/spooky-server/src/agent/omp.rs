@@ -311,7 +311,9 @@ impl Backend for Omp {
     /// `SPOOKY_OMP` names another executable.
     fn command(&self) -> Command {
         let program = env::var_os("SPOOKY_OMP").unwrap_or_else(|| OsString::from("omp"));
-        let mut command = Command::new(program);
+        // A server started over SSH has a minimal PATH; look where user programs live too.
+        let mut command = Command::new(super::path::locate(&program));
+        super::path::extend(&mut command);
         command.args(["--mode", "rpc-ui"]).args(&self.forwarded);
         command
     }
