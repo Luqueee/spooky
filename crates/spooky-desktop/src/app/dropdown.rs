@@ -1,8 +1,5 @@
 use super::{App, Message};
-use crate::{
-    features::window::{dropdown_origin, hides_on_blur, usable_area},
-    platform,
-};
+use crate::features::window::{dropdown_origin, hides_on_blur, usable_area};
 use iced::{Task, window};
 
 impl App {
@@ -69,8 +66,8 @@ impl App {
                 if self.hotkeys.is_some() {
                     #[cfg(target_os = "macos")]
                     {
-                        platform::macos::app::show_windows_instantly();
-                        platform::macos::app::set_dock_icon(self.config.dock_icon);
+                        crate::platform::macos::app::show_windows_instantly();
+                        crate::platform::macos::app::set_dock_icon(self.config.dock_icon);
                     }
                     return self.reveal(id);
                 }

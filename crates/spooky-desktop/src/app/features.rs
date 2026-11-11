@@ -10,7 +10,7 @@ use crate::{
         window::{Hotkeys, level_for},
     },
     link::Command,
-    platform, shortcuts,
+    shortcuts,
 };
 use iced::{Task, window};
 use std::time::Instant;
@@ -125,7 +125,7 @@ impl App {
                 }
                 settings::Effect::DockIcon(show) => {
                     #[cfg(target_os = "macos")]
-                    platform::macos::app::set_dock_icon(show);
+                    crate::platform::macos::app::set_dock_icon(show);
                     #[cfg(not(target_os = "macos"))]
                     let _ = show;
                 }
