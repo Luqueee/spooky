@@ -47,7 +47,7 @@ The two unverified rows are intentions, not facts: their protocols have not been
 
 **As built (phase 4, partly).** The shim is a script in `<state dir>/shim/omp`, written by the server at start. Shells get `SPOOKY_PANE`, `SPOOKY_SHIM_DIR` and the shim directory first on `PATH`; because profiles usually put their own directories first, zsh is started with a `ZDOTDIR` whose `.zshenv` restores the user's, runs their `.zshenv` and moves the shim to the front before the first prompt, and bash does the same through `PROMPT_COMMAND`, and fish through a `vendor_conf.d` snippet found via `XDG_DATA_DIRS` that moves the shim to the front at the first prompt. Other shells only get the `PATH` entry. `omp` at a terminal runs `spooky-server agent-open omp -- <arguments>`, which sends `OpenAgent { pane, backend, cwd, args }`: the server starts the agent with the same pane id as the shell: the snapshot shows the agent where the terminal was and hides the terminal, which keeps running and shows again, whole screen included, when the pane is closed (`ClosePane` on a pane with an agent closes only the agent; a second one closes the shell). Closing the tab or workspace ends both. The saved state marks such an agent (`covers`) so a restarted server starts a new shell under it. The GUI focuses the agent. The server accepts `--model`, `--thinking`, `--approval-mode`, `--resume` (each with a value), `-c`/`--continue`, `--no-session`, `--auto-approve` and at most one prompt that contains a space (a single word is a subcommand such as `commit`); with anything else (`-p`, `--help`, subcommands), a non-terminal stdin or stdout, no `SPOOKY_PANE`, or any failure, the shim runs the next `omp` on `PATH`. The setting `agent_shim` in `server.toml` is **on by default** (a change from the first design, which had it off), because the point is that typing `omp` does what the user expects; `false` disables it. Not done: there is no client capability check (the tab simply exists for whoever attaches next), and Ctrl+C does not abort.
 
-## Protocol (v10)
+## Protocol (v11)
 
 Implemented in phase 1, all bounded like the rest:
 
@@ -110,6 +110,8 @@ Each phase is usable and verified on its own, with a real `omp`, an isolated ser
 On macOS an agent pane that fills its tab is shown by a web page (React, `web/agent`) in a `WKWebView`, which gives the conversation the typography, shadows and menus the iced widgets do not; the native view remains for splits and other platforms. See `docs/architecture.md` (*Agent web view*) for the ownership and the security rules: the page draws untrusted text without raw HTML or images, cannot fetch or navigate, and can only post validated actions that become the same requests the native composer sends.
 
 The model list searches without autocorrect or autocapitalization and orders each provider's models newest first. The program reports no release dates, so the order comes from the names: the first run of version numbers in the id (`5.6`, `4-5`), then a `YYYYMMDD` stamp, then the name (`web/agent/src/features/models/models.ts`).
+
+A file edit's tool entry carries the diff `omp` reports in the result's `details` (`AgentTool::diff`, v11), one line per line of the file shown as `<sign><number>|<text>`; the page tints and numbers it, the native view colours it, and the entry's own output (the whole file again) is dropped when a diff exists.
 
 ## Look
 

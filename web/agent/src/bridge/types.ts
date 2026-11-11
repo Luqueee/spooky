@@ -11,6 +11,8 @@ export interface Tool {
   detail: string;
   state: ToolState;
   output: string;
+  /** What an edit changed: lines of "<sign><number>|<text>", sign a space, - or +. */
+  diff?: string;
 }
 
 export interface Message {

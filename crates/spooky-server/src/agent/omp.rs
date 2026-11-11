@@ -564,6 +564,7 @@ fn parse_events(frame: &Value) -> Vec<Event> {
                     .and_then(|r| r.get("content"))
                     .map(text_of)
                     .unwrap_or_default(),
+                diff: diff_of(frame.get("result").and_then(|r| r.get("details"))),
                 failed: frame.get("isError").and_then(Value::as_bool) == Some(true),
             }],
             None => Vec::new(),
@@ -685,6 +686,7 @@ fn history_events(messages: &[Value]) -> Vec<Event> {
                     events.push(Event::ToolFinished {
                         call: call.to_owned(),
                         output: content.map(text_of).unwrap_or_default(),
+                        diff: diff_of(message.get("details")),
                         failed: message.get("isError").and_then(Value::as_bool) == Some(true),
                     });
                 }
@@ -693,6 +695,15 @@ fn history_events(messages: &[Value]) -> Vec<Event> {
         }
     }
     events
+}
+
+/// The diff of a file edit, from a tool result's `details`; empty when there is none.
+fn diff_of(details: Option<&Value>) -> String {
+    details
+        .and_then(|d| d.get("diff"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Messages the agent wrote to itself (directives, reminders) are not the user's.
@@ -821,6 +832,18 @@ mod tests {
                 detail: "/etc/hosts".into()
             }]
         );
+        // An edit reports what it changed next to its output.
+        assert_eq!(
+            events(
+                r#"{"type":"tool_execution_end","toolCallId":"e1","toolName":"edit","result":{"content":[{"type":"text","text":"[f#1]\n1:a"}],"details":{"diff":" 1|a\n-2|b\n+2|B","path":"/f"}},"isError":false}"#
+            ),
+            [Event::ToolFinished {
+                call: "e1".into(),
+                output: "[f#1]\n1:a".into(),
+                diff: " 1|a\n-2|b\n+2|B".into(),
+                failed: false
+            }]
+        );
         assert_eq!(
             events(
                 r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},"isError":true}"#
@@ -828,6 +851,7 @@ mod tests {
             [Event::ToolFinished {
                 call: "c1".into(),
                 output: "a\nb".into(),
+                diff: String::new(),
                 failed: true
             }]
         );
@@ -978,6 +1002,7 @@ mod tests {
                 Event::ToolFinished {
                     call: "c".into(),
                     output: "data".into(),
+                    diff: String::new(),
                     failed: false
                 },
             ]

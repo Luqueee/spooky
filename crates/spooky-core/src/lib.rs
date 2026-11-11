@@ -9,7 +9,7 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 /// Maximum encoded request or response, including its newline delimiter.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
@@ -328,8 +328,13 @@ pub struct AgentTool {
     pub detail: String,
     /// How far it got.
     pub state: ToolState,
-    /// What it printed, bounded.
+    /// What it printed, bounded. Empty when [`AgentTool::diff`] says what it did.
     pub output: String,
+    /// What an edit changed, as the program reports it: one line per line of the file
+    /// shown, `<sign><number>|<text>` with a space, `-` or `+` as the sign. Bounded;
+    /// empty for tools that change no file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub diff: String,
 }
 
 /// One entry of an agent's conversation. Everything in it came from a model, a tool

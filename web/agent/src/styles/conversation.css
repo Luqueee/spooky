@@ -11,4 +11,12 @@
 .tool .detail{font:12px var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}.dot.running{background:var(--warn)}.dot.done{background:var(--ok)}.dot.failed{background:var(--bad)}
 .output{margin:8px 0 0;padding:8px 10px;background:#16181e;border-radius:8px;font:12px/1.5 var(--mono);max-height:240px;overflow:auto;white-space:pre-wrap}
-.output .add{color:var(--ok)}.output .del{color:var(--bad)}
+.changes{margin-left:auto;font:12px var(--mono);flex:none}.changes .plus{color:var(--ok)}.changes .minus{color:var(--bad)}
+.diff{margin:8px 0 0;background:#16181e;border-radius:8px;font:12px/1.55 var(--mono);max-height:320px;overflow:auto}
+.diff-row{display:flex;white-space:pre}
+.diff-row .gutter{width:4ch;padding:0 6px 0 8px;text-align:right;color:#5d6373;flex:none;user-select:none}
+.diff-row .sign{width:2ch;flex:none;text-align:center;user-select:none}
+.diff-row .code-text{flex:1;padding-right:10px}
+.diff-row.add{background:rgba(125,185,156,.14)}.diff-row.add .sign{color:var(--ok)}
+.diff-row.del{background:rgba(226,133,143,.14)}.diff-row.del .sign{color:var(--bad)}
+.diff-row.note{color:var(--muted)}

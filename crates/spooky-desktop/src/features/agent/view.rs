@@ -312,10 +312,15 @@ fn tool_view<'a>(
         .into()
 }
 
-/// What a tool printed, in the terminal's font; an edit's added and removed lines are
-/// coloured.
+/// What a tool printed, in the terminal's font, or what an edit changed; added and
+/// removed lines are coloured.
 fn output(tool: &AgentTool) -> Element<'_, Message> {
-    if tool.output.is_empty() {
+    let (shown, diff) = if tool.diff.is_empty() {
+        (&tool.output, false)
+    } else {
+        (&tool.diff, true)
+    };
+    if shown.is_empty() {
         return text(if tool.state == ToolState::Running {
             "Running…"
         } else {
@@ -325,8 +330,7 @@ fn output(tool: &AgentTool) -> Element<'_, Message> {
         .color(MUTED)
         .into();
     }
-    let diff = tool.name == "edit";
-    column(tool.output.lines().map(|line| {
+    column(shown.lines().map(|line| {
         let color = match line.chars().next() {
             Some('+') if diff => SUCCESS,
             Some('-') if diff => DANGER,

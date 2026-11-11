@@ -15,6 +15,8 @@ pub(super) const MAX_TOTAL_BYTES: usize = 128 * 1024;
 pub(super) const MAX_ENTRY_BYTES: usize = 32 * 1024;
 /// Output kept for one tool call.
 pub(super) const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024;
+/// Diff kept for one tool call.
+pub(super) const MAX_TOOL_DIFF_BYTES: usize = 16 * 1024;
 /// A tool's purpose and main argument.
 const MAX_TOOL_LABEL_BYTES: usize = 512;
 /// Marks text cut at its bound.
@@ -128,6 +130,7 @@ impl Transcript {
                         detail: bounded(detail, MAX_TOOL_LABEL_BYTES),
                         state: ToolState::Running,
                         output: String::new(),
+                        diff: String::new(),
                     });
                 }
                 if self.calls.len() >= MAX_REMEMBERED_CALLS {
@@ -139,6 +142,7 @@ impl Transcript {
             Event::ToolFinished {
                 call,
                 output,
+                diff,
                 failed,
             } => {
                 let Some(id) = self.calls.get(&call).copied() else {
@@ -157,7 +161,13 @@ impl Transcript {
                 } else {
                     ToolState::Done
                 };
-                tool.output = bounded(output, MAX_TOOL_OUTPUT_BYTES);
+                // An edit's own output is the whole file again; its diff says what it did.
+                tool.output = if diff.is_empty() {
+                    bounded(output, MAX_TOOL_OUTPUT_BYTES)
+                } else {
+                    String::new()
+                };
+                tool.diff = bounded(diff, MAX_TOOL_DIFF_BYTES);
                 true
             }
             Event::Failure(error) => {
@@ -530,6 +540,7 @@ mod tests {
         assert!(transcript.apply(Event::ToolFinished {
             call: "c1".into(),
             output: "127.0.0.1 localhost".into(),
+            diff: String::new(),
             failed: false,
         }));
         let shown = transcript.snapshot("x");
@@ -543,6 +554,7 @@ mod tests {
         assert!(!transcript.apply(Event::ToolFinished {
             call: "unknown".into(),
             output: String::new(),
+            diff: String::new(),
             failed: true,
         }));
     }
@@ -559,6 +571,7 @@ mod tests {
         transcript.apply(Event::ToolFinished {
             call: "c".into(),
             output: "exit 1".into(),
+            diff: String::new(),
             failed: true,
         });
         transcript.apply(Event::Failure("no model".into()));
@@ -764,11 +777,45 @@ mod tests {
         transcript.apply(Event::ToolFinished {
             call: "c".into(),
             output: "y".repeat(100_000),
+            diff: String::new(),
             failed: false,
         });
         let shown = transcript.snapshot("x");
         let output = &shown.messages[0].tool.as_ref().expect("tool").output;
         assert!(output.len() <= MAX_TOOL_OUTPUT_BYTES + TRUNCATED.len());
+    }
+
+    #[test]
+    fn an_edit_keeps_its_diff_instead_of_the_whole_file_and_a_huge_diff_is_cut() {
+        let mut transcript = Transcript::default();
+        for call in ["e1", "e2"] {
+            transcript.apply(Event::ToolStarted {
+                call: call.into(),
+                name: "edit".into(),
+                intent: "Editing".into(),
+                detail: "/f".into(),
+            });
+        }
+        transcript.apply(Event::ToolFinished {
+            call: "e1".into(),
+            output: "the whole file".into(),
+            diff: " 1|a\n-2|b\n+2|B".into(),
+            failed: false,
+        });
+        transcript.apply(Event::ToolFinished {
+            call: "e2".into(),
+            output: "x".into(),
+            diff: "+1|y".repeat(100_000),
+            failed: false,
+        });
+        let shown = transcript.snapshot("x");
+        let first = shown.messages[0].tool.as_ref().expect("tool");
+        assert_eq!(
+            (first.output.as_str(), first.diff.as_str()),
+            ("", " 1|a\n-2|b\n+2|B")
+        );
+        let second = shown.messages[1].tool.as_ref().expect("tool");
+        assert!(second.diff.len() <= MAX_TOOL_DIFF_BYTES + TRUNCATED.len());
     }
 
     #[test]

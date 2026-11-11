@@ -68,6 +68,8 @@ pub(crate) enum Event {
     ToolFinished {
         call: String,
         output: String,
+        /// What a file edit changed, as the program reports it; empty when none.
+        diff: String,
         failed: bool,
     },
     /// A request failed.
