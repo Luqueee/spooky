@@ -1,21 +1,27 @@
 use super::{App, Message};
 use crate::{
     features::attachments::{self},
-    link::{self, Event},
+    link::{self},
     shortcuts,
 };
 use iced::{Subscription, event, keyboard, window};
 use std::time::Duration;
 
+fn hotkey_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(8, async |mut output| {
+        while let Some(id) = link::next_hotkey().await {
+            if output.send(Message::Hotkey(id)).await.is_err() {
+                return;
+            }
+        }
+    })
+}
 fn background_events() -> impl iced::futures::Stream<Item = Message> {
     use iced::futures::SinkExt;
     iced::stream::channel(32, async |mut output| {
         while let Some(event) = link::next_event().await {
-            let message = match event {
-                Event::Hotkey(id) => Message::Hotkey(id),
-                event => Message::Link(event),
-            };
-            if output.send(message).await.is_err() {
+            if output.send(Message::Link(event)).await.is_err() {
                 return;
             }
         }
@@ -29,6 +35,7 @@ pub(crate) fn subscription(app: &App) -> Subscription<Message> {
     };
     Subscription::batch([
         Subscription::run(background_events),
+        Subscription::run(hotkey_events),
         blink,
         event::listen_with(|event, status, id| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed {

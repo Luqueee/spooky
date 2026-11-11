@@ -31,7 +31,6 @@ pub(crate) enum Event {
     Status(u64, String),
     Failed(u64, String),
     Uploaded(u64, u64, String),
-    Hotkey(u32),
     Connection(u64, Channel, bool),
     /// The command connection could not be opened: why, and whether it will be retried.
     Unreachable(u64, String, bool),
@@ -43,6 +42,14 @@ pub(crate) enum Event {
 static EVENTS: OnceLock<Mutex<tokio::sync::mpsc::Receiver<Event>>> = OnceLock::new();
 pub(crate) async fn next_event() -> Option<Event> {
     EVENTS.get()?.lock().await.recv().await
+}
+/// Presses of the global shortcut. They have a channel of their own: sharing the
+/// bounded one with snapshots, a press that arrived while output was flooding it was
+/// dropped, and the shortcut seemed not to answer. A person cannot press fast enough
+/// for this to grow.
+static HOTKEYS: OnceLock<Mutex<tokio::sync::mpsc::UnboundedReceiver<u32>>> = OnceLock::new();
+pub(crate) async fn next_hotkey() -> Option<u32> {
+    HOTKEYS.get()?.lock().await.recv().await
 }
 
 /// Waits between automatic reconnection attempts: doubling from 2 s up to 30 s,
@@ -93,11 +100,12 @@ impl Link {
         let (tx, commands) = mpsc::sync_channel(256);
         let (events, rx) = tokio::sync::mpsc::channel(16);
         let _ = EVENTS.set(Mutex::new(rx));
-        let hotkey_events = events.clone();
+        let (hotkey_events, hotkey_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = HOTKEYS.set(Mutex::new(hotkey_rx));
         global_hotkey::GlobalHotKeyEvent::set_event_handler(Some(
             move |event: global_hotkey::GlobalHotKeyEvent| {
                 if event.state == global_hotkey::HotKeyState::Pressed {
-                    let _ = hotkey_events.try_send(Event::Hotkey(event.id));
+                    let _ = hotkey_events.send(event.id);
                 }
             },
         ));
