@@ -1,7 +1,10 @@
 use super::{App, Message};
 use crate::{
     config::Osc52,
-    features::attachments::{self},
+    features::{
+        agent,
+        attachments::{self},
+    },
     link::Event,
     terminal::new_clipboard_writes,
 };
@@ -55,8 +58,7 @@ impl App {
                     self.status = s;
                 }
                 Event::Uploaded(g, pane, path) if g == self.connection.generation() => {
-                    self.send(attachments::insert_path(pane, &path));
-                    self.status = format!("Inserted file path: {path}");
+                    return self.attached(pane, &path);
                 }
                 Event::Found(g, result) if g == self.connection.generation() => {
                     self.search.found(result)
@@ -130,5 +132,44 @@ impl App {
             return Vec::new();
         }
         new_clipboard_writes(&mut self.clipboard_seen, &snapshot.panes)
+    }
+    /// A file is on the machine the pane runs on: the agent's composer takes its path, a
+    /// shell takes it quoted and unrun. The agent reads the file with its own tools; this
+    /// never sends it anything by itself.
+    fn attached(&mut self, pane: u64, path: &str) -> Task<Message> {
+        let is_agent = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.panes.iter().find(|p| p.id == pane))
+            .is_some_and(|p| p.agent.is_some());
+        if !is_agent {
+            self.send(attachments::insert_path(pane, path));
+            self.status = format!("Inserted file path: {path}");
+            return Task::none();
+        }
+        let name = std::path::Path::new(path).file_name().map_or_else(
+            || path.to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        self.status = format!("Attached: {name}");
+        // The picture comes from the file the user chose, which is this machine's copy of
+        // the one that was uploaded.
+        let preview = self
+            .attaching
+            .remove(&pane)
+            .as_deref()
+            .and_then(attachments::preview::preview);
+        self.agents.attach(
+            pane,
+            agent::Attachment {
+                named: attachments::quoted_path(path),
+                name,
+                preview,
+            },
+        );
+        if self.web_pane() == Some(pane) {
+            return Task::none();
+        }
+        iced::widget::operation::focus(agent::FIELD)
     }
 }

@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { View } from "./types";
 
-let current: View = { pane: null, agent: null, platform: "other" };
+let current: View = { pane: null, agent: null, attachments: [], platform: "other" };
 const listeners = new Set<() => void>();
 
 /** Replaces what is shown; called by the desktop app on every change. */

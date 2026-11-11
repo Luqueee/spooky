@@ -113,6 +113,8 @@ The model list searches without autocorrect or autocapitalization and orders eac
 
 A file edit's tool entry carries the diff `omp` reports in the result's `details` (`AgentTool::diff`, v11), one line per line of the file shown as `<sign><number>|<text>`; the page tints and numbers it, the native view colours it, and the entry's own output (the whole file again) is dropped when a diff exists.
 
+Attaching: **Attach** uploads the chosen file to the machine the agent runs on, as it does for a shell pane, and instead of typing its path into a terminal it puts the file on the pane's next message. The GUI keeps those files per pane (`Agents::attach`), shows a chip with a bounded PNG preview (`features/attachments/preview.rs`, at most 320 px, read from this machine's copy), and sends each path on its own line before the user's text, quoted when it has blanks. `omp` has no attachment field in its RPC (checked: neither `@path` nor an `attachments` field is read), so the agent opens the file with its own tools.
+
 ## Look
 
 The reference is a chat app: the user's message in a rounded bubble on the right; the agent's answer as plain text in a centred column about 760 px wide, in the system's proportional font (the conversation is prose, unlike the terminal), with a row of actions underneath; a rounded composer pinned to the bottom with the agent's name and state beneath it. Only actions that exist are drawn: today **Copy**. Regenerate, speech and rating controls are not drawn because nothing implements them.

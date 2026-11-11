@@ -11,6 +11,7 @@ export type Action =
   | { type: "setThinking"; pane: number; level: string }
   | { type: "answer"; pane: number; dialog: string; answer: Answer }
   | { type: "usage"; pane: number }
+  | { type: "unattach"; pane: number; named: string }
   | { type: "copy"; text: string }
   | { type: "paste" }
   | { type: "link"; url: string; open: boolean }

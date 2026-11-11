@@ -34,6 +34,7 @@ impl App {
             self.status = status;
         }
         if let Some((pane, path)) = outcome.upload {
+            self.attaching.insert(pane, path.clone());
             let queued = self
                 .link
                 .tx

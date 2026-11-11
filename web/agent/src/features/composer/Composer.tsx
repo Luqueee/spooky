@@ -1,12 +1,21 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { post } from "../../bridge";
-import type { Agent } from "../../bridge";
+import type { Agent, Attachment } from "../../bridge";
+import { Attachments } from "./Attachments";
 
 const drafts = new Map<number, string>();
 const MAX_HEIGHT = 220;
 
 /** The multiline composer: Enter sends, Shift+Enter starts a new line. */
-export function Composer({ pane, agent }: { pane: number; agent: Agent }) {
+export function Composer({
+  pane,
+  agent,
+  files,
+}: {
+  pane: number;
+  agent: Agent;
+  files: readonly Attachment[];
+}) {
   const [text, setText] = useState(drafts.get(pane) ?? "");
   const box = useRef<HTMLTextAreaElement>(null);
   const live = agent.ended === null;
@@ -36,7 +45,7 @@ export function Composer({ pane, agent }: { pane: number; agent: Agent }) {
     drafts.set(pane, value);
     setText(value);
   };
-  const ready = live && text.trim() !== "";
+  const ready = live && (text.trim() !== "" || files.length > 0);
   const send = () => {
     if (!ready) return;
     post({ type: "send", pane, text: text.trim() });
@@ -44,7 +53,9 @@ export function Composer({ pane, agent }: { pane: number; agent: Agent }) {
   };
 
   return (
-    <div className="composer">
+    <div className="composer-box">
+      <Attachments pane={pane} files={files} />
+      <div className="composer">
       <textarea
         ref={box}
         rows={1}
@@ -69,6 +80,7 @@ export function Composer({ pane, agent }: { pane: number; agent: Agent }) {
           ↑
         </button>
       )}
+      </div>
     </div>
   );
 }

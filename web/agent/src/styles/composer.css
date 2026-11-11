@@ -3,3 +3,11 @@
 .composer textarea{flex:1;resize:none;background:none;border:0;outline:none;color:var(--fg);font:inherit;padding:4px 0;max-height:220px}
 .send{width:30px;height:30px;border-radius:50%;background:var(--hi);color:var(--muted);font-size:16px;flex:none}.send.ready{background:var(--fg);color:var(--bg)}
 .stop{border:1px solid var(--line);border-radius:15px;padding:0 12px;height:30px;font-size:12px}
+.composer-box{display:flex;flex-direction:column;gap:6px}
+.attachments{display:flex;flex-wrap:wrap;gap:8px;padding:0 4px}
+.chip-file{position:relative;display:flex;align-items:center;gap:6px;background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:4px 10px;font-size:12px}
+.chip-file.picture{flex-direction:column;padding:6px;gap:4px;max-width:160px}
+.chip-file img{display:block;max-width:148px;max-height:110px;border-radius:6px}
+.chip-file .caption,.chip-file .file-name{max-width:148px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.chip-file .drop{position:absolute;top:-7px;right:-7px;width:18px;height:18px;border-radius:50%;background:var(--hi);border:1px solid var(--line);color:var(--fg);font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center}
+.chip-file .drop:hover{background:var(--bad);color:#1b1e26}

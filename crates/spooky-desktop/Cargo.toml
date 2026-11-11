@@ -14,11 +14,11 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 spooky-core.workspace = true
-iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "tokio", "advanced-shaping", "markdown", "x11", "wayland"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "tokio", "advanced-shaping", "markdown", "image", "x11", "wayland"] }
 global-hotkey = "0.6"
 rfd = "0.15"
 toml = "0.8"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tokio = { version = "1", features = ["sync", "process", "time", "io-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

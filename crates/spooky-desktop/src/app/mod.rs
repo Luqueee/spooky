@@ -209,6 +209,8 @@ pub(crate) struct App {
     palette: Palette,
     /// The web page that shows an agent pane.
     web: web::WebHost,
+    /// The local file each pane is uploading, so its preview comes from this machine.
+    attaching: HashMap<u64, std::path::PathBuf>,
 }
 impl App {
     pub(crate) fn new(
@@ -260,6 +262,7 @@ impl App {
                 attachments: Attachments::default(),
                 palette: Palette::default(),
                 web: web::WebHost::default(),
+                attaching: HashMap::new(),
                 agents: Agents::default(),
                 agent_focus: None,
                 agents_seen: None,

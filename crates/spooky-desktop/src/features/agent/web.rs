@@ -5,7 +5,7 @@
 //! actions, bounded, and mapped to the same [`Message`]s the native view sends. Nothing the
 //! page says reaches the server or the agent any other way.
 
-use super::Message;
+use super::{Attachment, Message};
 use crate::{commands::Command, shortcuts};
 use iced::keyboard::{
     Key, Modifiers,
@@ -50,6 +50,10 @@ enum Action {
     },
     Usage {
         pane: u64,
+    },
+    Unattach {
+        pane: u64,
+        named: String,
     },
     Copy {
         text: String,
@@ -110,11 +114,11 @@ pub(crate) fn event(text: &str) -> Result<Event, String> {
         }
         Action::Abort { pane } => Ok(agent(pane, Message::Abort(pane))),
         Action::SetModel { pane, model } => {
-            named(&model)?;
+            named_ok(&model)?;
             Ok(agent(pane, Message::SetModel(pane, model)))
         }
         Action::SetThinking { pane, level } => {
-            named(&level)?;
+            named_ok(&level)?;
             Ok(agent(pane, Message::SetThinking(pane, level)))
         }
         Action::Answer {
@@ -122,13 +126,17 @@ pub(crate) fn event(text: &str) -> Result<Event, String> {
             dialog,
             answer,
         } => {
-            named(&dialog)?;
+            named_ok(&dialog)?;
             if matches!(&answer, DialogAnswer::Value(v) if v.len() > MAX_AGENT_PROMPT_BYTES) {
                 return Err("The answer is too long to send".into());
             }
             Ok(agent(pane, Message::Answer(pane, dialog, answer)))
         }
         Action::Usage { pane } => Ok(agent(pane, Message::RefreshUsage(pane))),
+        Action::Unattach { pane, named } => {
+            named_ok(&named)?;
+            Ok(agent(pane, Message::Unattach(pane, named)))
+        }
         Action::Copy { text } => Ok(Event::Copy(text)),
         Action::Paste => Ok(Event::Paste),
         Action::Link { url, open } => {
@@ -152,7 +160,7 @@ fn agent(pane: u64, message: Message) -> Event {
     Event::Agent { pane, message }
 }
 
-fn named(name: &str) -> Result<(), String> {
+fn named_ok(name: &str) -> Result<(), String> {
     if name.len() > MAX_NAME_BYTES {
         Err("A name sent by the agent view is too long".into())
     } else {
@@ -219,19 +227,38 @@ fn physical(code: &str) -> Physical {
     )
 }
 
-/// What the page is given: the agent of the pane on show, and the platform it runs on.
+/// An attached file as the page draws it.
+#[derive(serde::Serialize)]
+struct File<'a> {
+    named: &'a str,
+    name: &'a str,
+    /// The small picture as a `data:` URI, when the file is one.
+    preview: Option<&'a str>,
+}
+
+/// What the page is given: the agent of the pane on show, what the next message carries,
+/// and the platform it runs on.
 #[derive(serde::Serialize)]
 struct View<'a> {
     pane: u64,
     agent: &'a Agent,
+    attachments: Vec<File<'a>>,
     platform: &'static str,
 }
 
 /// The JSON the page's `update` function takes.
-pub(crate) fn state(pane: u64, agent: &Agent) -> String {
+pub(crate) fn state(pane: u64, agent: &Agent, attachments: &[Attachment]) -> String {
     let view = View {
         pane,
         agent,
+        attachments: attachments
+            .iter()
+            .map(|file| File {
+                named: &file.named,
+                name: &file.name,
+                preview: file.preview.as_ref().map(|p| p.data_uri.as_str()),
+            })
+            .collect(),
         platform: if cfg!(target_os = "macos") {
             "macos"
         } else {
@@ -349,6 +376,46 @@ mod tests {
     }
 
     #[test]
+    fn dropping_an_attachment_names_only_the_file_the_page_clicked() {
+        let event = event(r#"{"type":"unattach","pane":2,"named":"/tmp/a.png"}"#).expect("a drop");
+        assert!(matches!(
+            event,
+            Event::Agent { pane: 2, message: Message::Unattach(2, ref named) } if named == "/tmp/a.png"
+        ));
+        assert!(is_refused(r#"{"type":"unattach","pane":2}"#));
+    }
+
+    #[test]
+    fn the_page_is_given_what_the_next_message_carries() {
+        let agent = Agent::default();
+        let files = [
+            Attachment {
+                named: "'/tmp/a b.png'".into(),
+                name: "a b.png".into(),
+                preview: Some(crate::features::attachments::preview::Preview {
+                    png: vec![1, 2],
+                    data_uri: "data:image/png;base64,AQI=".into(),
+                    width: 4,
+                    height: 2,
+                }),
+            },
+            Attachment {
+                named: "/tmp/notes.md".into(),
+                name: "notes.md".into(),
+                preview: None,
+            },
+        ];
+        let value: serde_json::Value =
+            serde_json::from_str(&state(1, &agent, &files)).expect("the state is JSON");
+        assert_eq!(value["attachments"][0]["named"], "'/tmp/a b.png'");
+        assert_eq!(
+            value["attachments"][0]["preview"],
+            "data:image/png;base64,AQI="
+        );
+        assert_eq!(value["attachments"][1]["preview"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn the_state_the_page_reads_keeps_the_wire_shape_of_the_agent() {
         let agent = Agent {
             backend: "omp".into(),
@@ -368,7 +435,7 @@ mod tests {
             ..Agent::default()
         };
         let value: serde_json::Value =
-            serde_json::from_str(&state(7, &agent)).expect("the state is JSON");
+            serde_json::from_str(&state(7, &agent, &[])).expect("the state is JSON");
         assert_eq!(value["pane"], 7);
         assert_eq!(value["agent"]["messages"][0]["role"], "User");
         assert_eq!(value["agent"]["dialogs"][0]["kind"], "Confirm");

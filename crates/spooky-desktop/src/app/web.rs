@@ -135,7 +135,7 @@ impl App {
         let Some(agent) = self.current_pane().and_then(|p| p.agent.as_ref()) else {
             return Task::none();
         };
-        let state = web::state(pane, agent);
+        let state = web::state(pane, agent, self.agents.attachments(pane));
         if state != self.web.pushed {
             webview::push(&state);
             self.web.pushed = state;
@@ -147,6 +147,11 @@ impl App {
             webview::focus_composer();
         }
         Task::none()
+    }
+
+    /// The pane the web page is showing, when it is on screen.
+    pub(super) fn web_pane(&self) -> Option<u64> {
+        self.web.pane
     }
 
     pub(super) fn web_message(&mut self, message: Message) -> Task<Message> {

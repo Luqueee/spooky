@@ -6,6 +6,7 @@
 mod view;
 pub(crate) mod web;
 
+use crate::features::attachments::preview::Preview;
 use iced::widget::{markdown, text_editor};
 use spooky_core::{Agent, AgentRole, DialogAnswer, Request};
 use std::collections::{HashMap, HashSet};
@@ -35,6 +36,17 @@ pub(crate) enum Menu {
     Thinking,
     /// What the providers report about the remaining usage.
     Usage,
+}
+
+/// A file the next message carries: where it is on the machine the agent runs on, how to
+/// name it, and a small picture when it is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Attachment {
+    /// The path as the message will name it, quoted when it has blanks.
+    pub(crate) named: String,
+    /// The file's own name, for the chip.
+    pub(crate) name: String,
+    pub(crate) preview: Option<Preview>,
 }
 
 /// What the composer and its buttons tell the application.
@@ -77,6 +89,8 @@ pub(crate) enum Message {
     Toggle(u64, u64),
     /// A link in an answer was clicked.
     Link(String),
+    /// Drop one of a pane's attachments.
+    Unattach(u64, String),
 }
 
 /// What a message asks the application to do.
@@ -117,6 +131,20 @@ pub(crate) struct Agents {
     provider: Option<String>,
     /// The open model list shows the model roles.
     roles: bool,
+    /// Files the next message of a pane carries.
+    attachments: HashMap<u64, Vec<Attachment>>,
+}
+
+/// The message as the agent receives it: each attached path on its own line first, so
+/// the agent can open them with its own tools, then what the user wrote.
+fn with_files(text: &str, files: &[Attachment]) -> String {
+    let mut message = String::new();
+    for file in files {
+        message.push_str(&file.named);
+        message.push('\n');
+    }
+    message.push_str(text);
+    message.trim_end().to_owned()
 }
 
 impl Agents {
@@ -168,18 +196,19 @@ impl Agents {
                 Outcome::default()
             }
             Message::Send(pane) => {
-                let Some(composer) = self.composers.get_mut(&pane) else {
-                    return Outcome::default();
-                };
+                // A pane with only a file attached has no composer yet.
+                let composer = self.composers.entry(pane).or_default();
                 let draft = composer.text();
                 let text = draft.trim();
-                // A draft of only blanks stays as it is.
-                if text.is_empty() {
+                let files = self.attachments.remove(&pane).unwrap_or_default();
+                // A draft of only blanks, with nothing attached, stays as it is.
+                if text.is_empty() && files.is_empty() {
+                    self.attachments.remove(&pane);
                     return Outcome::default();
                 }
                 let request = Request::AgentPrompt {
                     pane,
-                    text: text.to_owned(),
+                    text: with_files(text, &files),
                 };
                 *composer = text_editor::Content::new();
                 Outcome {
@@ -190,13 +219,14 @@ impl Agents {
             }
             Message::Prompt(pane, text) => {
                 let text = text.trim();
-                if text.is_empty() {
+                let files = self.attachments.remove(&pane).unwrap_or_default();
+                if text.is_empty() && files.is_empty() {
                     return Outcome::default();
                 }
                 Outcome {
                     requests: vec![Request::AgentPrompt {
                         pane,
-                        text: text.to_owned(),
+                        text: with_files(text, &files),
                     }],
                     ..Outcome::default()
                 }
@@ -265,6 +295,15 @@ impl Agents {
                 }
                 Outcome::default()
             }
+            Message::Unattach(pane, named) => {
+                if let Some(files) = self.attachments.get_mut(&pane) {
+                    files.retain(|file| file.named != named);
+                }
+                Outcome {
+                    focus_field: true,
+                    ..Outcome::default()
+                }
+            }
             Message::Link(url) => Outcome {
                 link: Some(url),
                 ..Outcome::default()
@@ -318,6 +357,19 @@ impl Agents {
                     },
                 );
             }
+        }
+    }
+
+    /// The files the next message of a pane carries.
+    pub(crate) fn attachments(&self, pane: u64) -> &[Attachment] {
+        self.attachments.get(&pane).map_or(&[], Vec::as_slice)
+    }
+
+    /// Adds a file to the next message of a pane; the same path is not added twice.
+    pub(crate) fn attach(&mut self, pane: u64, file: Attachment) {
+        let files = self.attachments.entry(pane).or_default();
+        if !files.iter().any(|kept| kept.named == file.named) {
+            files.push(file);
         }
     }
 
@@ -648,6 +700,57 @@ mod tests {
         let closed = agents.update(Message::Menu(2, Menu::Usage));
         assert!(closed.requests.is_empty());
         assert_eq!(agents.menu(2), None);
+    }
+
+    fn file(named: &str, name: &str) -> Attachment {
+        Attachment {
+            named: named.into(),
+            name: name.into(),
+            preview: None,
+        }
+    }
+
+    #[test]
+    fn attached_files_are_named_first_in_the_message_and_go_with_it() {
+        let mut agents = Agents::default();
+        agents.attach(7, file("'/tmp/a b.png'", "a b.png"));
+        agents.attach(7, file("/tmp/notes.md", "notes.md"));
+        // The same file twice is still one.
+        agents.attach(7, file("/tmp/notes.md", "notes.md"));
+        assert_eq!(agents.attachments(7).len(), 2);
+        type_into(&mut agents, 7, "what is in these?");
+        let outcome = agents.update(Message::Send(7));
+        assert_eq!(
+            outcome.requests,
+            [Request::AgentPrompt {
+                pane: 7,
+                text: "'/tmp/a b.png'\n/tmp/notes.md\nwhat is in these?".into()
+            }]
+        );
+        assert!(
+            agents.attachments(7).is_empty() && agents.draft(7).is_empty(),
+            "a sent message takes its files and its draft with it"
+        );
+    }
+
+    #[test]
+    fn a_file_alone_is_a_message_and_a_dropped_one_is_not_sent() {
+        let mut agents = Agents::default();
+        agents.attach(1, file("/tmp/a.png", "a.png"));
+        agents.update(Message::Unattach(1, "/tmp/zzz".into()));
+        assert_eq!(agents.attachments(1).len(), 1, "only the named file goes");
+        let outcome = agents.update(Message::Send(1));
+        assert_eq!(
+            outcome.requests,
+            [Request::AgentPrompt {
+                pane: 1,
+                text: "/tmp/a.png".into()
+            }]
+        );
+        agents.attach(2, file("/tmp/b.png", "b.png"));
+        agents.update(Message::Unattach(2, "/tmp/b.png".into()));
+        assert!(agents.attachments(2).is_empty());
+        assert!(agents.update(Message::Send(2)).requests.is_empty());
     }
 
     #[test]

@@ -66,9 +66,18 @@ export interface Agent {
 }
 
 /** What the desktop app pushes: the agent pane on show, and the host it runs on. */
+/** A file the next message carries. */
+export interface Attachment {
+  named: string;
+  name: string;
+  /** The small picture as a data: URI, when the file is one. */
+  preview: string | null;
+}
+
 export interface View {
   pane: number | null;
   agent: Agent | null;
+  attachments: Attachment[];
   platform: string;
 }
 

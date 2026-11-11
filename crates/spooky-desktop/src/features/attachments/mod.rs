@@ -6,6 +6,8 @@
 //! file, reports what to upload, and keeps track of whether a native dialog is open
 //! (it takes the keyboard focus without the user having clicked away).
 
+pub(crate) mod preview;
+
 use iced::{Rectangle, Task, window};
 use spooky_core::Request;
 use std::path::PathBuf;
@@ -169,6 +171,15 @@ async fn save_capture(shot: window::Screenshot, bounds: Rectangle) -> Result<Str
     Ok(file.path().display().to_string())
 }
 
+/// A path as a message names it: quoted when it has blanks, so where it ends is clear.
+pub(crate) fn quoted_path(path: &str) -> String {
+    if path.chars().any(char::is_whitespace) {
+        shell_quote(path)
+    } else {
+        path.to_owned()
+    }
+}
+
 /// The request that types an uploaded file's path into a pane: shell-quoted, without
 /// Enter, so it is never run by itself.
 pub(crate) fn insert_path(pane: u64, path: &str) -> Request {
@@ -251,6 +262,16 @@ mod tests {
         assert!(!attachments.dialog_open());
         let failed = attachments.update(Message::Saved(Err("disk full".into())), context(None));
         assert_eq!(failed.status.as_deref(), Some("Capture: disk full"));
+    }
+
+    #[test]
+    fn a_path_named_in_a_message_is_quoted_only_when_it_has_blanks() {
+        assert_eq!(quoted_path("/tmp/a.png"), "/tmp/a.png");
+        assert_eq!(quoted_path("/tmp/a b.png"), "'/tmp/a b.png'");
+        assert_eq!(
+            quoted_path("/tmp/it's here.png"),
+            "'/tmp/it'\\''s here.png'"
+        );
     }
 
     #[test]

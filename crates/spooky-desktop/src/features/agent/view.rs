@@ -4,13 +4,13 @@
 //! reasoning as folded cards, and a rounded composer with the model and the agent's state
 //! underneath. Everything the agent wrote is drawn, never acted on.
 
-use super::{Agents, Menu, Message as AgentMessageEvent, model_id, provider};
+use super::{Agents, Attachment, Menu, Message as AgentMessageEvent, model_id, provider};
 use crate::{Message, ui::*};
 use iced::{
     Alignment, Background, Border, Element, Font, Length, font, keyboard,
     widget::{
-        Space, button, column, container, markdown, mouse_area, opaque, row, scrollable, stack,
-        text, text_editor, text_input,
+        Space, button, column, container, image, markdown, mouse_area, opaque, row, scrollable,
+        stack, text, text_editor, text_input,
     },
 };
 use spooky_core::{
@@ -476,7 +476,7 @@ fn composer<'a>(
     }
     if live {
         // The arrow is lit only when there is something to send.
-        let ready = !content.text().trim().is_empty();
+        let ready = !content.text().trim().is_empty() || !agents.attachments(pane).is_empty();
         let arrow = button(
             container(icon(Icon::Send, if ready { BACKGROUND } else { MUTED }))
                 .center(Length::Fill),
@@ -499,7 +499,7 @@ fn composer<'a>(
         });
     }
     // Lighter than the page, as a raised field, with no outline.
-    container(controls)
+    let field = container(controls)
         .padding([6, 10])
         .style(|_| container::Style {
             background: Some(Background::Color(SELECTED)),
@@ -508,8 +508,48 @@ fn composer<'a>(
                 ..Border::default()
             },
             ..container::Style::default()
-        })
-        .into()
+        });
+    let files = agents.attachments(pane);
+    if files.is_empty() {
+        return field.into();
+    }
+    column![attachments(pane, files), field].spacing(6).into()
+}
+
+/// What the next message carries: a small picture of each attached image, or its name,
+/// each with a button to drop it.
+fn attachments<'a>(pane: u64, files: &'a [Attachment]) -> Element<'a, Message> {
+    let chips = files.iter().map(|file| {
+        let shown: Element<'_, Message> = match &file.preview {
+            Some(preview) => column![
+                image(image::Handle::from_bytes(preview.png.clone()))
+                    .width(Length::Shrink)
+                    .height(74),
+                text(file.name.as_str()).size(11).color(MUTED),
+            ]
+            .spacing(4)
+            .align_x(Alignment::Center)
+            .into(),
+            None => text(file.name.as_str()).size(12).into(),
+        };
+        let drop = button(text("×").size(13).color(MUTED))
+            .padding([0, 4])
+            .style(quiet)
+            .on_press(tell(AgentMessageEvent::Unattach(pane, file.named.clone())));
+        container(row![shown, drop].spacing(6).align_y(Alignment::Start))
+            .padding([6, 8])
+            .style(|_| container::Style {
+                background: Some(Background::Color(SELECTED)),
+                border: Border {
+                    radius: 10.0.into(),
+                    width: 1.0,
+                    color: BORDER,
+                },
+                ..container::Style::default()
+            })
+            .into()
+    });
+    row(chips).spacing(8).wrap().into()
 }
 
 /// The list of choices is a shade darker than the composer, with an edge and a shadow to stand out of the page.
