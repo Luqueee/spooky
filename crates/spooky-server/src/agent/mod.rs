@@ -18,8 +18,9 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use rustix::process::{Pid, Signal, kill_process_group};
 use serde_json::Value;
 use spooky_core::{
-    AgentDialog, AgentRole, Cursor, CursorShape, DialogAnswer, MAX_AGENT_PROMPT_BYTES, ModelRole,
-    MouseEncoding, MouseTracking, Pane as PaneSnapshot, UsageProvider,
+    AgentCommand, AgentDialog, AgentRole, Cursor, CursorShape, DialogAnswer,
+    MAX_AGENT_PROMPT_BYTES, ModelRole, MouseEncoding, MouseTracking, Pane as PaneSnapshot,
+    UsageProvider,
 };
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -90,6 +91,10 @@ pub(crate) enum Event {
     Context(u8),
     /// What the providers report about the remaining usage.
     Usage(Vec<UsageProvider>),
+    /// The commands the program offers.
+    Commands(Vec<AgentCommand>),
+    /// What a command the user ran reported.
+    Notice(String),
 }
 
 /// What a backend wants done after a frame.
@@ -286,6 +291,14 @@ impl Agent {
         };
         if ended {
             bail!("the agent has ended");
+        }
+        // A command is run by the program and never echoed back, so the conversation
+        // records it here; an ordinary message comes back from the program itself.
+        if text.starts_with('/') {
+            if let Ok(mut held) = self.transcript.lock() {
+                held.apply(Event::User(text.to_owned()));
+            }
+            self.changes.advance(&self.revision);
         }
         let line = self.with_backend(|backend| backend.prompt(text, busy))?;
         self.send(line)

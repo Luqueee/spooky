@@ -11,3 +11,8 @@
 .item{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:5px 8px;border-radius:7px;font-size:13px}
 .item:hover,.item.active{background:var(--hi)}.item.on{color:var(--accent)}
 .tag{font-size:11px;background:#3d4356;border-radius:5px;padding:0 6px;color:var(--accent)}
+.command-menu{position:static;max-height:260px;overflow-y:auto;margin-bottom:6px;width:100%}
+.command-menu .item{gap:10px;padding:5px 10px}
+.command-menu .command{font:12.5px var(--mono);color:var(--fg);flex:none}
+.command-menu .hint{font:11.5px var(--mono);color:var(--accent);flex:none}
+.command-menu .what{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

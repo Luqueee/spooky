@@ -5,8 +5,8 @@ use super::{Backend, Event, Reaction};
 use anyhow::{Result, bail, ensure};
 use serde_json::{Value, json};
 use spooky_core::{
-    AgentDialog, AgentRole, DialogAnswer, DialogKind, MAX_AGENT_PROMPT_BYTES, ModelRole,
-    UsageProvider, UsageWindow,
+    AgentCommand, AgentDialog, AgentRole, DialogAnswer, DialogKind, MAX_AGENT_PROMPT_BYTES,
+    ModelRole, UsageProvider, UsageWindow,
 };
 use std::{env, ffi::OsString, fs, io::Read, path::PathBuf, process::Command};
 
@@ -152,7 +152,7 @@ fn parse_roles(text: &str) -> Vec<ModelRole> {
 }
 
 /// Events the client needs; omp sends nothing else.
-const EVENTS: [&str; 8] = [
+const EVENTS: [&str; 9] = [
     "agent_start",
     "agent_end",
     "message_start",
@@ -161,6 +161,7 @@ const EVENTS: [&str; 8] = [
     "tool_execution_start",
     "tool_execution_end",
     "extension_ui_request",
+    "available_commands_update",
 ];
 /// Thinking levels `--thinking` accepts.
 const THINKING: [&str; 8] = [
@@ -353,6 +354,22 @@ impl Backend for Omp {
             .unwrap_or_default();
         if kind == "response" {
             return self.response(frame);
+        }
+        if kind == "command_output" && !self.awaiting_usage {
+            // A command the user ran reports in the conversation, as its own entry.
+            let text = frame
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            return Reaction {
+                events: if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::Notice(text.to_owned())]
+                },
+                send: Vec::new(),
+            };
         }
         if kind == "command_output" && self.awaiting_usage {
             self.awaiting_usage = false;
@@ -569,8 +586,38 @@ fn parse_events(frame: &Value) -> Vec<Event> {
             }],
             None => Vec::new(),
         },
+        "available_commands_update" => match frame.get("commands").and_then(Value::as_array) {
+            Some(commands) => vec![Event::Commands(commands.iter().map(command_of).collect())],
+            None => Vec::new(),
+        },
         "extension_ui_request" => dialog_event(frame).into_iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+/// One command of an `available_commands_update` frame, with its subcommands.
+fn command_of(value: &Value) -> AgentCommand {
+    let string = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    AgentCommand {
+        name: string("name"),
+        description: string("description"),
+        hint: value
+            .get("input")
+            .and_then(|input| input.get("hint"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        subcommands: value
+            .get("subcommands")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().map(command_of).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -811,6 +858,25 @@ mod tests {
             }]
         );
         assert!(update("toolcall_delta", r#","delta":"{""#).is_empty());
+    }
+
+    #[test]
+    fn offered_commands_carry_their_hint_and_their_subcommands() {
+        let offered = events(
+            r#"{"type":"available_commands_update","commands":[{"name":"model","description":"Show current model"},{"name":"security","description":"Scans","input":{"hint":"<plan|scan>"},"subcommands":[{"name":"scan","description":"Start a scan"}]}]}"#,
+        );
+        let [Event::Commands(commands)] = offered.as_slice() else {
+            panic!("the frame lists commands: {offered:?}");
+        };
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].name, "model");
+        assert_eq!(commands[0].hint, "", "a command may take nothing");
+        assert_eq!(commands[1].hint, "<plan|scan>");
+        assert_eq!(commands[1].subcommands[0].name, "scan");
+        assert!(
+            events(r#"{"type":"available_commands_update"}"#).is_empty(),
+            "a frame with no list says nothing"
+        );
     }
 
     #[test]
@@ -1190,13 +1256,22 @@ mod tests {
             r#"{"type":"command_output","text":"Anthropic\n- Day\n  a: 10.00% used\n  resets in 1h"}"#,
         );
         assert!(
-            omp.frame(&output).events.is_empty(),
-            "unasked output is not a report"
+            matches!(&omp.frame(&output).events[..], [Event::Notice(text)] if text.starts_with("Anthropic")),
+            "unasked output is what a command the user ran reported"
         );
         let line = omp.usage().expect("line");
         assert!(line.contains("/usage"));
         let events = omp.frame(&output).events;
         assert!(matches!(&events[..], [Event::Usage(p)] if p[0].windows[0].left == 90));
-        assert!(omp.frame(&output).events.is_empty(), "once");
+        assert!(
+            matches!(&omp.frame(&output).events[..], [Event::Notice(_)]),
+            "only the asked-for one is a report"
+        );
+        assert!(
+            omp.frame(&frame(r#"{"type":"command_output","text":"  "}"#))
+                .events
+                .is_empty(),
+            "a command that said nothing adds nothing"
+        );
     }
 }

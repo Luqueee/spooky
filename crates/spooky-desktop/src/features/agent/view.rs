@@ -4,7 +4,9 @@
 //! reasoning as folded cards, and a rounded composer with the model and the agent's state
 //! underneath. Everything the agent wrote is drawn, never acted on.
 
-use super::{Agents, Attachment, Menu, Message as AgentMessageEvent, model_id, provider};
+use super::{
+    Agents, Attachment, Menu, Message as AgentMessageEvent, commands::Choice, model_id, provider,
+};
 use crate::{Message, ui::*};
 use iced::{
     Alignment, Background, Border, Element, Font, Length, font, keyboard,
@@ -435,6 +437,17 @@ fn composer<'a>(
     let Some(content) = agents.composer(pane) else {
         return Space::new().into();
     };
+    // What the program offers after a slash, narrowed to what is typed.
+    let offered = super::commands::typing(&content.text())
+        .filter(|_| live && !agents.commands_hidden())
+        .map(|query| super::commands::matching(super::commands::choices(&agent.commands), query))
+        .unwrap_or_default();
+    let at = agents.command_at(offered.len());
+    let chosen = offered.get(at).map(|choice| choice.name.clone());
+    // A command already written whole is sent, not written again.
+    let written = chosen.as_ref().is_some_and(|name| {
+        super::commands::typing(&content.text()).is_some_and(|query| query.trim_end() == name)
+    });
     let mut field = text_editor(content)
         .id(FIELD)
         .placeholder(if live { "Reply" } else { "The agent has ended" })
@@ -449,19 +462,59 @@ fn composer<'a>(
             style.border = Border::default();
             style
         });
+    let listed = offered.len();
     if live {
         field = field
             .on_action(move |action| tell(AgentMessageEvent::Edit(pane, action)))
-            .key_binding(move |press| match press.key.as_ref() {
-                keyboard::Key::Named(keyboard::key::Named::Enter) if !press.modifiers.shift() => {
-                    Some(text_editor::Binding::Custom(tell(AgentMessageEvent::Send(
-                        pane,
-                    ))))
+            .key_binding(move |press| {
+                let count = chosen.as_ref().map_or(0, |_| listed);
+                let write = |name: &String| {
+                    Some(text_editor::Binding::Custom(tell(
+                        AgentMessageEvent::WriteCommand(pane, name.clone()),
+                    )))
+                };
+                let move_to = |down: bool| {
+                    Some(text_editor::Binding::Custom(tell(
+                        AgentMessageEvent::MoveCommand {
+                            down,
+                            offered: count,
+                        },
+                    )))
+                };
+                match press.key.as_ref() {
+                    // While a command is being typed, the list takes the keys that
+                    // move through it and the ones that pick one.
+                    keyboard::Key::Named(keyboard::key::Named::ArrowDown) if count > 0 => {
+                        move_to(true)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowUp) if count > 0 => {
+                        move_to(false)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Escape) if count > 0 => Some(
+                        text_editor::Binding::Custom(tell(AgentMessageEvent::HideCommands)),
+                    ),
+                    keyboard::Key::Named(keyboard::key::Named::Tab)
+                        if count > 0 && !press.modifiers.shift() =>
+                    {
+                        chosen.as_ref().and_then(write)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                        if count > 0 && !written && !press.modifiers.shift() =>
+                    {
+                        chosen.as_ref().and_then(write)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                        if !press.modifiers.shift() =>
+                    {
+                        Some(text_editor::Binding::Custom(tell(AgentMessageEvent::Send(
+                            pane,
+                        ))))
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Enter) => {
+                        Some(text_editor::Binding::Enter)
+                    }
+                    _ => text_editor::Binding::from_key_press(press),
                 }
-                keyboard::Key::Named(keyboard::key::Named::Enter) => {
-                    Some(text_editor::Binding::Enter)
-                }
-                _ => text_editor::Binding::from_key_press(press),
             });
     }
     let mut controls = row![field].spacing(8).align_y(Alignment::End);
@@ -510,10 +563,22 @@ fn composer<'a>(
             ..container::Style::default()
         });
     let files = agents.attachments(pane);
-    if files.is_empty() {
-        return field.into();
-    }
-    column![attachments(pane, files), field].spacing(6).into()
+    // The composer keeps its place in the tree whatever is above it: were it to move,
+    // iced would hand its focus to another widget mid-sentence.
+    let above = |shown: Option<Element<'a, Message>>| -> Element<'a, Message> {
+        match shown {
+            Some(shown) => container(shown)
+                .padding(iced::Padding::ZERO.bottom(6))
+                .into(),
+            None => Space::new().into(),
+        }
+    };
+    column![
+        above((!offered.is_empty()).then(|| command_list(pane, &offered, at))),
+        above((!files.is_empty()).then(|| attachments(pane, files))),
+        field,
+    ]
+    .into()
 }
 
 /// What the next message carries: a small picture of each attached image, or its name,
@@ -551,6 +616,56 @@ fn attachments<'a>(pane: u64, files: &'a [Attachment]) -> Element<'a, Message> {
     });
     row(chips).spacing(8).wrap().into()
 }
+
+/// The commands offered after a slash: the name, what it takes, and what it does.
+/// Their text comes from the agent's program; picking one only writes it in the composer.
+fn command_list<'a>(pane: u64, offered: &[Choice<'a>], at: usize) -> Element<'a, Message> {
+    let items = offered.iter().take(MOST_COMMANDS).enumerate().map(
+        |(index, choice)| -> Element<'a, Message> {
+            let name = choice.name.clone();
+            let mut line =
+                row![text(format!("/{name}")).font(Font::MONOSPACE).size(12.5)].spacing(8);
+            if !choice.hint.is_empty() {
+                line = line.push(
+                    text(choice.hint.to_owned())
+                        .font(Font::MONOSPACE)
+                        .size(11.5)
+                        .color(ACCENT),
+                );
+            }
+            // One line each: a long description is cut, not wrapped into a tall row.
+            line = line.push(
+                text(choice.description.to_owned())
+                    .font(FONT)
+                    .size(12)
+                    .color(MUTED)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
+            button(line.align_y(Alignment::Center).clip(true))
+                .width(Length::Fill)
+                .padding([4, 8])
+                .style(choice_style(index == at))
+                .on_press(tell(AgentMessageEvent::WriteCommand(pane, name)))
+                .into()
+        },
+    );
+    container(scrollable(column(items).spacing(2)).height(Length::Shrink))
+        .max_height(220)
+        .padding(6)
+        .style(|_| container::Style {
+            background: Some(Background::Color(POPUP)),
+            border: Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: POPUP_EDGE,
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Commands drawn at once; the list scrolls through what is offered.
+const MOST_COMMANDS: usize = 50;
 
 /// The list of choices is a shade darker than the composer, with an edge and a shadow to stand out of the page.
 const POPUP: iced::Color = iced::Color::from_rgb8(36, 40, 50);

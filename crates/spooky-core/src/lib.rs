@@ -9,7 +9,7 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 /// Maximum encoded request or response, including its newline delimiter.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
@@ -428,6 +428,20 @@ pub struct UsageProvider {
     pub windows: Vec<UsageWindow>,
 }
 
+/// A command an agent's program offers, as it lists them. Its text came from that
+/// program and is untrusted: draw it, never act on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentCommand {
+    /// What is typed after the slash.
+    pub name: String,
+    /// What it does, in one line.
+    pub description: String,
+    /// What it takes after its name, as the program spells it (`[on|off]`), possibly empty.
+    pub hint: String,
+    /// The commands under it, such as `security scan`, bounded.
+    pub subcommands: Vec<AgentCommand>,
+}
+
 /// What an agent pane shows instead of a terminal viewport.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Agent {
@@ -455,6 +469,8 @@ pub struct Agent {
     pub context: Option<u8>,
     /// The roles the program gives its models, bounded.
     pub roles: Vec<ModelRole>,
+    /// The commands the program offers, bounded; typed after a slash.
+    pub commands: Vec<AgentCommand>,
     /// What the providers report about the remaining usage, once asked for.
     pub usage: Option<Vec<UsageProvider>>,
 }

@@ -49,6 +49,14 @@ export interface UsageProvider {
   windows: UsageWindow[];
 }
 
+export interface Command {
+  name: string;
+  description: string;
+  /** What it takes after its name, as the program spells it; may be empty. */
+  hint: string;
+  subcommands: Command[];
+}
+
 export interface Agent {
   backend: string;
   busy: boolean;
@@ -62,6 +70,7 @@ export interface Agent {
   levels: string[];
   context: number | null;
   roles: ModelRole[];
+  commands: Command[];
   usage: UsageProvider[] | null;
 }
 

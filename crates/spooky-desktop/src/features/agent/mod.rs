@@ -6,6 +6,8 @@
 mod view;
 pub(crate) mod web;
 
+pub(crate) mod commands;
+
 use crate::features::attachments::preview::Preview;
 use iced::widget::{markdown, text_editor};
 use spooky_core::{Agent, AgentRole, DialogAnswer, Request};
@@ -91,6 +93,13 @@ pub(crate) enum Message {
     Link(String),
     /// Drop one of a pane's attachments.
     Unattach(u64, String),
+    /// Highlight another of the commands offered after a slash; the number is how many
+    /// are offered, so the choice wraps around.
+    MoveCommand { down: bool, offered: usize },
+    /// Write a command in the composer, ready for its arguments.
+    WriteCommand(u64, String),
+    /// Put the command list away until the message changes.
+    HideCommands,
 }
 
 /// What a message asks the application to do.
@@ -133,6 +142,10 @@ pub(crate) struct Agents {
     roles: bool,
     /// Files the next message of a pane carries.
     attachments: HashMap<u64, Vec<Attachment>>,
+    /// Which of the offered commands is highlighted, while one is being typed.
+    command_at: usize,
+    /// The command list was put away with Escape, until the message changes again.
+    commands_hidden: bool,
 }
 
 /// The message as the agent receives it: each attached path on its own line first, so
@@ -193,6 +206,10 @@ impl Agents {
                     self.close_menu();
                 }
                 self.composers.entry(pane).or_default().perform(action);
+                // Typing changes what the command list offers, so the choice starts over
+                // and a list put away comes back.
+                self.command_at = 0;
+                self.commands_hidden = false;
                 Outcome::default()
             }
             Message::Send(pane) => {
@@ -304,6 +321,32 @@ impl Agents {
                     ..Outcome::default()
                 }
             }
+            Message::MoveCommand { down, offered } => {
+                if offered > 0 {
+                    let at = self.command_at.min(offered - 1);
+                    self.command_at = if down {
+                        (at + 1) % offered
+                    } else {
+                        (at + offered - 1) % offered
+                    };
+                }
+                Outcome::default()
+            }
+            Message::HideCommands => {
+                self.commands_hidden = true;
+                Outcome::default()
+            }
+            Message::WriteCommand(pane, name) => {
+                let composer = self.composers.entry(pane).or_default();
+                *composer = text_editor::Content::with_text(&format!("/{name} "));
+                self.commands_hidden = false;
+                composer.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                self.command_at = 0;
+                Outcome {
+                    focus_field: true,
+                    ..Outcome::default()
+                }
+            }
             Message::Link(url) => Outcome {
                 link: Some(url),
                 ..Outcome::default()
@@ -358,6 +401,16 @@ impl Agents {
                 );
             }
         }
+    }
+
+    /// Whether the command list was put away for the message being written.
+    pub(crate) fn commands_hidden(&self) -> bool {
+        self.commands_hidden
+    }
+
+    /// Which of the commands offered after a slash is highlighted.
+    pub(crate) fn command_at(&self, offered: usize) -> usize {
+        self.command_at.min(offered.saturating_sub(1))
     }
 
     /// The files the next message of a pane carries.
@@ -751,6 +804,36 @@ mod tests {
         agents.update(Message::Unattach(2, "/tmp/b.png".into()));
         assert!(agents.attachments(2).is_empty());
         assert!(agents.update(Message::Send(2)).requests.is_empty());
+    }
+
+    #[test]
+    fn writing_a_command_leaves_it_ready_for_its_arguments_and_hiding_lasts_one_message() {
+        let mut agents = Agents::default();
+        type_into(&mut agents, 4, "/mod");
+        agents.update(Message::MoveCommand {
+            down: true,
+            offered: 3,
+        });
+        assert_eq!(agents.command_at(3), 1);
+        let written = agents.update(Message::WriteCommand(4, "modelpreset save".into()));
+        assert!(written.focus_field, "the composer keeps the keyboard");
+        assert_eq!(agents.draft(4), "/modelpreset save ");
+        assert_eq!(agents.command_at(3), 0, "the list starts over");
+        agents.update(Message::HideCommands);
+        assert!(agents.commands_hidden());
+        type_into(&mut agents, 4, "x");
+        assert!(
+            !agents.commands_hidden(),
+            "writing more offers the commands again"
+        );
+        let sent = agents.update(Message::Send(4));
+        assert_eq!(
+            sent.requests,
+            [Request::AgentPrompt {
+                pane: 4,
+                text: "/modelpreset save x".into()
+            }]
+        );
     }
 
     #[test]

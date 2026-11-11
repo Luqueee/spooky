@@ -2,8 +2,8 @@
 
 use super::Event;
 use spooky_core::{
-    Agent as AgentSnapshot, AgentDialog, AgentMessage, AgentRole, AgentTool, DialogAnswer,
-    DialogKind, ModelRole, ToolState, UsageProvider,
+    Agent as AgentSnapshot, AgentCommand, AgentDialog, AgentMessage, AgentRole, AgentTool,
+    DialogAnswer, DialogKind, ModelRole, ToolState, UsageProvider,
 };
 use std::collections::HashMap;
 
@@ -37,6 +37,10 @@ const MAX_USAGE_PROVIDERS: usize = 16;
 const MAX_USAGE_ITEMS: usize = 24;
 const MAX_USAGE_TEXT: usize = 200;
 const MAX_MODEL_BYTES: usize = 128;
+/// Commands offered, their subcommands, and the longest name or description of one.
+const MAX_COMMANDS: usize = 256;
+const MAX_SUBCOMMANDS: usize = 32;
+const MAX_COMMAND_BYTES: usize = 256;
 /// Tool calls remembered so their results find them.
 const MAX_REMEMBERED_CALLS: usize = 512;
 
@@ -59,6 +63,7 @@ pub(crate) struct Transcript {
     context: Option<u8>,
     roles: Vec<ModelRole>,
     usage: Option<Vec<UsageProvider>>,
+    commands: Vec<AgentCommand>,
 }
 
 impl Transcript {
@@ -170,6 +175,10 @@ impl Transcript {
                 tool.diff = bounded(diff, MAX_TOOL_DIFF_BYTES);
                 true
             }
+            Event::Notice(text) => {
+                self.push(AgentRole::Notice, text);
+                true
+            }
             Event::Failure(error) => {
                 let text = format!("error: {}", bounded(error, MAX_ENTRY_BYTES));
                 self.push(AgentRole::Notice, text);
@@ -198,6 +207,10 @@ impl Transcript {
                 replace_value(&mut self.levels, levels)
             }
             Event::Context(percent) => replace(&mut self.context, Some(percent)),
+            Event::Commands(commands) => {
+                let commands = bounded_commands(commands, MAX_COMMANDS, MAX_SUBCOMMANDS);
+                replace_value(&mut self.commands, commands)
+            }
             Event::Usage(providers) => {
                 self.usage = Some(bounded_usage(providers));
                 true
@@ -285,6 +298,7 @@ impl Transcript {
             context: self.context,
             roles: self.roles.clone(),
             usage: self.usage.clone(),
+            commands: self.commands.clone(),
         }
     }
 
@@ -416,6 +430,26 @@ fn bounded_usage(mut providers: Vec<UsageProvider>) -> Vec<UsageProvider> {
     providers
 }
 
+/// The commands as a client may be given them: a command with no name is dropped, text is
+/// cut to its bound and the lists are capped.
+fn bounded_commands(
+    commands: Vec<AgentCommand>,
+    most: usize,
+    most_subcommands: usize,
+) -> Vec<AgentCommand> {
+    commands
+        .into_iter()
+        .filter(|command| !command.name.is_empty())
+        .take(most)
+        .map(|command| AgentCommand {
+            name: bounded(command.name, MAX_COMMAND_BYTES),
+            description: bounded(command.description, MAX_COMMAND_BYTES),
+            hint: bounded(command.hint, MAX_COMMAND_BYTES),
+            subcommands: bounded_commands(command.subcommands, most_subcommands, 0),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +475,43 @@ mod tests {
             message: String::new(),
             options: vec!["Red".into(), "Blue".into()],
         }
+    }
+
+    #[test]
+    fn offered_commands_are_capped_and_their_text_cut() {
+        let mut transcript = Transcript::default();
+        let commands: Vec<AgentCommand> = (0..MAX_COMMANDS + 10)
+            .map(|n| AgentCommand {
+                name: format!("c{n}"),
+                description: "d".repeat(MAX_COMMAND_BYTES * 2),
+                hint: String::new(),
+                subcommands: (0..MAX_SUBCOMMANDS + 5)
+                    .map(|m| AgentCommand {
+                        name: format!("s{m}"),
+                        description: String::new(),
+                        hint: String::new(),
+                        subcommands: Vec::new(),
+                    })
+                    .collect(),
+            })
+            .chain(std::iter::once(AgentCommand {
+                name: String::new(),
+                description: "nameless".into(),
+                hint: String::new(),
+                subcommands: Vec::new(),
+            }))
+            .collect();
+        assert!(transcript.apply(Event::Commands(commands.clone())));
+        let kept = transcript.snapshot("omp").commands;
+        assert_eq!(kept.len(), MAX_COMMANDS);
+        assert!(kept.iter().all(|c| !c.name.is_empty()));
+        assert!(kept[0].description.len() <= MAX_COMMAND_BYTES + TRUNCATED.len());
+        assert!(kept[0].description.ends_with(TRUNCATED));
+        assert_eq!(kept[0].subcommands.len(), MAX_SUBCOMMANDS);
+        assert!(
+            !transcript.apply(Event::Commands(commands)),
+            "the same list changes nothing a client shows"
+        );
     }
 
     #[test]
