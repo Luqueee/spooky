@@ -6,7 +6,9 @@
 //! nothing is uploaded: a remote machine's own server writes its own shim.
 //!
 //! Profiles often put their own directories ahead of the inherited `PATH`, so for zsh, bash
-//! and fish the directory is put first again just before the first prompt.
+//! and fish the directory is put first again before the first prompt. Tools such as mise
+//! rebuild `PATH` at every prompt, so zsh and fish also check it again just before each
+//! command runs, after every prompt hook has had its say.
 
 use anyhow::{Context, Result};
 use portable_pty::CommandBuilder;
@@ -54,43 +56,29 @@ impl Shim {
             path.push(inherited);
         }
         command.env("PATH", path);
-        match shell_name().as_deref() {
-            Some("zsh") => {
-                if let Some(original) = env::var_os("ZDOTDIR") {
-                    command.env("SPOOKY_ORIG_ZDOTDIR", original);
-                }
-                command.env("ZDOTDIR", self.dir.join("zsh"));
-            }
-            Some("fish") => {
-                // fish reads `fish/vendor_conf.d` of every XDG data directory.
-                let mut data = OsString::from(self.dir.join("fish"));
-                data.push(":");
-                data.push(
-                    env::var_os("XDG_DATA_DIRS")
-                        .filter(|d| !d.is_empty())
-                        .unwrap_or_else(|| OsString::from("/usr/local/share:/usr/share")),
-                );
-                command.env("XDG_DATA_DIRS", data);
-            }
-            Some("bash") => {
-                let mut prompt = OsString::from(BASH_PROMPT);
-                if let Some(existing) = env::var_os("PROMPT_COMMAND") {
-                    prompt.push(";");
-                    prompt.push(existing);
-                }
-                command.env("PROMPT_COMMAND", prompt);
-            }
-            _ => {}
+        // Every shell's hook is set up whichever shell `$SHELL` names: a profile may start
+        // another one (bash running `exec fish`, which is common), and each shell reads
+        // only its own variable.
+        if let Some(original) = env::var_os("ZDOTDIR") {
+            command.env("SPOOKY_ORIG_ZDOTDIR", original);
         }
+        command.env("ZDOTDIR", self.dir.join("zsh"));
+        // fish reads `fish/vendor_conf.d` of every XDG data directory.
+        let mut data = OsString::from(self.dir.join("fish"));
+        data.push(":");
+        data.push(
+            env::var_os("XDG_DATA_DIRS")
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| OsString::from("/usr/local/share:/usr/share")),
+        );
+        command.env("XDG_DATA_DIRS", data);
+        let mut prompt = OsString::from(BASH_PROMPT);
+        if let Some(existing) = env::var_os("PROMPT_COMMAND") {
+            prompt.push(";");
+            prompt.push(existing);
+        }
+        command.env("PROMPT_COMMAND", prompt);
     }
-}
-
-/// The name of the user's shell, such as `zsh`.
-fn shell_name() -> Option<String> {
-    let shell = env::var_os("SHELL")?;
-    Path::new(&shell)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// Puts the shim first on `PATH` again before a bash prompt, if a profile moved it.
@@ -109,24 +97,23 @@ fi
 unset SPOOKY_ORIG_ZDOTDIR
 [[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]] && source "${ZDOTDIR:-$HOME}/.zshenv"
 autoload -Uz add-zsh-hook
-_spooky_first_prompt() {
-  path=("$SPOOKY_SHIM_DIR" ${path:#"$SPOOKY_SHIM_DIR"})
-  add-zsh-hook -d precmd _spooky_first_prompt
-  unfunction _spooky_first_prompt
+_spooky_path() {
+  [[ "${path[1]}" == "$SPOOKY_SHIM_DIR" ]] || path=("$SPOOKY_SHIM_DIR" ${path:#"$SPOOKY_SHIM_DIR"})
 }
-add-zsh-hook precmd _spooky_first_prompt
+add-zsh-hook precmd _spooky_path
+add-zsh-hook preexec _spooky_path
 "#;
 
-/// fish runs this before the user's `config.fish`, so it waits for the first prompt to
-/// move the shim to the front of `PATH`.
+/// fish runs this before the user's `config.fish`, so it waits for the first prompt, and
+/// then each command, to keep the shim at the front of `PATH`.
 const FISH: &str = r#"# Written by spooky-server.
-function _spooky_first_prompt --on-event fish_prompt
+function _spooky_path --on-event fish_prompt --on-event fish_preexec
+    test "$PATH[1]" = "$SPOOKY_SHIM_DIR"; and return
     set -l rest
     for entry in $PATH
         test "$entry" != "$SPOOKY_SHIM_DIR"; and set -a rest $entry
     end
     set -gx PATH $SPOOKY_SHIM_DIR $rest
-    functions -e _spooky_first_prompt
 end
 "#;
 

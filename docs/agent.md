@@ -63,6 +63,10 @@ Planned: `AgentEvents` with a cursor and deltas, a closed `AgentCommand` set (mo
 
 `omp` persists its own sessions. An agent tab is saved in `workspaces.json` with its backend, directory and the session file `omp` reported (`get_state`), and a restarted server starts it again with `--resume=<file>` and loads the history with `get_messages_page`; a session file that is gone starts an empty conversation. A running turn is lost with the process, as a running shell command is. A saved session whose file does not exist (`omp` writes it with the first message) is not resumed: the agent starts empty.
 
+## The shim and shells that move PATH
+
+The shim directory is put first on `PATH` and, for zsh and fish, checked again just before every command, because tools such as mise rebuild `PATH` at every prompt. The hooks of all three shells are always set up, whatever `$SHELL` is: over SSH `$SHELL` is the login shell (bash), and a profile may start another (`exec fish`), which reads only its own variable.
+
 ## Finding the program
 
 A server started over SSH (`ssh host spooky-server bridge`) has the non-interactive `PATH`, which usually lacks the directories user tools are installed in, although the panes' shells find them. The backend's program (`SPOOKY_OMP` or `omp`) is looked for in the `PATH` and then in `~/.local/bin`, `~/.bun/bin`, `~/.cargo/bin`, `~/.local/share/mise/shims`, `/opt/homebrew/bin` and `/usr/local/bin`; those that exist are appended to the agent's `PATH` so the tools it starts are found too (`crates/spooky-server/src/agent/path.rs`). A program installed anywhere else needs `SPOOKY_OMP` or a place on the `PATH`.

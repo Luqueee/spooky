@@ -412,28 +412,70 @@ fn screen_has(client: &mut Connection, text: &str) -> bool {
     })
 }
 
+/// One startup file and what it contains, given the directory with a decoy `omp`.
+type ProfileFile = (&'static str, fn(&Path) -> String);
+
 /// How a shell's profile puts a directory first on `PATH`, and which files it lives in.
 struct Profile {
+    /// The shell the server is told is the user's (`$SHELL`).
     shell: &'static str,
-    files: &'static [&'static str],
-    path_line: fn(&Path) -> String,
+    /// Another program the profile needs, when there is one.
+    needs: Option<&'static str>,
+    files: &'static [ProfileFile],
 }
 
-const PROFILES: [Profile; 3] = [
+const FISH: &str = "/opt/homebrew/bin/fish";
+
+fn sh_prepend(dir: &Path) -> String {
+    format!("export PATH=\"{}:$PATH\"\n", dir.display())
+}
+
+/// What mise does: rebuild `PATH`, with its own directories first, at every prompt.
+fn zsh_every_prompt(dir: &Path) -> String {
+    format!(
+        "{}_rebuild() {{ path=(\"{}\" $path) }}\nprecmd_functions+=(_rebuild)\n",
+        sh_prepend(dir),
+        dir.display()
+    )
+}
+
+fn fish_every_prompt(dir: &Path) -> String {
+    format!(
+        "set -gx PATH {0} $PATH\nfunction _rebuild --on-event fish_prompt\n    set -gx PATH {0} $PATH\nend\n",
+        dir.display()
+    )
+}
+
+/// A bash profile that hands over to fish, as many setups do.
+fn exec_fish(_: &Path) -> String {
+    format!("exec {FISH}\n")
+}
+
+const PROFILES: [Profile; 4] = [
     Profile {
         shell: "/bin/bash",
-        files: &[".bash_profile", ".bashrc"],
-        path_line: |dir| format!("export PATH=\"{}:$PATH\"\n", dir.display()),
+        needs: None,
+        files: &[(".bash_profile", sh_prepend), (".bashrc", sh_prepend)],
     },
     Profile {
         shell: "/bin/zsh",
-        files: &[".zprofile", ".zshrc"],
-        path_line: |dir| format!("export PATH=\"{}:$PATH\"\n", dir.display()),
+        needs: None,
+        files: &[(".zprofile", sh_prepend), (".zshrc", zsh_every_prompt)],
     },
     Profile {
-        shell: "/opt/homebrew/bin/fish",
-        files: &[".config/fish/config.fish"],
-        path_line: |dir| format!("set -gx PATH {} $PATH\n", dir.display()),
+        shell: FISH,
+        needs: None,
+        files: &[(".config/fish/config.fish", fish_every_prompt)],
+    },
+    // `$SHELL` is bash, as over SSH, but bash starts fish: the shim must reach fish too.
+    Profile {
+        shell: "/bin/bash",
+        needs: Some(FISH),
+        files: &[
+            (".bash_profile", exec_fish),
+            (".bashrc", exec_fish),
+            (".config/fish/config.fish", fish_every_prompt),
+        ],
     },
 ];
 
@@ -442,7 +484,8 @@ fn omp_typed_in_a_pane_shows_the_agent_there_and_anything_unsupported_runs_the_r
     // Each shell is checked where it is installed (zsh and fish are not on every CI image).
     let mut checked = 0;
     for profile in &PROFILES {
-        if Path::new(profile.shell).exists() {
+        if Path::new(profile.shell).exists() && profile.needs.is_none_or(|n| Path::new(n).exists())
+        {
             shim_wins_over_a_profile(profile);
             checked += 1;
         }
@@ -461,12 +504,12 @@ fn shim_wins_over_a_profile(profile: &Profile) {
             .unwrap_or_else(|e| panic!("real omp: {e}"));
         fs::set_permissions(&real, fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|e| panic!("permissions: {e}"));
-        for name in profile.files {
+        for (name, text) in profile.files {
             let file = dir.join(name);
             if let Some(parent) = file.parent() {
                 fs::create_dir_all(parent).unwrap_or_else(|e| panic!("{name}: {e}"));
             }
-            fs::write(&file, (profile.path_line)(&decoy)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            fs::write(&file, text(&decoy)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
         command.env("SHELL", profile.shell).env("HOME", dir);
     });
