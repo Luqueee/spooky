@@ -1,3 +1,4 @@
+use crate::agent::Agent;
 use crate::pane::{Pane, Size};
 use anyhow::{Context, Result, bail};
 use spooky_core::{Layout, Workspace};
@@ -7,6 +8,7 @@ pub(crate) struct State {
     pub(crate) next_id: u64,
     pub(crate) workspaces: Vec<Workspace>,
     pub(crate) panes: BTreeMap<u64, Arc<Pane>>,
+    pub(crate) agents: BTreeMap<u64, Arc<Agent>>,
 }
 
 /// The size of the largest pane, which is the window-sized one when nothing

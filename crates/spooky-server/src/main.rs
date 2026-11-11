@@ -4,6 +4,8 @@
 #[macro_use]
 mod log;
 #[cfg(unix)]
+mod agent;
+#[cfg(unix)]
 mod cli;
 #[cfg(unix)]
 mod daemon;
@@ -17,6 +19,8 @@ mod search;
 mod server;
 #[cfg(unix)]
 mod settings;
+#[cfg(unix)]
+mod shim;
 #[cfg(unix)]
 mod state;
 

@@ -1,0 +1,13 @@
+:root{--bg:#22252e;--raise:#2b2f39;--hi:#343947;--line:#3a3f4d;--fg:#d3d7e0;--muted:#8a90a0;--accent:#a8b4d0;--ok:#7db99c;--bad:#e2858f;--warn:#d9b26a;
+--sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}
+html,body,#root{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased;overflow:hidden;user-select:text}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+button:disabled{cursor:default;opacity:.45}
+.app{height:100%;display:flex;flex-direction:column;position:relative}
+.column{width:100%;max-width:760px;margin:0 auto;padding:0 24px}
+.bottom{padding:6px 0 4px}
+.muted{color:var(--muted)}.small{font-size:12px}.tiny{font-size:11px}.grow{flex:1}.pad{padding:10px}
+.ghost{color:var(--muted);font-size:12px;padding:2px 6px;border-radius:6px}.ghost:hover{background:var(--hi);color:var(--fg)}
+::selection{background:#4a5a82;color:#fff}

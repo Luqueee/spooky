@@ -1,0 +1,32 @@
+{
+  "name": "spooky-agent-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The agent conversation view Spooky shows in a web view. Built to one HTML file that the desktop app embeds.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "dependencies": {
+    "highlight.js": "11.11.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "@vitejs/plugin-react": "5.1.0",
+    "typescript": "5.9.3",
+    "vite": "7.1.12",
+    "vite-plugin-singlefile": "2.3.0",
+    "vitest": "4.0.6"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

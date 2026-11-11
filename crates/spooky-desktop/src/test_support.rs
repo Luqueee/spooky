@@ -53,5 +53,6 @@ pub(crate) fn pane(rows: &[&str]) -> spooky_core::Pane {
         focus_reporting: false,
         clipboard_seq: 0,
         highlights: Vec::new(),
+        agent: None,
     }
 }

@@ -61,14 +61,15 @@ pub(crate) fn status() -> Result<()> {
     };
     let status = server_status(&mut client)?;
     println!(
-        "Spooky server pid {}, protocol {}, up {}s: {} workspace(s), {} tab(s), {} shell(s) of which {} running",
+        "Spooky server pid {}, protocol {}, up {}s: {} workspace(s), {} tab(s), {} shell(s) of which {} running, {} agent(s) running",
         status.pid,
         status.version,
         status.uptime_secs,
         status.workspaces,
         status.tabs,
         status.panes,
-        status.running
+        status.running,
+        status.agents
     );
     Ok(())
 }
@@ -80,12 +81,13 @@ pub(crate) fn stop(force: bool) -> Result<()> {
         return Ok(());
     };
     let status = server_status(&mut client)?;
-    if status.running > 0 && !force {
+    if status.running + status.agents > 0 && !force {
         bail!(
-            "{} shell(s) are running in {} workspace(s) and stopping the server ends them. \
+            "{} shell(s) and {} agent(s) are running in {} workspace(s) and stopping the server ends them. \
              Run `spooky-server stop --force` to stop anyway; the workspaces come back, with \
-             new shells, the next time a server starts",
+             new shells and agents resumed from their sessions, the next time a server starts",
             status.running,
+            status.agents,
             status.workspaces
         );
     }
@@ -103,6 +105,31 @@ pub(crate) fn stop(force: bool) -> Result<()> {
     }
     bail!("the server acknowledged the request but is still running after 5 seconds")
 }
+/// Asks the running server to open an agent tab next to the pane this command runs in,
+/// in the current directory. The `omp` shim runs this.
+fn agent_open(backend: &str, args: Vec<String>) -> Result<()> {
+    let pane: u64 = env::var("SPOOKY_PANE")
+        .context("SPOOKY_PANE is not set: this only works inside a Spooky pane")?
+        .parse()
+        .context("SPOOKY_PANE is not a pane number")?;
+    let cwd = env::current_dir().context("reading the current directory")?;
+    let Some(mut client) = running_server()? else {
+        bail!("no Spooky server is running");
+    };
+    match client.request(&Request::OpenAgent {
+        pane,
+        backend: backend.to_owned(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        args,
+    })? {
+        Response::Ok => {
+            println!("Opened {backend} in this pane.");
+            Ok(())
+        }
+        Response::Error(message) => bail!("the server refused: {message}"),
+        other => bail!("unexpected reply to agent-open: {other:?}"),
+    }
+}
 pub fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref().unwrap_or("serve") {
@@ -114,6 +141,14 @@ pub fn main() -> Result<()> {
             Some("--force") => stop(true),
             Some(other) => bail!("unknown option for stop: {other}"),
         },
-        mode => bail!("unknown server mode: {mode} (expected serve, bridge, status or stop)"),
+        "agent-open" => {
+            let backend = args.next().unwrap_or_else(|| "omp".into());
+            // `--` ends this command's own words; everything after is the user's.
+            let rest: Vec<String> = args.skip_while(|a| a != "--").skip(1).collect();
+            agent_open(&backend, rest)
+        }
+        mode => bail!(
+            "unknown server mode: {mode} (expected serve, bridge, status, stop or agent-open)"
+        ),
     }
 }

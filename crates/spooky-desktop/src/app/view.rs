@@ -2,7 +2,10 @@
 use super::{App, Confirm, ContextTarget, Message};
 use crate::commands::Command;
 use crate::{
-    features::splits::{Divider, THICKNESS},
+    features::{
+        agent,
+        splits::{Divider, THICKNESS},
+    },
     terminal,
     ui::*,
 };
@@ -136,6 +139,16 @@ fn modal<'a>(
 }
 
 impl App {
+    /// Whether a tab's only pane is an agent.
+    fn tab_is_agent(&self, tab: &spooky_core::Tab) -> bool {
+        let Layout::Pane(id) = tab.layout else {
+            return false;
+        };
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.panes.iter().find(|p| p.id == id))
+            .is_some_and(|p| p.agent.is_some())
+    }
     fn header(&self) -> Element<'_, Message> {
         // The native macOS traffic lights occupy this part of the unified titlebar.
         let inset = if cfg!(target_os = "macos") { 72 } else { 0 };
@@ -169,7 +182,14 @@ impl App {
                 let id = tab.id;
                 let label = button(
                     row![
-                        icon(Icon::Terminal, if selected { TEXT } else { MUTED }),
+                        icon(
+                            if self.tab_is_agent(tab) {
+                                Icon::Agent
+                            } else {
+                                Icon::Terminal
+                            },
+                            if selected { TEXT } else { MUTED }
+                        ),
                         text(self.tab_label(tab)).size(11)
                     ]
                     .spacing(6)
@@ -222,6 +242,7 @@ impl App {
                 Message::Run(Command::Split(Axis::Horizontal))
             ),
             action(Icon::Plus, NEW_TAB, Message::Run(Command::NewTab)),
+            action(Icon::Agent, "New agent", Message::Run(Command::NewAgent)),
             button(
                 row![icon(Icon::Paperclip, MUTED), text("Attach").size(10)]
                     .spacing(5)
@@ -436,6 +457,15 @@ impl App {
                         .center(Length::Fill)
                         .into();
                 };
+                if let Some(conversation) = &pane.agent {
+                    let id = *id;
+                    if self.web_target() == Some(id) {
+                        return super::web::area();
+                    }
+                    return mouse_area(agent::view(&self.agents, id, conversation))
+                        .on_press(Message::FocusPane(id, Vec::new()))
+                        .into();
+                }
                 let selected = self.pane == Some(*id);
                 let selection = self
                     .selection
@@ -787,6 +817,7 @@ impl App {
                 ContextTarget::Tab(id) => column![
                     menu_item(Icon::Pencil, "Rename tab", Message::RenameTab(id)),
                     menu_item(Icon::Plus, "New tab", Message::Run(Command::NewTab)),
+                    menu_item(Icon::Agent, "New agent", Message::Run(Command::NewAgent)),
                     separator(),
                     menu_item(Icon::Close, "Close tab", Message::AskCloseTab(id))
                         .style(destructive),

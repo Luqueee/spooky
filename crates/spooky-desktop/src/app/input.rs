@@ -52,7 +52,7 @@ impl App {
             }
             Message::Paste(Some(s)) => {
                 if self.terminal_focused
-                    && let Some(p) = self.current_pane()
+                    && let Some(p) = self.current_pane().filter(|p| p.agent.is_none())
                 {
                     let id = p.id;
                     let bytes = paste_bytes(&s, p.bracketed_paste);
@@ -186,7 +186,7 @@ impl App {
                             return clipboard::read().map(Message::Paste);
                         }
                         None => {
-                            if let Some(p) = self.current_pane() {
+                            if let Some(p) = self.current_pane().filter(|p| p.agent.is_none()) {
                                 let id = p.id;
                                 let application_cursor = p.application_cursor;
                                 let typed = terminal_text(&key, physical, mods, typed);
@@ -217,6 +217,7 @@ impl App {
             .unwrap_or_default();
         let message = match command {
             Command::NewTab => Some(Message::NewTab),
+            Command::NewAgent => Some(Message::NewAgent),
             Command::NewWorkspace => Some(Message::NewWorkspace),
             Command::Split(axis) => Some(Message::Split(axis)),
             Command::ClosePane => Some(Message::AskClosePane),

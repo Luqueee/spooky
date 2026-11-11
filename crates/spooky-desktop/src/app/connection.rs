@@ -99,6 +99,7 @@ impl App {
                 self.workspace = None;
                 self.tab = None;
                 self.pane = None;
+                self.agents_seen = None;
                 self.pending = None;
                 self.grids.clear();
                 self.bounds.clear();

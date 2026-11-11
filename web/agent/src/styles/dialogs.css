@@ -1,0 +1,12 @@
+.dialog{position:relative;margin:14px 0 8px;padding:14px 14px 8px;border:1px solid #2f9fe6;border-radius:6px;background:#1c1f27;font:13px/1.5 var(--mono);outline:none;display:flex;flex-direction:column;gap:2px}
+.dialog-title{position:absolute;top:-10px;left:14px;padding:0 8px;background:var(--bg);color:#4db8ff;font-weight:700}
+.dialog-line{color:var(--fg);white-space:pre-wrap;overflow-wrap:anywhere}
+.dialog-list{display:flex;flex-direction:column;margin-top:6px}
+.dialog-option{display:flex;gap:8px;text-align:left;padding:1px 0;color:var(--fg)}
+.dialog-option.on{color:#4db8ff;font-weight:700}
+.pointer{width:1ch;flex:none}
+.dialog-input{margin-top:6px;background:none;border:0;border-bottom:1px solid #2f9fe6;color:var(--fg);font:inherit;padding:2px 0;outline:none}
+.dialog-hint{margin-top:8px;padding-top:6px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+.chip{border:1px solid var(--line);border-radius:8px;padding:4px 12px;font-size:13px}.chip:hover{background:var(--hi)}
+.field{background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--fg);font:inherit;padding:6px 10px;outline:none;width:100%}
+.field:focus{border-color:var(--accent)}

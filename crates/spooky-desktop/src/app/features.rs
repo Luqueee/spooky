@@ -1,6 +1,7 @@
 use super::{App, Message};
 use crate::{
     features::{
+        agent::{self},
         attachments::{self},
         palette::{self},
         search::{self},
@@ -162,6 +163,33 @@ impl App {
         if outcome.focus_field {
             return iced::widget::operation::focus("search-input")
                 .chain(iced::widget::operation::select_all("search-input"));
+        }
+        Task::none()
+    }
+    /// Carries out a message from an agent pane's composer.
+    pub(super) fn agent_message(&mut self, message: agent::Message) -> Task<Message> {
+        let outcome = self.agents.update(message);
+        for request in outcome.requests {
+            self.send(request);
+        }
+        if let Some(text) = outcome.copy {
+            self.status = "Copied the answer".into();
+            return iced::clipboard::write(text);
+        }
+        if let Some(link) = outcome.link {
+            // A link in an answer is the agent's text: it opens only with the same
+            // modifier and checks as a link in the terminal, never on a plain click.
+            self.status = if shortcuts::primary(self.modifiers) {
+                self.hyperlinks.follow(&link)
+            } else {
+                format!("Link to {link}: hold the shortcut key and click to open it")
+            };
+        }
+        if outcome.focus_search {
+            return iced::widget::operation::focus(agent::SEARCH);
+        }
+        if outcome.focus_field {
+            return iced::widget::operation::focus(agent::FIELD);
         }
         Task::none()
     }

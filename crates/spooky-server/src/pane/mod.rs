@@ -195,6 +195,7 @@ impl Pane {
         size: Size,
         changes: Arc<Changes>,
         scrollback: usize,
+        shim: Option<&crate::shim::Shim>,
     ) -> Result<Arc<Self>> {
         let revision = Arc::new(AtomicU64::new(0));
         let pair = native_pty_system().openpty(size.pty())?;
@@ -204,6 +205,9 @@ impl Pane {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        if let Some(shim) = shim {
+            shim.configure(&mut cmd, id);
+        }
         let mut child = pair.slave.spawn_command(cmd).context("starting shell")?;
         drop(pair.slave);
         let killer = child.clone_killer();
@@ -445,6 +449,7 @@ impl Pane {
             focus_reporting: content.mode.contains(TermMode::FOCUS_IN_OUT),
             clipboard_seq: self.clipboard.seq.load(Ordering::Acquire),
             highlights,
+            agent: None,
         })
     }
     pub(crate) fn resize(&self, size: Size) -> Result<()> {

@@ -11,6 +11,8 @@ use spooky_core::Axis;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command {
     NewTab,
+    /// Start an agent in a new tab.
+    NewAgent,
     NewWorkspace,
     Split(Axis),
     ClosePane,
@@ -74,6 +76,7 @@ const WORKSPACE_IDS: [&str; 9] = [
 /// Selecting a tab or workspace by position is left out: it is a shortcut, not a choice.
 pub(crate) const LISTED: &[Command] = &[
     Command::NewTab,
+    Command::NewAgent,
     Command::NewWorkspace,
     Command::Split(Axis::Vertical),
     Command::Split(Axis::Horizontal),
@@ -103,6 +106,7 @@ impl Command {
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::NewTab => "core.tab.new",
+            Self::NewAgent => "core.agent.new",
             Self::NewWorkspace => "core.workspace.new",
             Self::Split(Axis::Vertical) => "core.pane.split.columns",
             Self::Split(Axis::Horizontal) => "core.pane.split.rows",
@@ -135,6 +139,7 @@ impl Command {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::NewTab => "New tab",
+            Self::NewAgent => "New agent",
             Self::NewWorkspace => "New workspace",
             Self::Split(Axis::Vertical) => "Split columns",
             Self::Split(Axis::Horizontal) => "Split rows",

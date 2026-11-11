@@ -14,11 +14,15 @@ use std::{
 pub(crate) struct Settings {
     /// Scrollback lines kept per pane.
     pub(crate) scrollback_lines: usize,
+    /// Typing a bare `omp` in a Spooky pane opens the agent view (`false` leaves `omp`
+    /// alone).
+    pub(crate) agent_shim: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             scrollback_lines: 10_000,
+            agent_shim: true,
         }
     }
 }

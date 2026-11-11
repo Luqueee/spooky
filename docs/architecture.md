@@ -3,7 +3,7 @@
 ## Modules and dependency direction
 
 - **spooky-core** defines the bounded versioned wire protocol, own-user local IPC paths, and local/SSH client transport. It has no GUI or terminal-renderer dependency.
-- **spooky-server** owns workspace layout, shell processes, PTYs and terminal emulation. It depends on spooky-core, portable-pty and alacritty_terminal.
+- **spooky-server** owns workspace layout, shell processes, PTYs, terminal emulation and agent processes (coding agents such as oh-my-pi, run without a terminal). It depends on spooky-core, portable-pty and alacritty_terminal.
 - **spooky-desktop** builds the spooky executable. It owns presentation, keyboard focus, clipboard, screenshots and window integration. It depends on spooky-core and iced with its wgpu renderer.
 
 The GUI never owns the lifetime of a shell. The server never needs a display server or GPU.
@@ -26,6 +26,7 @@ src/
     subscription.rs  the subscriptions: server events, keys, window events, blink
     view.rs          the interface
   features/          one folder per feature, each with its own state, message type, update logic and view
+    agent/           mod.rs (drafts per agent pane, the composer's messages), view.rs (the conversation and composer)
     settings/        mod.rs (state, changes, effects), page.rs (the view)
     window/          dropdown.rs (placement, focus-loss rule), hotkey.rs (the global shortcut)
     tailscale/       mod.rs (picker state, messages, the choice it makes), discovery.rs (the client), view.rs
@@ -54,6 +55,8 @@ spooky-server/src/
   server.rs    Server: the shared state, request execution, save and restore, shutdown
   state.rs     State (workspaces, panes, identities), layout edits, and the validation of names, sizes and directories
   pane/        mod.rs (a pane: PTY, emulator, listener, snapshot), render.rs (rows and the row cache), shell.rs (the shell command)
+  shim.rs      the omp shim: the script and zsh startup file written under the state directory, and the variables and PATH given to shells
+  agent/       mod.rs (the Backend trait, normalized Event, the bounded Transcript, the child process and its reader), omp.rs (the oh-my-pi backend); see agent.md
   settings.rs  server.toml; persist.rs (saved workspaces); search.rs (scrollback matches); log.rs
 spooky-core/src/
   lib.rs       the wire protocol
@@ -63,6 +66,10 @@ spooky-core/src/
 ```
 
 Rules: a feature is a folder; features do not import one another (they meet in `App`, which composes them, and talk through messages and small traits `App` implements, such as `settings::Shortcuts`); the shared leaf modules (`config`, `ui`, `platform`) depend on no feature; tests live beside the code they test. A feature reports what the rest of the application must do as data (`settings::Effect`) instead of reaching into it, which is also what lets its logic be tested without a display. The same rules will apply to mods.
+
+## Agent web view
+
+On macOS `app/web.rs` drives one `WKWebView` (`platform/macos/webview.rs`, through `wry`) that is a child of the main window and shows the agent pane that fills its tab. Responsibilities: the native layout reserves the pane's area with a measuring canvas that reports its rectangle; the application places, shows and hides the view, and pushes `features/agent/web::state` (the server's `Agent` as JSON) when it changed. The page posts messages through a bounded channel; `features/agent/web::event` parses them into a closed set, bounds them, and maps them to the messages the native view sends, so the server and `omp` are reached only through the usual requests. A forwarded chord becomes a command only if `shortcuts::shortcut` knows it. The view is hidden while a native overlay is open, since a child view draws above iced; splits, other platforms and a failed start keep the native `features/agent/view`. The page (`web/agent`) is built to one HTML file, committed, with a Content-Security-Policy that allows no network, and navigation and new windows are refused. `platform/webview.rs` is the only place that knows whether the view exists. Dependency direction: `app` → `features/agent/web` and `platform/webview`; the page depends on nothing in Rust but the JSON shape of `spooky_core::Agent` and the action set.
 
 ## Transport
 
@@ -88,7 +95,7 @@ The link reports each connection's state to the frontend as `Event::Connection` 
 
 Connection attempts are cancellable. `Client::connect_cancellable` polls a caller predicate while waiting for the SSH handshake or local server start; on cancellation it kills the SSH child and returns `Cancelled`. `Link::retarget` queues the target change and then publishes the newest generation in an atomic, so an attempt for an older generation on either thread is abandoned instead of waited out, and the user can leave a hung host immediately. Failures are typed: `Unrecoverable` (rejected login, host-key failure, unknown host, missing `spooky-server`, protocol mismatch, missing `ssh`) stops automatic retries until the next target request; everything else retries with a doubling backoff from 2 s capped at 30 s. The command thread reports `Event::Unreachable` with a blocking send, since it is state, and the frontend shows the reason with Retry / Use this computer rather than an indefinite waiting pane. Dropping an SSH transport kills the child and waits at most 500 ms for its helper threads, so a pipe held open by a leftover process cannot stall the caller.
 
-Both endpoints must negotiate protocol v6. There is no v1 to v5 compatibility mode and no automatic server restart: replacing an existing server terminates its shells, so the user must finish those sessions before upgrading the running daemon (`spooky-server stop` exists from v6 on; older servers are ended by process).
+Both endpoints must negotiate protocol v10. There is no v1 to v9 compatibility mode and no automatic server restart: replacing an existing server terminates its shells, so the user must finish those sessions before upgrading the running daemon (`spooky-server stop` exists from v6 on; older servers are ended by process).
 
 Protocol v4 adds each pane's mouse state, taken from the emulator's mode flags: tracking (`Off`, `Clicks`, `Drag`, `Motion`; the most detailed enabled mode wins), encoding (`Normal`, `Utf8`, `Sgr`) and `alternate_scroll` (alternate screen with DECSET 1007 on). It also adds `Cursor::shape` and `Run::strikethrough`. The server runs the emulator with a steady-bar default cursor so shells that never send DECSCUSR look as before, and applies the dim attribute by scaling the foreground to two thirds (the foreground is dimmed before reverse video swaps it).
 

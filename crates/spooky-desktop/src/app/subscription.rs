@@ -17,6 +17,10 @@ fn hotkey_events() -> impl iced::futures::Stream<Item = Message> {
         }
     })
 }
+fn web_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    crate::platform::webview::messages().map(Message::WebEvent)
+}
 fn background_events() -> impl iced::futures::Stream<Item = Message> {
     use iced::futures::SinkExt;
     iced::stream::channel(32, async |mut output| {
@@ -36,6 +40,7 @@ pub(crate) fn subscription(app: &App) -> Subscription<Message> {
     Subscription::batch([
         Subscription::run(background_events),
         Subscription::run(hotkey_events),
+        Subscription::run(web_events),
         blink,
         event::listen_with(|event, status, id| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed {

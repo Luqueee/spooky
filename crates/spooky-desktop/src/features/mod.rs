@@ -2,6 +2,7 @@
 //! update logic and view. Features do not import one another: they meet in `App`,
 //! which composes them, and talk through messages and small traits it implements.
 
+pub(crate) mod agent;
 pub(crate) mod attachments;
 pub(crate) mod connection;
 pub(crate) mod hyperlinks;

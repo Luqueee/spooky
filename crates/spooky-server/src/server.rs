@@ -1,15 +1,19 @@
+use crate::agent;
+use crate::agent::Agent;
 use crate::pane::{Changes, Pane, Size};
+use crate::persist::SavedAgent;
 use crate::persist::{self, Saved};
 use crate::settings::Settings;
+use crate::shim::Shim;
 use crate::state::{
     State, largest_pane, remove_leaf, replace_leaf, restore_cwd, validate_name, validate_size,
     validated_cwd,
 };
 use alacritty_terminal::grid::Scroll;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use spooky_core::{
-    EVEN_SPLIT, Layout, MAX_MESSAGE_BYTES, MIN_SPLIT_SHARE, PROTOCOL_VERSION, Request, Response,
-    ServerStatus, Snapshot, Tab, Workspace,
+    EVEN_SPLIT, Layout, MAX_AGENT_ARG_BYTES, MAX_AGENT_ARGS, MAX_MESSAGE_BYTES, MIN_SPLIT_SHARE,
+    PROTOCOL_VERSION, Request, Response, ServerStatus, Snapshot, Tab, Workspace,
 };
 use std::{
     collections::BTreeMap,
@@ -32,7 +36,7 @@ pub(crate) struct Saver {
     wake: Condvar,
 }
 impl Saver {
-    fn mark(&self) {
+    pub(crate) fn mark(&self) {
         if let Ok(mut dirty) = self.dirty.lock() {
             *dirty = true;
             self.wake.notify_one();
@@ -64,20 +68,32 @@ pub(crate) struct Server {
     /// Size for new panes while no pane exists to copy one from.
     pub(crate) fallback_size: Size,
     pub(crate) state_dir: PathBuf,
-    pub(crate) saver: Saver,
+    pub(crate) saver: Arc<Saver>,
     /// Serializes writers of the saved workspaces.
     pub(crate) save_lock: Mutex<()>,
     /// Set by `Shutdown`; the connection that asked stops the server once it
     /// has been answered.
     pub(crate) stop_requested: AtomicBool,
+    /// The `omp` shim given to new shells, when enabled and installed.
+    pub(crate) shim: Option<Shim>,
 }
 impl Server {
     pub(crate) fn new(settings: Settings, state_dir: PathBuf, fallback_size: Size) -> Self {
+        let shim = settings
+            .agent_shim
+            .then(|| Shim::install(&state_dir))
+            .and_then(|installed| {
+                installed
+                    .map_err(|error| info!("the omp shim is off: {error:#}"))
+                    .ok()
+            });
         Self {
+            shim,
             state: Mutex::new(State {
                 next_id: 1,
                 workspaces: Vec::new(),
                 panes: BTreeMap::new(),
+                agents: BTreeMap::new(),
             }),
             changes: Arc::new(Changes::default()),
             layout_revision: AtomicU64::new(0),
@@ -85,7 +101,7 @@ impl Server {
             started: Instant::now(),
             fallback_size,
             state_dir,
-            saver: Saver::default(),
+            saver: Arc::new(Saver::default()),
             save_lock: Mutex::new(()),
             stop_requested: AtomicBool::new(false),
         }
@@ -106,11 +122,22 @@ impl Server {
         Ok(id)
     }
     fn pane(&self, id: u64) -> Result<Arc<Pane>> {
-        self.lock()?
-            .panes
-            .get(&id)
-            .cloned()
-            .context("pane not found")
+        let state = self.lock()?;
+        if state.agents.contains_key(&id) {
+            bail!("pane is an agent, not a terminal");
+        }
+        match state.panes.get(&id) {
+            Some(pane) => Ok(pane.clone()),
+            None => bail!("pane not found"),
+        }
+    }
+    fn agent(&self, id: u64) -> Result<Arc<Agent>> {
+        let state = self.lock()?;
+        match state.agents.get(&id) {
+            Some(agent) => Ok(agent.clone()),
+            None if state.panes.contains_key(&id) => bail!("pane is a terminal, not an agent"),
+            None => bail!("pane not found"),
+        }
     }
     /// Grid size for a pane that is not a split half.
     fn pane_size(&self) -> Result<Size> {
@@ -123,7 +150,66 @@ impl Server {
             size,
             self.changes.clone(),
             self.settings.scrollback_lines,
+            self.shim.as_ref(),
         )
+    }
+    fn workspace_cwd(&self, workspace: u64) -> Result<PathBuf> {
+        let state = self.lock()?;
+        Ok(PathBuf::from(
+            &state
+                .workspaces
+                .iter()
+                .find(|w| w.id == workspace)
+                .context("workspace not found")?
+                .cwd,
+        ))
+    }
+    /// Starts `backend` with the user's `args` in `cwd`: over the terminal pane `over`,
+    /// which keeps running underneath and shows again when the agent is closed, or,
+    /// without one, as the only pane of a new tab of `workspace`.
+    fn create_agent(
+        &self,
+        workspace: u64,
+        backend: &str,
+        args: &[String],
+        cwd: PathBuf,
+        over: Option<u64>,
+    ) -> Result<()> {
+        if let Some(pane) = over {
+            let state = self.lock()?;
+            ensure!(state.panes.contains_key(&pane), "pane not found");
+            ensure!(
+                !state.agents.contains_key(&pane),
+                "the pane already shows an agent"
+            );
+        }
+        let id = match over {
+            Some(pane) => pane,
+            None => self.reserve_id()?,
+        };
+        let tab = self.reserve_id()?;
+        let backend = agent::backend(backend, args, None)?;
+        let agent = Agent::spawn(id, backend, &cwd, self.changes.clone(), self.saver.clone())?;
+        let mut state = self.lock()?;
+        if over.is_none() {
+            let ws = state
+                .workspaces
+                .iter_mut()
+                .find(|w| w.id == workspace)
+                .context("workspace closed during agent creation")?;
+            ws.tabs.push(Tab {
+                id: tab,
+                title: "Agent".into(),
+                renamed: false,
+                layout: Layout::Pane(id),
+            });
+        } else if !state.panes.contains_key(&id) {
+            bail!("pane closed during agent creation");
+        }
+        state.agents.insert(id, agent);
+        // The pane changes what it shows: clients need its whole screen again.
+        self.changed();
+        Ok(())
     }
     fn status(&self) -> Result<ServerStatus> {
         let state = self.lock()?;
@@ -139,6 +225,11 @@ impl Server {
                 .values()
                 .filter(|pane| !pane.exited.load(Ordering::Acquire))
                 .count() as u32,
+            agents: state
+                .agents
+                .values()
+                .filter(|agent| agent.is_alive())
+                .count() as u32,
         })
     }
     /// Writes the workspaces so the next server can restore them.
@@ -147,24 +238,38 @@ impl Server {
             .save_lock
             .lock()
             .map_err(|_| anyhow!("save state poisoned"))?;
-        let (next_id, workspaces, size) = {
+        let (next_id, workspaces, agents, size) = {
             let state = self.lock()?;
+            let agents = state
+                .agents
+                .values()
+                .filter_map(|agent| agent.saved())
+                .map(|mut saved| {
+                    saved.covers = state.panes.contains_key(&saved.pane);
+                    saved
+                })
+                .collect::<Vec<_>>();
             (
                 state.next_id,
                 state.workspaces.clone(),
+                agents,
                 largest_pane(&state, self.fallback_size),
             )
         };
         persist::store(
             &self.state_dir,
-            &Saved::new(next_id, workspaces).sized(size.cols, size.rows),
+            &Saved::new(next_id, workspaces)
+                .with_agents(agents)
+                .sized(size.cols, size.rows),
         )
     }
-    /// Rebuilds saved workspaces with fresh shells in their directories. A
-    /// tab whose shells cannot all be started is left out.
+    /// Rebuilds saved workspaces with fresh shells in their directories, and agents
+    /// resumed from their saved sessions. A tab whose panes cannot all be started is
+    /// left out.
     pub(crate) fn restore(&self, saved: Saved) -> Result<()> {
         let (cols, rows) = saved.size();
         let size = Size { cols, rows };
+        let agents: BTreeMap<u64, &SavedAgent> = saved.agents.iter().map(|a| (a.pane, a)).collect();
         let mut state = self.lock()?;
         state.next_id = saved.next_id;
         for mut workspace in saved.workspaces {
@@ -174,13 +279,24 @@ impl Server {
             for tab in std::mem::take(&mut workspace.tabs) {
                 let mut ids = Vec::new();
                 tab.layout.panes(&mut ids);
-                let spawned = ids
-                    .into_iter()
-                    .map(|id| Ok((id, self.spawn_pane(id, &cwd, size)?)))
-                    .collect::<Result<Vec<_>>>();
+                let mut panes = Vec::new();
+                let mut resumed = Vec::new();
+                let spawned = ids.into_iter().try_for_each(|id| {
+                    match agents.get(&id) {
+                        Some(saved) => {
+                            resumed.push((id, self.restore_agent(id, saved)?));
+                            if saved.covers {
+                                panes.push((id, self.spawn_pane(id, &cwd, size)?));
+                            }
+                        }
+                        None => panes.push((id, self.spawn_pane(id, &cwd, size)?)),
+                    }
+                    Ok::<(), anyhow::Error>(())
+                });
                 match spawned {
-                    Ok(panes) => {
+                    Ok(()) => {
                         state.panes.extend(panes);
+                        state.agents.extend(resumed);
                         tabs.push(tab);
                     }
                     Err(error) => info!(
@@ -196,15 +312,34 @@ impl Server {
         }
         Ok(())
     }
+    /// Starts a saved agent again, resuming its program's session.
+    fn restore_agent(&self, id: u64, saved: &SavedAgent) -> Result<Arc<Agent>> {
+        let cwd = restore_cwd(&saved.cwd);
+        // `omp` writes its session file with the first message: a conversation that never
+        // began has nothing to resume, and asking for it would end the agent at once.
+        let session = saved
+            .session
+            .as_deref()
+            .filter(|file| Path::new(file).is_file());
+        let backend = agent::backend(&saved.backend, &[], session)?;
+        Agent::spawn(id, backend, &cwd, self.changes.clone(), self.saver.clone())
+    }
     /// Saves the workspaces, ends every shell and exits.
     pub(crate) fn stop(&self) -> ! {
         if let Err(error) = self.save() {
             info!("final save failed: {error:#}");
         }
-        let panes = self
+        let (panes, agents) = self
             .lock()
-            .map(|mut state| std::mem::take(&mut state.panes))
+            .map(|mut state| {
+                (
+                    std::mem::take(&mut state.panes),
+                    std::mem::take(&mut state.agents),
+                )
+            })
             .unwrap_or_default();
+        // Dropping the agents ends their processes; exit would skip it.
+        drop(agents);
         for pane in panes.values() {
             pane.terminate();
         }
@@ -232,11 +367,13 @@ impl Server {
                 if since == Some(revision) {
                     return Ok(Response::Unchanged { revision });
                 }
-                let (workspaces, panes) = {
+                let (workspaces, panes, agents, covered) = {
                     let state = self.lock()?;
                     (
                         state.workspaces.clone(),
                         state.panes.values().cloned().collect::<Vec<_>>(),
+                        state.agents.values().cloned().collect::<Vec<_>>(),
+                        state.agents.keys().copied().collect::<Vec<u64>>(),
                     )
                 };
                 // A topology change needs every viewport row, including newly
@@ -247,11 +384,19 @@ impl Server {
                 let delta = if full { None } else { since };
                 let panes = panes
                     .iter()
+                    // An agent shown over a terminal hides it.
+                    .filter(|pane| !covered.contains(&pane.id))
                     .filter(|pane| {
                         delta.is_none_or(|since| pane.revision.load(Ordering::Acquire) > since)
                     })
                     .map(|pane| pane.snapshot(delta))
                     .collect::<Result<Vec<_>>>()?;
+                let mut panes = panes;
+                for agent in &agents {
+                    if delta.is_none_or(|since| agent.revision.load(Ordering::Acquire) > since) {
+                        panes.push(agent.snapshot()?);
+                    }
+                }
                 return Ok(Response::Snapshot(Snapshot {
                     version: PROTOCOL_VERSION,
                     revision,
@@ -359,9 +504,14 @@ impl Server {
                     let mut ids = Vec::new();
                     closed.layout.panes(&mut ids);
                     let panes = ids
-                        .into_iter()
-                        .filter_map(|id| state.panes.remove(&id))
+                        .iter()
+                        .filter_map(|id| state.panes.remove(id))
                         .collect::<Vec<_>>();
+                    let agents = ids
+                        .iter()
+                        .filter_map(|id| state.agents.remove(id))
+                        .collect::<Vec<_>>();
+                    drop(agents);
                     self.changed();
                     panes
                 };
@@ -371,6 +521,9 @@ impl Server {
             Request::Split { pane, axis } => {
                 let (cwd, size) = {
                     let state = self.lock()?;
+                    if state.agents.contains_key(&pane) {
+                        bail!("an agent pane cannot be split");
+                    }
                     let p = state.panes.get(&pane).context("pane not found")?;
                     let ws = state
                         .workspaces
@@ -432,6 +585,15 @@ impl Server {
             Request::ClosePane { pane } => {
                 let removed = {
                     let mut state = self.lock()?;
+                    if state.panes.contains_key(&pane)
+                        && let Some(agent) = state.agents.remove(&pane)
+                    {
+                        // The terminal under it shows again.
+                        self.changed();
+                        drop(state);
+                        drop(agent);
+                        return Ok(Response::Ok);
+                    }
                     let wi = state
                         .workspaces
                         .iter()
@@ -452,6 +614,8 @@ impl Server {
                         state.workspaces.remove(wi);
                     }
                     let removed = state.panes.remove(&pane);
+                    let agent = state.agents.remove(&pane);
+                    let removed = (removed, agent);
                     self.changed();
                     removed
                 };
@@ -471,9 +635,14 @@ impl Server {
                         tab.layout.panes(&mut ids);
                     }
                     let panes = ids
-                        .into_iter()
-                        .filter_map(|id| state.panes.remove(&id))
+                        .iter()
+                        .filter_map(|id| state.panes.remove(id))
                         .collect::<Vec<_>>();
+                    let agents = ids
+                        .iter()
+                        .filter_map(|id| state.agents.remove(id))
+                        .collect::<Vec<_>>();
+                    drop(agents);
                     self.changed();
                     panes
                 };
@@ -516,6 +685,44 @@ impl Server {
                 };
                 return Ok(Response::Clipboard { seq, text });
             }
+            Request::CreateAgent { workspace, backend } => {
+                let cwd = self.workspace_cwd(workspace)?;
+                self.create_agent(workspace, &backend, &[], cwd, None)?;
+            }
+            Request::OpenAgent {
+                pane,
+                backend,
+                cwd,
+                args,
+            } => {
+                if args.len() > MAX_AGENT_ARGS || args.iter().any(|a| a.len() > MAX_AGENT_ARG_BYTES)
+                {
+                    bail!("too many or too long arguments");
+                }
+                let workspace = {
+                    let state = self.lock()?;
+                    state
+                        .workspaces
+                        .iter()
+                        .find(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
+                        .map(|w| w.id)
+                        .context("pane not found")?
+                };
+                let cwd = validated_cwd(Some(&cwd))?;
+                self.create_agent(workspace, &backend, &args, cwd, Some(pane))?;
+            }
+            Request::AgentPrompt { pane, text } => self.agent(pane)?.prompt(&text)?,
+            Request::AgentAbort { pane } => self.agent(pane)?.abort()?,
+            Request::AgentUsage { pane } => self.agent(pane)?.usage()?,
+            Request::AgentSetModel { pane, model } => self.agent(pane)?.set_model(&model)?,
+            Request::AgentSetThinking { pane, level } => {
+                self.agent(pane)?.set_thinking(&level)?;
+            }
+            Request::AgentAnswer {
+                pane,
+                dialog,
+                answer,
+            } => self.agent(pane)?.answer(&dialog, &answer)?,
             Request::Status => return Ok(Response::Status(self.status()?)),
             Request::Shutdown => {
                 info!("shutdown requested");

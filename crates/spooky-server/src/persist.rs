@@ -21,6 +21,22 @@ const FORMAT: u32 = 1;
 /// A saved file larger than this is treated as damaged rather than parsed.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
+/// An agent pane's identity and what is needed to resume it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedAgent {
+    /// The pane identity, a leaf of a saved layout.
+    pub pane: u64,
+    /// The agent program, as named when it was created.
+    pub backend: String,
+    /// The directory it ran in.
+    pub cwd: String,
+    /// The program's own session to resume, when it has one.
+    pub session: Option<String>,
+    /// The agent is shown over a terminal of the same pane, which comes back when it closes.
+    #[serde(default)]
+    pub covers: bool,
+}
+
 /// What a server saves and the next one restores.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Saved {
@@ -33,6 +49,9 @@ pub struct Saved {
     rows: u16,
     /// Workspaces in display order.
     pub workspaces: Vec<Workspace>,
+    /// The panes of those workspaces that are agents rather than shells.
+    #[serde(default)]
+    pub agents: Vec<SavedAgent>,
 }
 
 impl Saved {
@@ -43,12 +62,19 @@ impl Saved {
             cols: 80,
             rows: 24,
             workspaces,
+            agents: Vec::new(),
         }
     }
 
     /// Records the grid size restored shells should start at.
     pub fn sized(mut self, cols: u16, rows: u16) -> Self {
         (self.cols, self.rows) = (cols, rows);
+        self
+    }
+
+    /// Records which panes are agents and how to resume them.
+    pub fn with_agents(mut self, agents: Vec<SavedAgent>) -> Self {
+        self.agents = agents;
         self
     }
 
@@ -77,6 +103,19 @@ impl Saved {
                 claim(&mut seen, tab.id, self.next_id)?;
                 claim_layout(&mut seen, &mut tab.layout, self.next_id)?;
             }
+        }
+        let mut agents = HashSet::new();
+        for agent in &self.agents {
+            ensure!(
+                seen.contains(&agent.pane),
+                "agent {} is not in any layout",
+                agent.pane
+            );
+            ensure!(
+                agents.insert(agent.pane),
+                "agent {} appears twice",
+                agent.pane
+            );
         }
         Ok(())
     }

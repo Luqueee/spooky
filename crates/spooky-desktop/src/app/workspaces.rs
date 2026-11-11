@@ -1,4 +1,5 @@
 use super::{App, Confirm, ContextTarget, Message, Pending};
+use crate::features::agent;
 use crate::{
     layout::{context_target_exists, first_pane},
     tabs::label_for,
@@ -32,6 +33,20 @@ impl App {
                     self.send(Request::CreateTab {
                         workspace: id,
                         title: "Shell".into(),
+                    });
+                }
+            }
+            Message::NewAgent => {
+                self.close_settings();
+                self.context_menu = None;
+                self.menu_open = false;
+                if let Some((w, _)) = self.active() {
+                    let id = w.id;
+                    let ids = w.tabs.iter().map(|t| t.id).collect();
+                    self.pending = Some(Pending::Tab(id, ids));
+                    self.send(Request::CreateAgent {
+                        workspace: id,
+                        backend: agent::BACKEND.into(),
                     });
                 }
             }
@@ -242,6 +257,11 @@ impl App {
         self.send(Request::CreateWorkspace { name, cwd });
     }
     pub(super) fn reconcile(&mut self, s: &Snapshot) {
+        self.agents.sync(
+            s.panes
+                .iter()
+                .filter_map(|pane| Some((pane.id, pane.agent.as_ref()?))),
+        );
         if self
             .context_menu
             .is_some_and(|(target, _)| !context_target_exists(s, target))
@@ -317,6 +337,27 @@ impl App {
                 }
             }
         }
+        // An agent opened from a shell (typing `omp` there) comes to the front.
+        let agents_now: HashSet<u64> = s
+            .panes
+            .iter()
+            .filter(|p| p.agent.is_some())
+            .map(|p| p.id)
+            .collect();
+        if let Some(seen) = &self.agents_seen
+            && let Some(new) = agents_now.iter().find(|id| !seen.contains(id)).copied()
+            && let Some((workspace, tab)) = s.workspaces.iter().find_map(|w| {
+                w.tabs
+                    .iter()
+                    .find(|t| t.layout.contains(new))
+                    .map(|t| (w.id, t.id))
+            })
+            && Some(workspace) == self.workspace
+        {
+            self.tab = Some(tab);
+            self.pane = Some(new);
+        }
+        self.agents_seen = Some(agents_now);
         let w = s
             .workspaces
             .iter()

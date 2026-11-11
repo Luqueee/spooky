@@ -9,7 +9,7 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 10;
 /// Maximum encoded request or response, including its newline delimiter.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
@@ -22,7 +22,7 @@ pub const MIN_SPLIT_SHARE: u16 = 100;
 pub const DEFAULT_TITLE: &str = "Terminal";
 
 /// Operations on the server-owned workspace tree and terminal state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Request {
     /// Read full state when `since` is absent; otherwise wait for changes (up to
     /// one second) and return only changed panes with the complete workspace tree.
@@ -127,6 +127,70 @@ pub enum Request {
         /// Pane whose clipboard write to read.
         pane: u64,
     },
+    /// Start a tab in a workspace whose only pane is an agent (oh-my-pi) instead of a
+    /// shell. The server runs the agent in the workspace's directory.
+    CreateAgent {
+        /// Workspace identity.
+        workspace: u64,
+        /// Which agent program to run (`omp`, and others as the server supports them).
+        backend: String,
+    },
+    /// Send a message to an agent pane. While the agent is working it is queued
+    /// after the current turn.
+    AgentPrompt {
+        /// Destination agent pane.
+        pane: u64,
+        /// Message text, at most [`MAX_AGENT_PROMPT_BYTES`].
+        text: String,
+    },
+    /// Interrupt an agent pane's current turn.
+    AgentAbort {
+        /// Destination agent pane.
+        pane: u64,
+    },
+    /// Open an agent tab in the workspace of an existing pane, in a given directory.
+    /// The `omp` shell shim sends this, naming its own pane.
+    OpenAgent {
+        /// A pane of the workspace to open the agent in.
+        pane: u64,
+        /// Which agent program to run.
+        backend: String,
+        /// Absolute working directory on the server.
+        cwd: String,
+        /// The command-line arguments the user typed after the program name. The
+        /// backend accepts a closed set and refuses the rest; at most
+        /// [`MAX_AGENT_ARGS`] of at most [`MAX_AGENT_ARG_BYTES`] bytes each.
+        args: Vec<String>,
+    },
+    /// Choose the model an agent uses (`provider/id` as listed in [`Agent::models`]).
+    AgentSetModel {
+        /// Destination agent pane.
+        pane: u64,
+        /// The model, as listed by the agent.
+        model: String,
+    },
+    /// Choose how much an agent thinks (one of [`Agent::levels`]).
+    AgentSetThinking {
+        /// Destination agent pane.
+        pane: u64,
+        /// The level, as listed by the agent.
+        level: String,
+    },
+    /// Ask the agent's program what its providers report about the remaining usage; the
+    /// answer arrives as [`Agent::usage`]. Refused while the agent is working.
+    AgentUsage {
+        /// Destination agent pane.
+        pane: u64,
+    },
+    /// Answer a question or approval an agent is waiting on ([`Agent::dialogs`]).
+    AgentAnswer {
+        /// Destination agent pane.
+        pane: u64,
+        /// The dialog being answered.
+        dialog: String,
+        /// The answer.
+        answer: DialogAnswer,
+    },
     /// Identify the server and count the shells it holds.
     Status,
     /// Stop the server and end every shell. The workspaces are saved and are
@@ -204,6 +268,8 @@ pub struct ServerStatus {
     pub panes: u32,
     /// Shells still running.
     pub running: u32,
+    /// Agent panes whose process is alive.
+    pub agents: u32,
 }
 
 /// A search match inside the viewport.
@@ -217,6 +283,175 @@ pub struct Highlight {
     pub end: u16,
     /// Whether this is the match [`Request::Find`] last moved to.
     pub current: bool,
+}
+
+/// Longest message [`Request::AgentPrompt`] carries, in bytes.
+pub const MAX_AGENT_PROMPT_BYTES: usize = 256 * 1024;
+/// Most arguments [`Request::OpenAgent`] carries.
+pub const MAX_AGENT_ARGS: usize = 16;
+/// Longest single argument of [`Request::OpenAgent`], in bytes.
+pub const MAX_AGENT_ARG_BYTES: usize = 8 * 1024;
+
+/// Who wrote an entry of an agent's conversation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentRole {
+    /// The user.
+    User,
+    /// The model.
+    Assistant,
+    /// The model's reasoning, which the interface may fold away.
+    Thinking,
+    /// A tool the agent ran; see [`AgentMessage::tool`].
+    Tool,
+    /// Something the server reports: an error, the agent ending.
+    Notice,
+}
+
+/// How far a tool call got.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolState {
+    /// Still running.
+    Running,
+    /// Finished.
+    Done,
+    /// Finished with an error.
+    Failed,
+}
+
+/// A tool call in a conversation. All of it came from a model or a tool and is
+/// untrusted: draw it, never act on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTool {
+    /// The tool's name, such as `read` or `bash`.
+    pub name: String,
+    /// The main argument: a path, a command, a URL.
+    pub detail: String,
+    /// How far it got.
+    pub state: ToolState,
+    /// What it printed, bounded.
+    pub output: String,
+}
+
+/// One entry of an agent's conversation. Everything in it came from a model, a tool
+/// or a file and is untrusted: draw it, never act on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMessage {
+    /// Identity within the agent, stable while the entry is kept.
+    pub id: u64,
+    /// Who wrote it.
+    pub role: AgentRole,
+    /// The text, possibly still growing while the agent streams it; for a tool, what
+    /// it is for.
+    pub text: String,
+    /// Set for [`AgentRole::Tool`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<AgentTool>,
+}
+
+/// What a dialog asks of the user.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DialogKind {
+    /// Allow or refuse.
+    Confirm,
+    /// Pick one of the options.
+    Select,
+    /// Type an answer.
+    Input,
+}
+
+/// A question or approval an agent waits on. Its text is untrusted; only a user
+/// action may answer it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentDialog {
+    /// Identity, echoed in [`Request::AgentAnswer`].
+    pub id: String,
+    /// What it asks.
+    pub kind: DialogKind,
+    /// The question.
+    pub title: String,
+    /// More about it, possibly empty.
+    pub message: String,
+    /// The choices of a [`DialogKind::Select`].
+    pub options: Vec<String>,
+}
+
+/// A user's answer to an [`AgentDialog`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DialogAnswer {
+    /// Allowed (`true`) or refused.
+    Confirm(bool),
+    /// The chosen option or the typed text.
+    Value(String),
+    /// Dismissed.
+    Cancel,
+}
+
+/// A job the agent's program assigns a model to (`default`, `plan`, `smol`...), as its
+/// own configuration says. Names and models are untrusted text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelRole {
+    /// The role's name.
+    pub role: String,
+    /// The model, `provider/id`.
+    pub model: String,
+    /// The thinking level the role asks for, when it names one.
+    pub thinking: Option<String>,
+}
+
+/// How much of one allowance a provider's account has left, as the agent's program reports
+/// it. The text is untrusted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageWindow {
+    /// The allowance, such as `5 hours` or `7 days`.
+    pub name: String,
+    /// The account it belongs to.
+    pub account: String,
+    /// What is left, in whole percent.
+    pub left: u8,
+    /// When it renews, such as `4h51m`.
+    pub resets: String,
+}
+
+/// What one provider reports about its accounts' allowances.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageProvider {
+    /// The provider's name.
+    pub name: String,
+    /// Remarks about the accounts, such as saved resets.
+    pub notes: Vec<String>,
+    /// The allowances.
+    pub windows: Vec<UsageWindow>,
+}
+
+/// What an agent pane shows instead of a terminal viewport.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Agent {
+    /// Which agent program this is, as named in [`Request::CreateAgent`].
+    pub backend: String,
+    /// The agent is working on a turn.
+    pub busy: bool,
+    /// Why the agent process is gone, once it is.
+    pub ended: Option<String>,
+    /// Earlier entries dropped from the front to keep the conversation bounded.
+    pub dropped: u32,
+    /// The most recent entries, oldest first.
+    pub messages: Vec<AgentMessage>,
+    /// Questions and approvals waiting for the user, oldest first.
+    pub dialogs: Vec<AgentDialog>,
+    /// The model in use, `provider/id`.
+    pub model: Option<String>,
+    /// The thinking level in use.
+    pub thinking: Option<String>,
+    /// Models that can be chosen, bounded.
+    pub models: Vec<String>,
+    /// Thinking levels that can be chosen.
+    pub levels: Vec<String>,
+    /// How much of the model's context window is used, in percent.
+    pub context: Option<u8>,
+    /// The roles the program gives its models, bounded.
+    pub roles: Vec<ModelRole>,
+    /// What the providers report about the remaining usage, once asked for.
+    pub usage: Option<Vec<UsageProvider>>,
 }
 
 /// Divider orientation, independent of pixel dimensions.
@@ -402,6 +637,10 @@ pub struct Pane {
     /// Search matches inside the viewport.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub highlights: Vec<Highlight>,
+    /// Set for an agent pane, whose conversation replaces the terminal viewport
+    /// (every field above is then empty or zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<Agent>,
 }
 
 impl Pane {
@@ -426,6 +665,7 @@ impl Pane {
             focus_reporting,
             clipboard_seq,
             highlights,
+            agent,
             ..
         } = update;
         self.title = title;
@@ -443,6 +683,7 @@ impl Pane {
         self.focus_reporting = focus_reporting;
         self.clipboard_seq = clipboard_seq;
         self.highlights = highlights;
+        self.agent = agent;
         self.set_lines(lines);
     }
 
@@ -695,6 +936,7 @@ mod tests {
             focus_reporting: false,
             clipboard_seq: 0,
             highlights: Vec::new(),
+            agent: None,
         }
     }
 

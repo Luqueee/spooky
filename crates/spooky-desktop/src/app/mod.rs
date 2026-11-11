@@ -11,6 +11,7 @@ mod grid;
 mod input;
 mod subscription;
 mod view;
+mod web;
 mod workspaces;
 
 pub(crate) use subscription::subscription;
@@ -19,6 +20,7 @@ use crate::{
     commands::Command as AppCommand,
     config::{Config, SizeMode},
     features::{
+        agent::{self, Agents},
         attachments::{self, Attachments},
         connection::Connection,
         hyperlinks::Hyperlinks,
@@ -48,6 +50,14 @@ pub(crate) enum Message {
         event::Status,
     ),
     Opened(window::Id),
+    /// The agent view's web page was created, or could not be.
+    WebCreated(Result<(), String>),
+    /// Where the agent view's area is, in window coordinates.
+    WebArea(Rectangle),
+    /// A message the agent view's web page posted.
+    WebEvent(String),
+    /// The clipboard's text, which the agent view's page asked for.
+    WebPasted(Option<String>),
     Close(window::Id),
     WindowFocus(bool),
     /// Shows the window at the top-centre of its display: id, display size, window size.
@@ -56,6 +66,7 @@ pub(crate) enum Message {
     DragWindow,
     NewWorkspace,
     NewTab,
+    NewAgent,
     Split(Axis),
     /// Split this pane, which need not be the selected one.
     SplitPane(u64, Axis),
@@ -107,6 +118,7 @@ pub(crate) enum Message {
     Copy,
     PasteClipboard,
     Settings(settings::Message),
+    Agent(agent::Message),
 }
 #[derive(Clone, Copy)]
 pub(super) enum Confirm {
@@ -186,8 +198,17 @@ pub(crate) struct App {
     size_pending: bool,
     /// Attached files and pane captures.
     attachments: Attachments,
+    /// What is typed to each agent pane.
+    agents: Agents,
+    /// The agent pane whose composer was last given the keyboard.
+    agent_focus: Option<u64>,
+    /// The agent panes seen in the last snapshot; `None` until the first one, so panes
+    /// that were already there do not take the front.
+    agents_seen: Option<HashSet<u64>>,
     /// The command palette.
     palette: Palette,
+    /// The web page that shows an agent pane.
+    web: web::WebHost,
 }
 impl App {
     pub(crate) fn new(
@@ -238,6 +259,10 @@ impl App {
                 size_pending,
                 attachments: Attachments::default(),
                 palette: Palette::default(),
+                web: web::WebHost::default(),
+                agents: Agents::default(),
+                agent_focus: None,
+                agents_seen: None,
             },
             window::latest().map(|id| id.map(Message::Opened).unwrap_or(Message::Tick)),
         )
@@ -266,8 +291,25 @@ impl App {
             .find(|p| Some(p.id) == self.pane)
     }
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_focus(message);
+        let web = self.sync_web();
+        Task::batch([task, web])
+    }
+    fn update_focus(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         self.sync_focus_report();
+        // An agent pane that just came to the front gets the keyboard in its composer.
+        let agent = self
+            .current_pane()
+            .filter(|pane| pane.agent.is_some())
+            .map(|pane| pane.id);
+        if agent == self.agent_focus {
+            return task;
+        }
+        self.agent_focus = agent;
+        if agent.is_some() {
+            return Task::batch([task, iced::widget::operation::focus(agent::FIELD)]);
+        }
         task
     }
     /// Whether the selected pane's blinking cursor should be animating.
@@ -295,6 +337,7 @@ impl App {
             | Message::Connect => return self.connection_message(message),
             Message::NewWorkspace
             | Message::NewTab
+            | Message::NewAgent
             | Message::Split(..)
             | Message::SplitPane(..)
             | Message::Workspace(..)
@@ -354,6 +397,13 @@ impl App {
             Message::Search(message) => return self.search_message(message),
             Message::Palette(message) => return self.palette_message(message),
             Message::Run(command) => return self.run_command(command),
+            Message::Agent(message) => return self.agent_message(message),
+            Message::WebCreated(..)
+            | Message::WebArea(..)
+            | Message::WebEvent(..)
+            | Message::WebPasted(..) => {
+                return self.web_message(message);
+            }
         }
         Task::none()
     }

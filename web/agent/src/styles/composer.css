@@ -1,0 +1,5 @@
+.composer{display:flex;align-items:flex-end;gap:8px;background:var(--raise);border:1px solid var(--line);border-radius:22px;padding:8px 8px 8px 16px}
+.composer:focus-within{border-color:#4a5166}
+.composer textarea{flex:1;resize:none;background:none;border:0;outline:none;color:var(--fg);font:inherit;padding:4px 0;max-height:220px}
+.send{width:30px;height:30px;border-radius:50%;background:var(--hi);color:var(--muted);font-size:16px;flex:none}.send.ready{background:var(--fg);color:var(--bg)}
+.stop{border:1px solid var(--line);border-radius:15px;padding:0 12px;height:30px;font-size:12px}
