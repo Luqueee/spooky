@@ -1,6 +1,9 @@
 //! Compact native workspace chrome; terminal state remains server-owned.
 use super::{App, Confirm, ContextTarget, Message};
 use crate::commands::Command;
+
+/// Height of the strip at the window's bottom edge that drags its height.
+const RESIZE_GRIP: f32 = 5.0;
 use crate::{
     features::{
         agent,
@@ -178,7 +181,7 @@ impl App {
         let mut tabs = row![].spacing(3).align_y(Alignment::Center);
         if let Some((workspace, _)) = self.active() {
             for tab in &workspace.tabs {
-                let selected = self.tab == Some(tab.id);
+                let selected = self.tab == Some(tab.id) && !self.settings.is_shown();
                 let id = tab.id;
                 let label = button(
                     row![
@@ -230,6 +233,36 @@ impl App {
                 );
             }
         }
+        // Settings is a tab of its own: it stays after the terminals' tabs until closed,
+        // and choosing another tab leaves it without closing it.
+        if self.settings.is_open() {
+            let selected = self.settings.is_shown();
+            let label = button(
+                row![
+                    icon(Icon::Settings, if selected { TEXT } else { MUTED }),
+                    text("Settings").size(11)
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding(Padding {
+                top: 5.0,
+                right: if selected { 9.0 } else { 9.0 + TAB_CLOSE_SLOT },
+                bottom: 5.0,
+                left: 9.0,
+            })
+            .style(move |t, s| selectable(selected, t, s))
+            .on_press(Message::Settings(crate::features::settings::Message::Show));
+            let close = Message::Settings(crate::features::settings::Message::Close);
+            let entry = if selected {
+                row![label, action(Icon::Close, "Close settings", close.clone())]
+                    .spacing(1)
+                    .align_y(Alignment::Center)
+            } else {
+                row![label].align_y(Alignment::Center)
+            };
+            tabs = tabs.push(mouse_area(entry).on_middle_press(close));
+        }
         let controls = row![
             action(
                 Icon::SplitColumns,
@@ -242,20 +275,6 @@ impl App {
                 Message::Run(Command::Split(Axis::Horizontal))
             ),
             action(Icon::Plus, NEW_TAB, Message::Run(Command::NewTab)),
-            action(Icon::Agent, "New agent", Message::Run(Command::NewAgent)),
-            button(
-                row![icon(Icon::Paperclip, MUTED), text("Attach").size(10)]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
-            )
-            .padding([5, 7])
-            .style(quiet)
-            .on_press(Message::Run(Command::Attach)),
-            action(
-                Icon::Camera,
-                "Capture active pane",
-                Message::Run(Command::Capture),
-            ),
             action(Icon::More, "Workspace actions", Message::ToggleMenu),
         ]
         .spacing(3)
@@ -483,6 +502,7 @@ impl App {
                         canvas(terminal::Terminal {
                             pane,
                             font_size: self.config.font_size,
+                            font: self.font,
                             focused: self.terminal_focused && selected,
                             selection,
                             cursor_on: !(selected && self.blink_wanted()) || self.blink_on,
@@ -675,7 +695,7 @@ impl App {
     }
 
     fn screen(&self) -> Element<'_, Message> {
-        let content = if self.settings.is_open() {
+        let content = if self.settings.is_shown() {
             crate::features::settings::view(&self.settings, &self.config, self.hotkeys.is_some())
         } else {
             self.active()
@@ -716,7 +736,7 @@ impl App {
         .align_y(Alignment::Center)
         .style(|_| surface(SIDEBAR));
         let mut main = column![].width(Length::Fill).height(Length::Fill);
-        if !self.settings.is_open()
+        if !self.settings.is_shown()
             && let Some(bar) = crate::features::search::view(&self.search)
         {
             main = main.push(bar).push(separator());
@@ -1028,6 +1048,15 @@ impl App {
                 None,
             );
         }
-        body
+        // The bottom edge drags the window's height, which a window without a title bar
+        // has no other way to change.
+        let grip = mouse_area(Space::new().width(Length::Fill).height(RESIZE_GRIP))
+            .on_press(Message::ResizeBottom)
+            .interaction(iced::mouse::Interaction::ResizingVertically);
+        stack![
+            body,
+            column![Space::new().height(Length::Fill), grip].height(Length::Fill)
+        ]
+        .into()
     }
 }

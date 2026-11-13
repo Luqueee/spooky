@@ -16,6 +16,7 @@ mod workspaces;
 
 pub(crate) use subscription::subscription;
 
+use crate::terminal;
 use crate::{
     commands::Command as AppCommand,
     config::{Config, SizeMode},
@@ -44,6 +45,14 @@ pub(crate) enum Message {
     Hotkey(u32),
     /// A frame of the window's slide.
     SlideFrame(std::time::Instant),
+    /// The bottom edge was pressed: the compositor drags the window's height.
+    ResizeBottom,
+    /// The window's size changed.
+    WindowResized(Size),
+    /// No resize event has come for a moment after the numbered one.
+    ResizeSettled(u64),
+    /// The window was dragged to this height on a display of this size.
+    ResizedTo(f32, Option<Size>),
     Key(
         keyboard::Key,
         keyboard::key::Physical,
@@ -194,6 +203,16 @@ pub(crate) struct App {
     hover_pane: Option<u64>,
     /// The global shortcut, when the session allows one.
     hotkeys: Option<Hotkeys>,
+    /// The window's last known size.
+    window_size: Option<Size>,
+    /// The bottom edge was pressed and its drag has not settled.
+    resizing: bool,
+    /// The window's height when the bottom edge was pressed.
+    resize_from: f32,
+    /// Counts resize events, so only the last one of a drag settles it.
+    resize_gen: u64,
+    /// The terminal's font and the width of its cells.
+    font: terminal::TerminalFont,
     /// The window's slide in or out, while the content is moving or held out of sight.
     slide: Option<Slide>,
     /// The window has been shown at least once.
@@ -225,6 +244,7 @@ impl App {
         hotkeys: Option<Hotkeys>,
     ) -> (Self, Task<Message>) {
         let size_pending = config.size_mode() == SizeMode::Percent;
+        let font = terminal::TerminalFont::resolve(config.font_family.as_deref());
         (
             Self {
                 config,
@@ -263,6 +283,11 @@ impl App {
                 modifiers: keyboard::Modifiers::default(),
                 hover_pane: None,
                 hotkeys,
+                font,
+                window_size: None,
+                resizing: false,
+                resize_from: 0.0,
+                resize_gen: 0,
                 slide: None,
                 presented: false,
                 settings: Settings::default(),
@@ -350,6 +375,10 @@ impl App {
         match message {
             Message::Hotkey(..)
             | Message::SlideFrame(..)
+            | Message::ResizeBottom
+            | Message::WindowResized(..)
+            | Message::ResizeSettled(..)
+            | Message::ResizedTo(..)
             | Message::WindowFocus(..)
             | Message::Present(..)
             | Message::Opened(..)

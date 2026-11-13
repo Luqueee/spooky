@@ -49,6 +49,8 @@ const PLACEHOLDER_WINDOW: Size = Size::new(1100.0, 600.0);
 const DEFAULT_WIDTH_PX: f32 = 1440.0;
 const DEFAULT_HEIGHT_PX: f32 = 900.0;
 
+/// Longest font family name accepted.
+const MAX_FONT_FAMILY: usize = 100;
 pub(crate) const FONT_SIZE: std::ops::RangeInclusive<f32> = 8.0..=48.0;
 pub(crate) const WIDTH_PX: std::ops::RangeInclusive<f32> = 400.0..=4096.0;
 pub(crate) const HEIGHT_PX: std::ops::RangeInclusive<f32> = 200.0..=2160.0;
@@ -61,6 +63,10 @@ pub(crate) const HEIGHT_PERCENT: std::ops::RangeInclusive<f32> = 20.0..=100.0;
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     pub font_size: f32,
+    /// The terminal's font family. When absent, the platform's monospace default. A
+    /// name that is not installed falls back to whatever the system substitutes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
     /// How `width_percent`/`height_percent` or `width`/`height` give the window
     /// size. When absent: pixels if the file sets `width` or `height` (as older
     /// files did), otherwise percent.
@@ -91,6 +97,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             font_size: 12.0,
+            font_family: None,
             size: None,
             width: None,
             height: None,
@@ -147,6 +154,15 @@ impl Config {
             }
         };
         check("font_size", self.font_size, &FONT_SIZE)?;
+        if let Some(family) = &self.font_family
+            && (family.trim().is_empty()
+                || family.chars().count() > MAX_FONT_FAMILY
+                || family.chars().any(char::is_control))
+        {
+            return Err(format!(
+                "font_family must be a name of 1 to {MAX_FONT_FAMILY} characters"
+            ));
+        }
         check("width", self.width_px(), &WIDTH_PX)?;
         check("height", self.height_px(), &HEIGHT_PX)?;
         check("width_percent", self.width_percent, &WIDTH_PERCENT)?;
@@ -303,6 +319,12 @@ mod tests {
             let config = parse(bad).expect("parses");
             assert!(config.validate().is_err(), "{bad}");
         }
+        for bad in ["font_family = \"\"", "font_family = \"a\\nb\""] {
+            let config = parse(bad).expect("parses");
+            assert!(config.validate().is_err(), "{bad}");
+        }
+        let named = parse("font_family = \"JetBrains Mono\"").expect("parses");
+        assert!(named.validate().is_ok());
         assert!(Config::default().validate().is_ok());
     }
 

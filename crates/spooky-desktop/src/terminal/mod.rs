@@ -4,12 +4,14 @@
 
 mod canvas;
 mod copy;
+mod font;
 mod input;
 mod links;
 mod pointer;
 
 pub(crate) use canvas::*;
 pub(crate) use copy::{new_clipboard_writes, selection_text};
+pub(crate) use font::{TerminalFont, installed_monospace};
 pub(crate) use input::{
     ClipboardAction, clipboard_action, focus_reports, is_chord_echo, key_bytes, paste_bytes,
     terminal_text,

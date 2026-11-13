@@ -1,8 +1,25 @@
 use super::{App, Message};
+use crate::config::SizeMode;
+use crate::features::settings::{Change, Effect};
 use crate::features::window::{FIRST_DELAY, Slide, dropdown_origin, hides_on_blur, usable_area};
 use crate::platform::{fade, kde};
-use iced::{Task, window};
+use iced::{Size, Task, window};
 use std::time::{Duration, Instant};
+
+/// How long without a resize event ends a drag of the window's edge.
+const RESIZE_SETTLE: Duration = Duration::from_millis(400);
+
+/// The setting that holds a window height of `height`, in the unit the configuration
+/// uses: pixels as they are, or a share of the display (`None` when it is not known).
+fn height_change(mode: SizeMode, height: f32, monitor: Option<Size>) -> Option<Change> {
+    match (mode, monitor) {
+        (SizeMode::Pixels, _) => Some(Change::HeightPixels(height.round())),
+        (SizeMode::Percent, Some(display)) if display.height > 0.0 => Some(Change::HeightPercent(
+            (height / display.height * 1000.0).round() / 10.0,
+        )),
+        (SizeMode::Percent, _) => None,
+    }
+}
 
 impl App {
     pub(super) fn window_message(&mut self, message: Message) -> Task<Message> {
@@ -34,6 +51,43 @@ impl App {
                     return self.hide();
                 }
             }
+            Message::ResizeBottom => {
+                if let Some(id) = self.window {
+                    self.resizing = true;
+                    self.resize_from = self.window_size.map_or(0.0, |size| size.height);
+                    return window::drag_resize(id, window::Direction::South);
+                }
+            }
+            Message::WindowResized(size) => {
+                self.window_size = Some(size);
+                if self.resizing {
+                    self.resize_gen += 1;
+                    let generation = self.resize_gen;
+                    // The drag has ended when no resize follows for a moment.
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(RESIZE_SETTLE).await;
+                            generation
+                        },
+                        Message::ResizeSettled,
+                    );
+                }
+            }
+            Message::ResizeSettled(generation) => {
+                if generation == self.resize_gen
+                    && self.resizing
+                    && let Some(id) = self.window
+                {
+                    self.resizing = false;
+                    let height = self.window_size.map_or(0.0, |size| size.height);
+                    // A press that moved nothing leaves the height as it was.
+                    if (height - self.resize_from).abs() >= 1.0 {
+                        return window::monitor_size(id)
+                            .map(move |monitor| Message::ResizedTo(height, monitor));
+                    }
+                }
+            }
+            Message::ResizedTo(height, monitor) => return self.keep_height(height, monitor),
             Message::SlideFrame(now) => {
                 let Some(slide) = &mut self.slide else {
                     return Task::none();
@@ -65,11 +119,12 @@ impl App {
                     self.slide = Some(Slide::open(Instant::now() + delay, self.slide_share(1.0)));
                 }
                 self.hidden = false;
+                self.resizing = false;
                 // Without waiting for the focus event, so a quick second press hides it.
                 if kde::active() {
                     self.focused = true;
                 }
-                if !self.settings.is_open() {
+                if !self.settings.is_shown() {
                     self.terminal_focused = true;
                 }
                 // The configured size is applied the first time the display is known
@@ -147,6 +202,20 @@ impl App {
         }
         Task::none()
     }
+    /// Makes the height the window was dragged to the configured one, in the unit the
+    /// configuration already uses. The window is already that size, so the change does
+    /// not resize it again.
+    fn keep_height(&mut self, height: f32, monitor: Option<Size>) -> Task<Message> {
+        let Some(change) = height_change(self.config.size_mode(), height, monitor) else {
+            self.status = "The height was not saved: the display's size is unknown".into();
+            return Task::none();
+        };
+        let mut effects = self
+            .settings
+            .update(change, &mut self.config, &mut self.hotkeys);
+        effects.retain(|effect| *effect != Effect::Resize);
+        self.apply_effects(effects)
+    }
     /// Where the content is now, or `idle` when no slide is in progress.
     fn slide_share(&self, idle: f32) -> f32 {
         self.slide.map_or(idle, |slide| slide.hidden_share())
@@ -159,6 +228,7 @@ impl App {
     pub(super) fn hide(&mut self) -> Task<Message> {
         self.hidden = true;
         self.focused = false;
+        self.resizing = false;
         // The content slides out. Wayland cannot hide a window, so KWin parks it; elsewhere
         // it is hidden when the slide ends.
         self.slide = Some(Slide::close(Instant::now(), self.slide_share(0.0)));
@@ -173,5 +243,28 @@ impl App {
         window::monitor_size(id).then(move |monitor| {
             window::size(id).map(move |size| Message::Present(id, monitor, size))
         })
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    #[test]
+    fn a_dragged_height_is_kept_in_the_unit_the_configuration_uses() {
+        let display = Some(Size::new(1920.0, 1080.0));
+        assert!(matches!(
+            height_change(SizeMode::Pixels, 640.4, None),
+            Some(Change::HeightPixels(640.0))
+        ));
+        let Some(Change::HeightPercent(percent)) = height_change(SizeMode::Percent, 540.0, display)
+        else {
+            panic!("a share of the display");
+        };
+        assert_eq!(percent, 50.0);
+        assert!(
+            height_change(SizeMode::Percent, 540.0, None).is_none(),
+            "a share of an unknown display cannot be worked out"
+        );
     }
 }

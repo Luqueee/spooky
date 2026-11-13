@@ -140,7 +140,7 @@ impl App {
                     return Task::none();
                 }
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
-                    && self.settings.is_open()
+                    && self.settings.is_shown()
                 {
                     self.close_settings();
                     return Task::none();

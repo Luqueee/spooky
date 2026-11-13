@@ -12,7 +12,7 @@ impl App {
     pub(super) fn workspaces_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NewWorkspace => {
-                self.close_settings();
+                self.hide_settings();
                 self.workspaces_open = true;
                 let ids = self
                     .snapshot
@@ -24,7 +24,7 @@ impl App {
                 self.create_workspace(format!("Workspace {n}"));
             }
             Message::NewTab => {
-                self.close_settings();
+                self.hide_settings();
                 self.context_menu = None;
                 if let Some((w, _)) = self.active() {
                     let id = w.id;
@@ -37,7 +37,7 @@ impl App {
                 }
             }
             Message::NewAgent => {
-                self.close_settings();
+                self.hide_settings();
                 self.context_menu = None;
                 self.menu_open = false;
                 if let Some((w, _)) = self.active() {
@@ -58,7 +58,7 @@ impl App {
                 }
             }
             Message::SplitPane(pane, axis) => {
-                self.close_settings();
+                self.hide_settings();
                 self.menu_open = false;
                 self.context_menu = None;
                 if let Some(ids) = self
@@ -72,7 +72,7 @@ impl App {
                 }
             }
             Message::Workspace(id) => {
-                self.close_settings();
+                self.hide_settings();
                 self.context_menu = None;
                 self.connection_open = false;
                 self.terminal_focused = true;
@@ -85,7 +85,7 @@ impl App {
                 }
             }
             Message::Tab(id) => {
-                self.close_settings();
+                self.hide_settings();
                 self.context_menu = None;
                 self.tab = Some(id);
                 self.pane = None;

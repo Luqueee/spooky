@@ -16,18 +16,22 @@ use iced::keyboard;
 /// What the rest of the application is told by this feature.
 #[derive(Clone, Debug)]
 pub(crate) enum Message {
-    /// Show the page.
+    /// Open the settings tab, or select it when it is already open.
     Open,
-    /// Hide the page.
+    /// Select the settings tab.
+    Show,
+    /// Close the settings tab.
     Close,
     /// A control on the page changed something.
     Change(Change),
 }
 
 /// A change made on the settings page.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Change {
     FontSize(f32),
+    /// The terminal's font family; `None` is the platform's default.
+    FontFamily(Option<String>),
     Size(SizeMode),
     WidthPercent(f32),
     HeightPercent(f32),
@@ -47,7 +51,8 @@ pub(crate) enum Change {
 /// Something the application must do because a setting changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
-    /// The font changed: every pane's grid must be recomputed.
+    /// The font changed: the cell width is measured again and every pane's grid
+    /// recomputed.
     Refit,
     /// The window size setting changed: apply it to the window.
     Resize,
@@ -65,14 +70,23 @@ pub(crate) trait Shortcuts {
     fn rebind(&mut self, text: &str) -> Result<(), String>;
 }
 
-/// The settings page: whether it is open and what it last had to say.
+/// The label of the font choice that follows the platform.
+pub(crate) const DEFAULT_FONT: &str = "Default";
+
+/// The settings tab: whether it is open, whether it is the selected tab, and what it
+/// last had to say.
 #[derive(Default)]
 pub(crate) struct Settings {
     page: Option<Page>,
+    /// The tab is the selected one; choosing another tab leaves it open but not shown.
+    shown: bool,
 }
 
 #[derive(Default)]
 struct Page {
+    /// What the font choice offers: [`DEFAULT_FONT`], then the installed monospace
+    /// families.
+    fonts: Vec<String>,
     /// Waiting for the keys of a new global shortcut.
     recording: bool,
     /// Why the last change was refused or could not be saved.
@@ -80,9 +94,19 @@ struct Page {
 }
 
 impl Settings {
-    /// Whether the page is showing.
+    /// Whether the settings tab exists.
     pub(crate) fn is_open(&self) -> bool {
         self.page.is_some()
+    }
+
+    /// Whether the settings tab is the selected one, so its page replaces the terminal.
+    pub(crate) fn is_shown(&self) -> bool {
+        self.shown && self.page.is_some()
+    }
+
+    /// The font choices, [`DEFAULT_FONT`] first.
+    pub(crate) fn fonts(&self) -> &[String] {
+        self.page.as_ref().map_or(&[], |page| page.fonts.as_slice())
     }
 
     /// Whether the next key press is the new shortcut.
@@ -95,14 +119,38 @@ impl Settings {
         self.page.as_ref()?.problem.as_deref()
     }
 
-    /// Shows the page.
-    pub(crate) fn open(&mut self) {
-        self.page.get_or_insert_with(Page::default);
+    /// Opens the tab and selects it. `installed` are the monospace families on this
+    /// machine and `current` the configured one, which is offered even if it is not
+    /// installed, so the choice can show it.
+    pub(crate) fn open(&mut self, installed: Vec<String>, current: Option<&str>) {
+        let page = self.page.get_or_insert_with(Page::default);
+        page.fonts = std::iter::once(DEFAULT_FONT.to_owned())
+            .chain(
+                current
+                    .filter(|name| !installed.iter().any(|n| n == name))
+                    .map(str::to_owned),
+            )
+            .chain(installed)
+            .collect();
+        self.shown = true;
     }
 
-    /// Hides the page; whether it was showing.
+    /// Selects the tab.
+    pub(crate) fn show(&mut self) {
+        self.shown = self.page.is_some();
+    }
+
+    /// Leaves the tab for another one; whether it was the selected one. It stays open.
+    pub(crate) fn hide(&mut self) -> bool {
+        std::mem::take(&mut self.shown) && self.page.is_some()
+    }
+
+    /// Closes the tab; whether it was the selected one.
     pub(crate) fn close(&mut self) -> bool {
-        self.page.take().is_some()
+        let was_shown = self.is_shown();
+        self.page = None;
+        self.shown = false;
+        was_shown
     }
 
     fn report(&mut self, problem: Option<String>) {
@@ -131,6 +179,7 @@ impl Settings {
         };
         match change {
             Change::FontSize(value) => next.font_size = clamp(value, &config::FONT_SIZE),
+            Change::FontFamily(family) => next.font_family = family,
             Change::Size(mode) => next.size = Some(mode),
             Change::WidthPercent(value) => {
                 next.size = Some(SizeMode::Percent);
@@ -259,7 +308,7 @@ fn effects(previous: &Config, next: &Config, has_shortcut: bool) -> Vec<Effect> 
         )
     };
     let mut effects = Vec::new();
-    if previous.font_size != next.font_size {
+    if previous.font_size != next.font_size || previous.font_family != next.font_family {
         effects.push(Effect::Refit);
     }
     if size(previous) != size(next) {
@@ -316,7 +365,7 @@ mod tests {
 
     fn open() -> Settings {
         let mut settings = Settings::default();
-        settings.open();
+        settings.open(Vec::new(), None);
         settings
     }
 
@@ -330,6 +379,11 @@ mod tests {
         };
         assert!(effects(&base, &base, true).is_empty());
         assert_eq!(with(&|c| c.font_size = 14.0), [Effect::Refit]);
+        assert_eq!(
+            with(&|c| c.font_family = Some("Hack".into())),
+            [Effect::Refit],
+            "another family has other cell widths"
+        );
         assert_eq!(with(&|c| c.height_percent = 60.0), [Effect::Resize]);
         assert_eq!(
             with(&|c| c.size = Some(SizeMode::Pixels)),
@@ -341,6 +395,28 @@ mod tests {
             [Effect::OnBlur(OnBlur::Top)]
         );
         assert_eq!(with(&|c| c.cursor_blink = false), [], "read at draw time");
+    }
+
+    #[test]
+    fn the_settings_tab_stays_open_while_another_tab_is_selected() {
+        let mut settings = Settings::default();
+        assert!(!settings.is_open() && !settings.is_shown());
+        settings.open(vec!["Hack".into()], Some("Custom"));
+        assert!(settings.is_open() && settings.is_shown());
+        assert_eq!(
+            settings.fonts(),
+            [DEFAULT_FONT, "Custom", "Hack"],
+            "the configured family is offered even when it is not installed"
+        );
+        assert!(settings.hide(), "it was the selected tab");
+        assert!(settings.is_open() && !settings.is_shown());
+        assert!(!settings.hide(), "already left");
+        settings.show();
+        assert!(settings.is_shown());
+        assert!(settings.close());
+        assert!(!settings.is_open() && !settings.is_shown());
+        settings.show();
+        assert!(!settings.is_shown(), "a closed tab cannot be selected");
     }
 
     #[test]

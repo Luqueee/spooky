@@ -16,8 +16,6 @@ pub enum Icon {
     Terminal,
     SplitColumns,
     SplitRows,
-    Paperclip,
-    Camera,
     More,
     Sidebar,
     Server,
@@ -93,31 +91,6 @@ impl canvas::Program<Message> for Vector {
                         _ => line(&[(12., 4.), (12., 20.)]),
                     }
                 }
-                Icon::Paperclip => line(&[
-                    (9., 15.),
-                    (16., 8.),
-                    (18., 10.),
-                    (10., 18.),
-                    (6., 18.),
-                    (4., 16.),
-                    (4., 12.),
-                    (14., 2.),
-                    (18., 2.),
-                    (22., 6.),
-                    (22., 10.),
-                    (12., 20.),
-                ]),
-                Icon::Camera => line(&[
-                    (3., 8.),
-                    (8., 8.),
-                    (10., 5.),
-                    (15., 5.),
-                    (17., 8.),
-                    (21., 8.),
-                    (21., 20.),
-                    (3., 20.),
-                    (3., 8.),
-                ]),
                 Icon::Chevron => line(&[(8., 10.), (12., 14.), (16., 10.)]),
                 Icon::ChevronRight => line(&[(10., 8.), (14., 12.), (10., 16.)]),
                 Icon::ChevronUp => line(&[(8., 14.), (12., 10.), (16., 14.)]),
@@ -185,7 +158,6 @@ impl canvas::Program<Message> for Vector {
                     frame.fill(&canvas::Path::circle(Point::new(x, 10.), 1.), self.color);
                 }
             }
-            Icon::Camera => frame.stroke(&canvas::Path::circle(Point::new(12., 14.), 3.5), stroke),
             Icon::Search => frame.stroke(&canvas::Path::circle(Point::new(11., 11.), 6.), stroke),
             Icon::More => {
                 for x in [5., 12., 19.] {

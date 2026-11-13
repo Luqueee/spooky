@@ -1,3 +1,4 @@
+use super::font::TerminalFont;
 use super::links;
 use super::pointer::{self, Action, Button};
 use crate::{ContextTarget, Message};
@@ -7,13 +8,10 @@ use spooky_core::{CursorShape, MouseTracking, Pane};
 /// Wheel notches forwarded per event, so momentum scrolling cannot flood a pane.
 const MAX_WHEEL_EVENTS: u32 = 30;
 
-pub(crate) fn metrics(size: f32) -> (f32, f32) {
-    (size * 0.602, size * 1.35)
+/// The width and height of a cell at `size` in a font whose cells are `advance` wide.
+pub(crate) fn metrics(size: f32, advance: f32) -> (f32, f32) {
+    (size * advance, size * 1.35)
 }
-#[cfg(target_os = "macos")]
-const TERMINAL_FONT: Font = Font::with_name("Menlo");
-#[cfg(not(target_os = "macos"))]
-const TERMINAL_FONT: Font = Font::with_name("DejaVu Sans Mono");
 #[derive(Default)]
 pub(crate) struct State {
     pane: Option<u64>,
@@ -31,6 +29,7 @@ pub(crate) struct State {
 pub(crate) struct Terminal<'a> {
     pub pane: &'a Pane,
     pub font_size: f32,
+    pub font: TerminalFont,
     pub focused: bool,
     pub selection: Option<((u16, u16), (u16, u16))>,
     /// Whether a blinking cursor is in its visible phase.
@@ -47,7 +46,7 @@ impl Terminal<'_> {
             let p = cursor.position_in(bounds)?;
             (p.x, p.y)
         };
-        let (cw, ch) = metrics(self.font_size);
+        let (cw, ch) = metrics(self.font_size, self.font.advance);
         Some((
             ((y / ch).max(0.0) as u16).min(self.pane.rows.saturating_sub(1)),
             ((x / cw).max(0.0) as u16).min(self.pane.cols.saturating_sub(1)),
@@ -203,7 +202,9 @@ impl canvas::Program<Message> for Terminal<'_> {
             {
                 let lines = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y * 3.0,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y / metrics(self.font_size).1,
+                    mouse::ScrollDelta::Pixels { y, .. } => {
+                        *y / metrics(self.font_size, self.font.advance).1
+                    }
                 }
                 .round() as i32;
                 if lines == 0 {
@@ -247,7 +248,7 @@ impl canvas::Program<Message> for Terminal<'_> {
         _: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let (cw, ch) = metrics(self.font_size);
+        let (cw, ch) = metrics(self.font_size, self.font.advance);
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), crate::ui::BACKGROUND);
         let selection = self
             .selection
@@ -307,7 +308,7 @@ impl canvas::Program<Message> for Terminal<'_> {
                     } else {
                         font::Style::Normal
                     },
-                    ..TERMINAL_FONT
+                    ..self.font.font
                 };
                 for (col, text, _) in run.cells() {
                     if text != " " {
@@ -406,7 +407,7 @@ impl canvas::Program<Message> for Terminal<'_> {
                 position: Point::new(bounds.width - width - 5.0, 8.0),
                 color: crate::ui::TEXT,
                 size: 10.0.into(),
-                font: TERMINAL_FONT,
+                font: self.font.font,
                 ..Default::default()
             });
         }

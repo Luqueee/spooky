@@ -1,6 +1,6 @@
 //! The settings page as drawn: every option of `config.toml`, applied as it changes.
 
-use super::{Change, Settings};
+use super::{Change, DEFAULT_FONT, Settings};
 use crate::{
     Message,
     config::{Config, OnBlur, Osc52, SizeMode},
@@ -8,7 +8,7 @@ use crate::{
 };
 use iced::{
     Alignment, Border, Element, Length,
-    widget::{button, column, container, row, scrollable, text, toggler},
+    widget::{button, column, container, pick_list, row, scrollable, text, toggler},
 };
 
 /// Percent points one press of a size stepper moves.
@@ -118,7 +118,7 @@ fn apply(change: Change) -> Message {
     Message::Settings(super::Message::Change(change))
 }
 
-/// The page that replaces the terminal while it is open. `shortcuts_available` is
+/// The page that replaces the terminal while the settings tab is selected. `shortcuts_available` is
 /// whether the session has a global shortcut that can be recorded and can bring a
 /// hidden window back.
 pub(crate) fn view<'a>(
@@ -262,7 +262,17 @@ pub(crate) fn view<'a>(
         shortcut,
     )];
 
+    let family = config.font_family.as_deref().unwrap_or(DEFAULT_FONT);
     let terminal = vec![
+        option(
+            "Font",
+            "Monospace families installed on this machine; the default follows the platform",
+            pick_list(settings.fonts(), Some(family.to_owned()), |name: String| {
+                apply(Change::FontFamily((name != DEFAULT_FONT).then_some(name)))
+            })
+            .text_size(11)
+            .width(220),
+        ),
         option(
             "Font size",
             "Terminal text, in points",

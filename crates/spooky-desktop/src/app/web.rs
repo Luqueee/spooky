@@ -99,7 +99,7 @@ impl App {
             || self.context_menu.is_some()
             || self.confirm.is_some()
             || self.pending.is_some()
-            || self.settings.is_open()
+            || self.settings.is_shown()
             || self.palette.is_open()
             || self.tailscale.is_open()
             || self.renaming
