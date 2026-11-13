@@ -5,4 +5,4 @@ Comment=Persistent GPU terminal workspaces
 Exec=spooky
 Terminal=false
 Categories=System;TerminalEmulator;
-StartupWMClass=spooky
+StartupWMClass=dev.spooky.terminal

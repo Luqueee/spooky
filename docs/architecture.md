@@ -38,7 +38,7 @@ src/
     connection/      mod.rs (target, generation, channel state, why a target is unreachable; the link's threads stay in link.rs)
   terminal/          canvas.rs (draws a pane), pointer.rs, input.rs (keys, paste, focus reports), copy.rs (selection, OSC 52 writes), links.rs (finding links in output)
   ui/                theme.rs (colours, styles), icons.rs (vector icons and icon buttons)
-  platform/          macos/{app.rs, keyboard.rs}: code that exists because of one operating system
+  platform/          kde.rs (KDE Wayland: portal shortcut, KWin window control), macos/{app.rs, keyboard.rs}: code that exists because of one operating system
   config.rs          the typed config.toml model, shared by every feature
   commands.rs        the command registry: ids, titles, the palette's list and its matching
   link.rs            the server connection: its two threads and the events they report to App
@@ -151,7 +151,7 @@ The server writes `server.log` and `workspaces.json` in `spooky_core::paths::sta
 
 ## Platform decisions
 
-macOS and Linux use Unix sockets and native PTYs. Window shortcuts and placement are frontend concerns, separate from sessions. Wayland compositors may restrict global shortcuts and window placement.
+macOS and Linux use Unix sockets and native PTYs. Window shortcuts and placement are frontend concerns, separate from sessions. Wayland compositors may restrict global shortcuts and window placement. On KDE Wayland `platform/kde.rs` supplies both: the shortcut through the GlobalShortcuts portal (`Hotkeys::Portal`; KDE owns the binding, so `rebind` is refused) and window placement, size, hide (minimize), raise and focus through a one-shot KWin script loaded over D-Bus on a worker thread, matched by process id and `dev.spooky.terminal` window class. Sizes given as a share of the display are resolved by KWin, because winit knows no monitor before the window is mapped; the first reveal waits 300 ms for the window to exist.
 
 Windows is deferred rather than hidden behind WSL. Future Windows work includes local IPC, process-lifetime verification with ConPTY and native window integration. portable-pty is retained to avoid coupling the session model to Unix PTY syscalls.
 

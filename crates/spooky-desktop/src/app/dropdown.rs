@@ -1,5 +1,7 @@
 use super::{App, Message};
 use crate::features::window::{dropdown_origin, hides_on_blur, usable_area};
+#[cfg(target_os = "linux")]
+use crate::platform::kde;
 use iced::{Task, window};
 
 impl App {
@@ -41,6 +43,10 @@ impl App {
                 // The configured size is applied the first time the display is known
                 // and after a setting changes it; a later reveal only re-centres, so a
                 // window the user resized keeps its size.
+                // On KDE the display comes from KWin, which resolves the configured size
+                // itself; elsewhere the measured display does.
+                #[cfg(target_os = "linux")]
+                let kde_size = kde::active() && std::mem::take(&mut self.size_pending);
                 let target = match monitor {
                     Some(monitor) if self.size_pending => {
                         self.size_pending = false;
@@ -58,6 +64,20 @@ impl App {
                 }
                 if let Some(at) = dropdown_origin(monitor, target) {
                     tasks.insert(0, window::move_to(id, at));
+                }
+                // Wayland ignores the placement above; KWin does it there.
+                #[cfg(target_os = "linux")]
+                if kde::active() {
+                    let (width, height) = if kde_size {
+                        self.config.kde_dims()
+                    } else {
+                        (kde::Dim::Keep, kde::Dim::Keep)
+                    };
+                    kde::send(kde::Action::Reveal {
+                        width,
+                        height,
+                        above: self.config.on_blur == crate::config::OnBlur::Top,
+                    });
                 }
                 return Task::batch(tasks);
             }
@@ -95,6 +115,12 @@ impl App {
     pub(super) fn hide(&mut self, id: window::Id) -> Task<Message> {
         self.hidden = true;
         self.focused = false;
+        #[cfg(target_os = "linux")]
+        if kde::active() {
+            // Wayland cannot hide a window; KWin minimizes it.
+            kde::send(kde::Action::Hide);
+            return Task::none();
+        }
         window::set_mode(id, window::Mode::Hidden)
     }
     /// Measures the display and window, then shows the window via [`Message::Present`].
