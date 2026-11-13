@@ -47,9 +47,24 @@ pub(crate) async fn next_event() -> Option<Event> {
 /// bounded one with snapshots, a press that arrived while output was flooding it was
 /// dropped, and the shortcut seemed not to answer. A person cannot press fast enough
 /// for this to grow.
-static HOTKEYS: OnceLock<Mutex<tokio::sync::mpsc::UnboundedReceiver<u32>>> = OnceLock::new();
+type HotkeyChannel = (
+    tokio::sync::mpsc::UnboundedSender<u32>,
+    Mutex<tokio::sync::mpsc::UnboundedReceiver<u32>>,
+);
+static HOTKEYS: OnceLock<HotkeyChannel> = OnceLock::new();
+fn hotkey_channel() -> &'static HotkeyChannel {
+    HOTKEYS.get_or_init(|| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (tx, Mutex::new(rx))
+    })
+}
+/// Where a shortcut backend reports a press. It exists before [`Link::start`], because
+/// the portal backend registers during startup.
+pub(crate) fn hotkey_sender() -> tokio::sync::mpsc::UnboundedSender<u32> {
+    hotkey_channel().0.clone()
+}
 pub(crate) async fn next_hotkey() -> Option<u32> {
-    HOTKEYS.get()?.lock().await.recv().await
+    hotkey_channel().1.lock().await.recv().await
 }
 
 /// Waits between automatic reconnection attempts: doubling from 2 s up to 30 s,
@@ -100,8 +115,7 @@ impl Link {
         let (tx, commands) = mpsc::sync_channel(256);
         let (events, rx) = tokio::sync::mpsc::channel(16);
         let _ = EVENTS.set(Mutex::new(rx));
-        let (hotkey_events, hotkey_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _ = HOTKEYS.set(Mutex::new(hotkey_rx));
+        let hotkey_events = hotkey_sender();
         global_hotkey::GlobalHotKeyEvent::set_event_handler(Some(
             move |event: global_hotkey::GlobalHotKeyEvent| {
                 if event.state == global_hotkey::HotKeyState::Pressed {

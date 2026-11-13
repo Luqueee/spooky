@@ -22,7 +22,7 @@ use iced::window;
 fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let (hotkeys, status) = if wayland {
+    let (hotkeys, status) = if wayland && !platform::kde::active() {
         (
             None,
             "Wayland: global shortcuts and positioning are unavailable; use your compositor's shortcut"
@@ -58,6 +58,12 @@ fn main() -> anyhow::Result<()> {
         size,
         min_size: Some(config::MIN_WINDOW),
         level,
+        // The class KWin and the desktop entry know the window by.
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: platform::kde::APP_ID.to_owned(),
+            ..Default::default()
+        },
         #[cfg(target_os = "macos")]
         platform_specific: window::settings::PlatformSpecific {
             title_hidden: true,
@@ -68,6 +74,9 @@ fn main() -> anyhow::Result<()> {
         // focused) by the same path as every later reveal.
         visible: !dropdown,
         position: window::Position::SpecificWith(initial_position),
+        // On KDE the application's own header replaces KDE's title bar, which would
+        // otherwise sit above it.
+        decorations: !platform::kde::active(),
         exit_on_close_request: false,
         ..Default::default()
     })

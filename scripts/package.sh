@@ -65,7 +65,7 @@ case "$(uname -s)" in
     rm -rf "$out"
     mkdir -p "$out/bin" "$out/share/applications"
     cp target/release/spooky target/release/spooky-server "$out/bin/"
-    cp packaging/linux/spooky.desktop "$out/share/applications/"
+    cp packaging/linux/dev.spooky.terminal.desktop "$out/share/applications/"
     tar -czf "$out.tar.gz" -C "$out" .
     printf 'Built archive: %s.tar.gz\n' "$out"
     ;;

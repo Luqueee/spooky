@@ -1,6 +1,7 @@
 //! The user's configuration: what `config.toml` may say, how it is checked, and how
 //! the settings page writes it back.
 
+use crate::platform::kde::Dim;
 use iced::Size;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -200,6 +201,26 @@ impl Config {
         match self.size_mode() {
             SizeMode::Pixels => Size::new(self.width_px(), self.height_px()),
             SizeMode::Percent => PLACEHOLDER_WINDOW,
+        }
+    }
+
+    /// The configured window size as KWin resolves it against its own display.
+    pub(crate) fn kde_dims(&self) -> (Dim, Dim) {
+        match self.size_mode() {
+            SizeMode::Pixels => (
+                Dim::Px(self.width_px().round() as u32),
+                Dim::Px(self.height_px().round() as u32),
+            ),
+            SizeMode::Percent => (
+                Dim::Percent {
+                    percent: self.width_percent,
+                    min: MIN_WINDOW.width as u32,
+                },
+                Dim::Percent {
+                    percent: self.height_percent,
+                    min: MIN_WINDOW.height as u32,
+                },
+            ),
         }
     }
 
