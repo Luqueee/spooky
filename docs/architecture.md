@@ -17,7 +17,7 @@ src/
   main.rs            startup: the window settings and the iced application
   app/               the application: App owns the shared state and composes the features
     mod.rs           App, Message, and the dispatch of every message to the file that handles it
-    dropdown.rs      showing, hiding and placing the window; the global shortcut
+    dropdown.rs      showing, hiding and placing the window; the global shortcut; the slide and fade
     connection.rs    events from the server connection, connecting and retargeting
     workspaces.rs    workspaces, tabs and panes: creating, selecting, renaming, closing, reconciling with the snapshot
     input.rs         keyboard, clipboard, selection and shortcuts
@@ -38,7 +38,7 @@ src/
     connection/      mod.rs (target, generation, channel state, why a target is unreachable; the link's threads stay in link.rs)
   terminal/          canvas.rs (draws a pane), pointer.rs, input.rs (keys, paste, focus reports), copy.rs (selection, OSC 52 writes), links.rs (finding links in output)
   ui/                theme.rs (colours, styles), icons.rs (vector icons and icon buttons)
-  platform/          kde.rs (KDE Wayland: portal shortcut, KWin window control), macos/{app.rs, keyboard.rs}: code that exists because of one operating system
+  platform/          kde.rs (KDE Wayland: portal shortcut, KWin window control), fade.rs (window opacity: X11 property, macOS alpha), macos/{app.rs, keyboard.rs}: code that exists because of one operating system
   config.rs          the typed config.toml model, shared by every feature
   commands.rs        the command registry: ids, titles, the palette's list and its matching
   link.rs            the server connection: its two threads and the events they report to App
@@ -151,7 +151,7 @@ The server writes `server.log` and `workspaces.json` in `spooky_core::paths::sta
 
 ## Platform decisions
 
-macOS and Linux use Unix sockets and native PTYs. Window shortcuts and placement are frontend concerns, separate from sessions. Wayland compositors may restrict global shortcuts and window placement. On KDE Wayland `platform/kde.rs` supplies both: the shortcut through the GlobalShortcuts portal (`Hotkeys::Portal`; KDE owns the binding, so `rebind` is refused) and window placement, size, hide (slide out and park off screen, fading; never minimized, since KWin's minimize effect flies the window to the task bar), raise and focus through a one-shot KWin script loaded over D-Bus on a worker thread, matched by process id and `dev.spooky.terminal` window class. Sizes given as a share of the display are resolved by KWin, because winit knows no monitor before the window is mapped; the first reveal waits 300 ms for the window to exist.
+macOS and Linux use Unix sockets and native PTYs. Window shortcuts and placement are frontend concerns, separate from sessions. Wayland compositors may restrict global shortcuts and window placement. On KDE Wayland `platform/kde.rs` supplies both: the shortcut through the GlobalShortcuts portal (`Hotkeys::Portal`; KDE owns the binding, so `rebind` is refused) and window placement, size, hide (the application slides its content out of the window, `features/window/slide.rs`, and KWin fades and parks it off screen; never minimized, since KWin's minimize effect flies the window to the task bar), raise and focus through a one-shot KWin script loaded over D-Bus on a worker thread, matched by process id and `dev.spooky.terminal` window class. Sizes given as a share of the display are resolved by KWin, because winit knows no monitor before the window is mapped; the first reveal waits 300 ms for the window to exist.
 
 Windows is deferred rather than hidden behind WSL. Future Windows work includes local IPC, process-lifetime verification with ConPTY and native window integration. portable-pty is retained to avoid coupling the session model to Unix PTY syscalls.
 

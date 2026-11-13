@@ -1,6 +1,7 @@
 //! Code that exists because of one operating system. A leaf module: it depends on no
 //! feature.
 
+pub(crate) mod fade;
 #[cfg(target_os = "linux")]
 pub(crate) mod kde;
 #[cfg(target_os = "macos")]

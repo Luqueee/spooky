@@ -1,6 +1,6 @@
 use super::{App, Message};
 use crate::features::window::{FIRST_DELAY, Slide, dropdown_origin, hides_on_blur, usable_area};
-use crate::platform::kde;
+use crate::platform::{fade, kde};
 use iced::{Task, window};
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ impl App {
                     // window that is hidden, minimized or behind another app is
                     // brought forward instead, so its real state decides, not a toggle.
                     return if !self.hidden && self.focused {
-                        self.hide(id)
+                        self.hide()
                     } else {
                         self.reveal(id)
                     };
@@ -30,26 +30,38 @@ impl App {
                         self.attachments.dialog_open(),
                         self.hotkeys.is_some(),
                     )
-                    && let Some(id) = self.window
                 {
-                    return self.hide(id);
+                    return self.hide();
                 }
             }
             Message::SlideFrame(now) => {
-                if let Some(slide) = &mut self.slide {
-                    slide.advance(now);
-                    if slide.finished_open() {
-                        self.slide = None;
-                    }
+                let Some(slide) = &mut self.slide else {
+                    return Task::none();
+                };
+                slide.advance(now);
+                fade::set(slide.opacity());
+                if slide.finished_open() {
+                    self.slide = None;
+                    fade::set(1.0);
+                } else if slide.closed()
+                    && !kde::active()
+                    && let Some(id) = self.window
+                {
+                    // Where the window can be hidden, it is once the content is out of sight.
+                    return window::set_mode(id, window::Mode::Hidden);
                 }
             }
             Message::Present(id, monitor, size) => {
-                // A window that was out of sight slides in, and so does the first one, which
-                // KWin only knows a moment after it is shown; one already shown is only
-                // placed.
+                // A window that was out of sight slides in, and so does the first one (on
+                // KDE, which only knows it a moment after it is shown, after a delay); one
+                // already shown is only placed.
                 let first = !std::mem::replace(&mut self.presented, true);
-                if (self.hidden || first) && kde::active() {
-                    let delay = if first { FIRST_DELAY } else { Duration::ZERO };
+                if (self.hidden || first) && self.hotkeys.is_some() {
+                    let delay = if first && kde::active() {
+                        FIRST_DELAY
+                    } else {
+                        Duration::ZERO
+                    };
                     self.slide = Some(Slide::open(Instant::now() + delay, self.slide_share(1.0)));
                 }
                 self.hidden = false;
@@ -109,7 +121,11 @@ impl App {
                         crate::platform::macos::app::show_windows_instantly();
                         crate::platform::macos::app::set_dock_icon(self.config.dock_icon);
                     }
-                    return self.reveal(id);
+                    return Task::batch([
+                        // The fade needs the native window.
+                        window::run(id, fade::attach).map(|()| Message::Tick),
+                        self.reveal(id),
+                    ]);
                 }
             }
             // The close button hides the window while the shortcut can bring it back;
@@ -117,7 +133,7 @@ impl App {
             // run on the server either way.
             Message::Close(id) => {
                 return if self.hotkeys.is_some() {
-                    self.hide(id)
+                    self.hide()
                 } else {
                     window::close(id)
                 };
@@ -140,17 +156,17 @@ impl App {
         self.slide.is_some_and(|slide| slide.running())
     }
     /// Takes the window off screen. Only offered while the global shortcut can bring it back.
-    pub(super) fn hide(&mut self, id: window::Id) -> Task<Message> {
+    pub(super) fn hide(&mut self) -> Task<Message> {
         self.hidden = true;
         self.focused = false;
+        // The content slides out. Wayland cannot hide a window, so KWin parks it; elsewhere
+        // it is hidden when the slide ends.
+        self.slide = Some(Slide::close(Instant::now(), self.slide_share(0.0)));
+        #[cfg(target_os = "linux")]
         if kde::active() {
-            // Wayland cannot hide a window: the content slides out, and KWin then parks it.
-            self.slide = Some(Slide::close(Instant::now(), self.slide_share(0.0)));
-            #[cfg(target_os = "linux")]
             kde::send(kde::Action::Hide);
-            return Task::none();
         }
-        window::set_mode(id, window::Mode::Hidden)
+        Task::none()
     }
     /// Measures the display and window, then shows the window via [`Message::Present`].
     pub(super) fn reveal(&self, id: window::Id) -> Task<Message> {

@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
     .window(window::Settings {
         size,
         // The window is clear behind the content while it slides, so it can be see-through.
-        transparent: platform::kde::active(),
+        transparent: dropdown,
         min_size: Some(config::MIN_WINDOW),
         level,
         // The class KWin and the desktop entry know the window by.

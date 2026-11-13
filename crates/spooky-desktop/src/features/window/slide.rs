@@ -22,6 +22,8 @@ pub(crate) struct Slide {
     from: f32,
     to: f32,
     progress: f32,
+    /// The end of a closing slide has been reported.
+    reported: bool,
 }
 
 impl Slide {
@@ -45,6 +47,7 @@ impl Slide {
             from,
             to,
             progress: 0.0,
+            reported: false,
         }
     }
 
@@ -62,6 +65,21 @@ impl Slide {
     /// Whether the slide has ended with the content in place, so it can be dropped.
     pub(crate) fn finished_open(&self) -> bool {
         self.to == 0.0 && !self.running()
+    }
+
+    /// True once, when a closing slide has ended with the content out of sight, so the
+    /// window can be taken off screen.
+    pub(crate) fn closed(&mut self) -> bool {
+        let done = self.to == 1.0 && !self.running() && !self.reported;
+        self.reported |= done;
+        done
+    }
+
+    /// The window's opacity, which follows the slide in a straight line: 0 while the
+    /// content is out of sight and 1 in place.
+    pub(crate) fn opacity(&self) -> f32 {
+        let (from, to) = (1.0 - self.from, 1.0 - self.to);
+        from + (to - from) * self.progress
     }
 
     /// How far above its place the content is, as a share of its height: 1 is entirely
@@ -99,6 +117,23 @@ mod tests {
             !close.finished_open(),
             "a closed window keeps its content out"
         );
+    }
+
+    #[test]
+    fn the_fade_follows_the_slide_in_a_straight_line_and_the_close_is_reported_once() {
+        let start = Instant::now();
+        let mut open = Slide::open(start, 1.0);
+        assert_eq!(open.opacity(), 0.0);
+        open.advance(start + DURATION / 2);
+        assert!((open.opacity() - 0.5).abs() < 1e-6);
+
+        let mut close = Slide::close(start, 0.0);
+        close.advance(start + DURATION / 2);
+        assert!(!close.closed(), "still moving");
+        close.advance(start + DURATION);
+        assert_eq!(close.opacity(), 0.0);
+        assert!(close.closed());
+        assert!(!close.closed(), "reported once");
     }
 
     #[test]
