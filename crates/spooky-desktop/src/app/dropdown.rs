@@ -1,6 +1,5 @@
 use super::{App, Message};
 use crate::features::window::{FIRST_DELAY, Slide, dropdown_origin, hides_on_blur, usable_area};
-#[cfg(target_os = "linux")]
 use crate::platform::kde;
 use iced::{Task, window};
 use std::time::{Duration, Instant};
