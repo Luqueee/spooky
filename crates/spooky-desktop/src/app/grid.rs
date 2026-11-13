@@ -9,7 +9,7 @@ use spooky_core::{Axis, Layout, Request};
 impl App {
     /// Tells the server the grid a pane's area holds, when that changed.
     pub(super) fn fit(&mut self, pane: u64, area: Rectangle) {
-        let (cw, ch) = terminal::metrics(self.config.font_size);
+        let (cw, ch) = terminal::metrics(self.config.font_size, self.font.advance);
         let cols = ((area.width / cw).floor() as u16).max(1);
         let rows = ((area.height / ch).floor() as u16).max(1);
         if self.grids.get(&pane) != Some(&(cols, rows)) {
@@ -19,6 +19,7 @@ impl App {
     }
     /// Refits every pane after the font changed: the areas stay, the grids do not.
     pub(super) fn refit_grids(&mut self) {
+        self.font = terminal::TerminalFont::resolve(self.config.font_family.as_deref());
         let areas: Vec<(u64, Rectangle)> = self
             .bounds
             .iter()

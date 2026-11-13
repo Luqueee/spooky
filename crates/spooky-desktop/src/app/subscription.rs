@@ -71,6 +71,7 @@ pub(crate) fn subscription(app: &App) -> Subscription<Message> {
                 Some(Message::Modifiers(modifiers))
             }
             iced::Event::Window(window::Event::Opened { .. }) => Some(Message::Opened(id)),
+            iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
             iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),
             iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(false)),
             iced::Event::Window(window::Event::CloseRequested) => Some(Message::Close(id)),

@@ -1,4 +1,5 @@
 use super::{App, Message};
+use crate::terminal;
 use crate::{
     features::{
         agent::{self},
@@ -17,6 +18,13 @@ use iced::{Task, window};
 use std::time::Instant;
 
 impl App {
+    /// Leaves the settings tab, which stays open, for the terminal.
+    pub(super) fn hide_settings(&mut self) {
+        if self.settings.hide() {
+            self.terminal_focused = true;
+        }
+    }
+    /// Closes the settings tab.
     pub(super) fn close_settings(&mut self) {
         if self.settings.close() {
             self.terminal_focused = true;
@@ -92,8 +100,18 @@ impl App {
             settings::Message::Open => {
                 self.menu_open = false;
                 self.context_menu = None;
-                self.settings.open();
+                self.settings.open(
+                    terminal::installed_monospace(),
+                    self.config.font_family.as_deref(),
+                );
                 self.terminal_focused = false;
+                Task::none()
+            }
+            settings::Message::Show => {
+                self.menu_open = false;
+                self.context_menu = None;
+                self.settings.show();
+                self.terminal_focused = !self.settings.is_shown();
                 Task::none()
             }
             settings::Message::Close => {
