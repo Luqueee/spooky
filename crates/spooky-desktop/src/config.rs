@@ -1,6 +1,7 @@
 //! The user's configuration: what `config.toml` may say, how it is checked, and how
 //! the settings page writes it back.
 
+#[cfg(target_os = "linux")]
 use crate::platform::kde::Dim;
 use iced::Size;
 use serde::{Deserialize, Serialize};
@@ -204,6 +205,7 @@ impl Config {
         }
     }
 
+    #[cfg(target_os = "linux")]
     /// The configured window size as KWin resolves it against its own display.
     pub(crate) fn kde_dims(&self) -> (Dim, Dim) {
         match self.size_mode() {

@@ -1,6 +1,5 @@
 use super::{App, Message};
 use crate::{
-    config::OnBlur,
     features::window::{dropdown_origin, hides_on_blur, usable_area},
     platform::kde,
 };
@@ -47,6 +46,7 @@ impl App {
                 // window the user resized keeps its size.
                 // On KDE the display comes from KWin, which resolves the configured size
                 // itself; elsewhere the measured display does.
+                #[cfg(target_os = "linux")]
                 let kde_size = kde::active() && std::mem::take(&mut self.size_pending);
                 let target = match monitor {
                     Some(monitor) if self.size_pending => {
@@ -67,6 +67,7 @@ impl App {
                     tasks.insert(0, window::move_to(id, at));
                 }
                 // Wayland ignores the placement above; KWin does it there.
+                #[cfg(target_os = "linux")]
                 if kde::active() {
                     let (width, height) = if kde_size {
                         self.config.kde_dims()
@@ -76,7 +77,7 @@ impl App {
                     kde::send(kde::Action::Reveal {
                         width,
                         height,
-                        above: self.config.on_blur == OnBlur::Top,
+                        above: self.config.on_blur == crate::config::OnBlur::Top,
                     });
                 }
                 return Task::batch(tasks);
@@ -115,6 +116,7 @@ impl App {
     pub(super) fn hide(&mut self, id: window::Id) -> Task<Message> {
         self.hidden = true;
         self.focused = false;
+        #[cfg(target_os = "linux")]
         if kde::active() {
             // Wayland cannot hide a window; KWin minimizes it.
             kde::send(kde::Action::Hide);
