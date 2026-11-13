@@ -1,8 +1,7 @@
 use super::{App, Message};
-use crate::{
-    features::window::{dropdown_origin, hides_on_blur, usable_area},
-    platform::kde,
-};
+use crate::features::window::{dropdown_origin, hides_on_blur, usable_area};
+#[cfg(target_os = "linux")]
+use crate::platform::kde;
 use iced::{Task, window};
 
 impl App {
