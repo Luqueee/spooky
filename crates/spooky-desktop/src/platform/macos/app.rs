@@ -34,6 +34,18 @@ pub(crate) fn show_windows_instantly() -> bool {
     true
 }
 
+/// Sets every window's opacity, from 0 (invisible) to 1 (opaque).
+///
+/// Must run on the main thread.
+pub(crate) fn set_opacity(opacity: f32) {
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    for window in NSApplication::sharedApplication(main_thread).windows() {
+        window.setAlphaValue(f64::from(opacity));
+    }
+}
+
 /// The width and height of the part of the window's display that windows may use:
 /// without the menu bar and a visible Dock. A window as tall as the display would
 /// hang below the screen.

@@ -37,11 +37,17 @@ pub(crate) fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
+    let slide = if app.slide_running() {
+        window::frames().map(Message::SlideFrame)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
         Subscription::run(background_events),
         Subscription::run(hotkey_events),
         Subscription::run(web_events),
         blink,
+        slide,
         event::listen_with(|event, status, id| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key,

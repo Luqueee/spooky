@@ -29,7 +29,7 @@ use crate::{
         settings::{self, Settings},
         splits::{self, Splits},
         tailscale,
-        window::Hotkeys,
+        window::{Hotkeys, Slide},
     },
     link::{Command, Event, Link},
 };
@@ -42,6 +42,8 @@ pub(crate) enum Message {
     Tick,
     Link(Event),
     Hotkey(u32),
+    /// A frame of the window's slide.
+    SlideFrame(std::time::Instant),
     Key(
         keyboard::Key,
         keyboard::key::Physical,
@@ -192,6 +194,10 @@ pub(crate) struct App {
     hover_pane: Option<u64>,
     /// The global shortcut, when the session allows one.
     hotkeys: Option<Hotkeys>,
+    /// The window's slide in or out, while the content is moving or held out of sight.
+    slide: Option<Slide>,
+    /// The window has been shown at least once.
+    presented: bool,
     /// The settings page.
     settings: Settings,
     /// The configured window size has not been applied yet: it needs the display.
@@ -257,6 +263,8 @@ impl App {
                 modifiers: keyboard::Modifiers::default(),
                 hover_pane: None,
                 hotkeys,
+                slide: None,
+                presented: false,
                 settings: Settings::default(),
                 size_pending,
                 attachments: Attachments::default(),
@@ -315,6 +323,19 @@ impl App {
         }
         task
     }
+    /// The window's base style; clear while the content slides, so the window shows
+    /// through where the content has moved away.
+    pub(crate) fn style(&self, theme: &iced::Theme) -> iced::theme::Style {
+        let base = iced::theme::Base::base(theme);
+        if self.slide.is_some() {
+            iced::theme::Style {
+                background_color: iced::Color::TRANSPARENT,
+                ..base
+            }
+        } else {
+            base
+        }
+    }
     /// Whether the selected pane's blinking cursor should be animating.
     fn blink_wanted(&self) -> bool {
         self.config.cursor_blink
@@ -328,6 +349,7 @@ impl App {
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Hotkey(..)
+            | Message::SlideFrame(..)
             | Message::WindowFocus(..)
             | Message::Present(..)
             | Message::Opened(..)

@@ -1,14 +1,14 @@
-//! KDE Plasma on Wayland. Wayland lets a client neither register a global key nor place,
+//! KDE Plasma 6 on Wayland. Wayland lets a client neither register a global key nor place,
 //! hide or raise its own window, so both go through KDE: the shortcut through the
 //! `org.freedesktop.portal.GlobalShortcuts` portal, and the window through a one-shot
-//! KWin script loaded over D-Bus. A leaf module: it depends on no feature.
+//! KWin QML script loaded over D-Bus. A leaf module: it depends on no feature.
 
 use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     sync::{OnceLock, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use zbus::block_on;
 
@@ -17,6 +17,11 @@ use zbus::block_on;
 pub(crate) const APP_ID: &str = "dev.spooky.terminal";
 const SHORTCUT: &str = "toggle";
 /// The first bind can show a confirmation dialog; the wait covers the person answering.
+/// How long the window takes to fade in or out; the application's slide lasts as long.
+const SLIDE_MS: u64 = 200;
+/// Where a hidden window waits: beyond any display.
+const PARK: u32 = 30000;
+/// Matches `window::slide::FIRST_DELAY`, which holds the application's own slide back.
 const FIRST_REVEAL_DELAY: Duration = Duration::from_millis(300);
 const BIND_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -72,12 +77,60 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    /// Only numbers and booleans are interpolated, so the script cannot be altered. It
-    /// acts on this process's window only: another Spooky instance keeps its own.
-    fn script(&self) -> String {
+    /// Remembers the size this request asks for, if any, in case a later one replaces it.
+    fn noting_size(self, asked: &mut Option<(Dim, Dim)>) -> Self {
+        if let Self::Reveal { width, height, .. } = &self
+            && !(matches!(width, Dim::Keep) && matches!(height, Dim::Keep))
+        {
+            *asked = Some((*width, *height));
+        }
+        self
+    }
+
+    /// Keeps a size across requests that were dropped in a burst: the application asks
+    /// for the configured size once, and a later reveal only places the window. A
+    /// reveal that carries a size takes it from `asked`, or leaves it there if it has
+    /// none.
+    fn with_size(self, asked: &mut Option<(Dim, Dim)>) -> Self {
+        let Self::Reveal {
+            width,
+            height,
+            above,
+        } = self
+        else {
+            return self;
+        };
+        match (width, height, asked.take()) {
+            (Dim::Keep, Dim::Keep, Some((width, height))) => Self::Reveal {
+                width,
+                height,
+                above,
+            },
+            _ => Self::Reveal {
+                width,
+                height,
+                above,
+            },
+        }
+    }
+
+    /// A KWin QML script that acts on this process's window only (another Spooky
+    /// instance keeps its own), placing it and fading it in or out. The slide itself is
+    /// drawn by the application inside the window: KWin cannot clip a moving window to
+    /// its own display. Only numbers and booleans are interpolated, so it cannot be
+    /// altered.
+    ///
+    /// `fresh` marks the first reveal after launch, whose window has not been hidden but
+    /// still fades in like a later one.
+    fn script(&self, fresh: bool) -> String {
         let pid = std::process::id();
         let body = match self {
-            Self::Hide => "w.minimized = true;".to_owned(),
+            Self::Hide => format!(
+                r#"
+        if (w.frameGeometry.x <= -{PARK}) return;
+        fade.from = w.opacity; fade.to = 0; fade.hideAtEnd = true;
+        anim.start();"#
+            ),
             Self::Reveal {
                 width,
                 height,
@@ -87,31 +140,80 @@ impl Action {
                     width.expr("a.width", "w.frameGeometry.width"),
                     height.expr("a.height", "w.frameGeometry.height"),
                 );
+                // Only a window that was off screen fades in: a second request for a
+                // window already shown just places it.
                 format!(
                     r#"
-                w.minimized = false;
-                const out = (workspace.screenAt && workspace.cursorPos)
-                    ? workspace.screenAt(workspace.cursorPos) : workspace.activeScreen;
-                const a = workspace.clientArea(KWin.PlacementArea, out, workspace.currentDesktop);
-                const width = Math.min({width}, a.width);
-                const height = Math.min({height}, a.height);
-                w.frameGeometry = {{x: a.x + (a.width - width) / 2, y: a.y, width: width, height: height}};
-                w.keepAbove = {above};
-                try {{ if (!w.onAllDesktops) w.desktops = [workspace.currentDesktop]; }} catch (e) {{}}
-                if ("activeWindow" in workspace) workspace.activeWindow = w;
-                else workspace.activeClient = w;
-                "#
+        const wasHidden = w.frameGeometry.x <= -{PARK} || {fresh};
+        // Like Yakuake, out of the task bar, pager and switcher.
+        w.skipTaskbar = true;
+        w.skipPager = true;
+        w.skipSwitcher = true;
+        if (w.minimized) w.minimized = false;
+        const a = Workspace.clientArea(KWin.PlacementArea, Workspace.screenAt(Workspace.cursorPos), Workspace.currentDesktop);
+        const width = Math.min({width}, a.width);
+        const height = Math.min({height}, a.height);
+        w.keepAbove = {above};
+        try {{ if (!w.onAllDesktops) w.desktops = [Workspace.currentDesktop]; }} catch (e) {{}}
+        if (wasHidden) w.opacity = 0;
+        w.frameGeometry = Qt.rect(a.x + (a.width - width) / 2, a.y, width, height);
+        // From wherever a fade that was cut short had got to.
+        fade.from = w.opacity; fade.to = 1; fade.hideAtEnd = false;
+        anim.start();
+        Workspace.activeWindow = w;"#
                 )
             }
         };
         format!(
-            r#"(function () {{
-                const list = workspace.windowList ? workspace.windowList() : workspace.clientList();
-                for (const w of list) {{
-                    if (w.pid !== {pid} || String(w.resourceClass).toLowerCase() !== "{APP_ID}") continue;
-                    {body}
-                }}
-            }})();"#
+            r#"import QtQuick
+import org.kde.kwin
+
+Item {{
+    id: root
+    property var win: null
+    // Off screen, not minimized: KWin's minimize effect would fly the window to the task
+    // bar, at the bottom, and back. Focus goes to the window that was below.
+    function park() {{
+        const w = root.win;
+        w.frameGeometry = Qt.rect(-{PARK}, -{PARK}, w.frameGeometry.width, w.frameGeometry.height);
+        w.opacity = 1;
+        const order = Workspace.stackingOrder;
+        for (let i = order.length - 1; i >= 0; i--) {{
+            const c = order[i];
+            if (c !== w && c.normalWindow && !c.minimized
+                && (c.onAllDesktops || c.desktops.indexOf(Workspace.currentDesktop) >= 0)) {{
+                Workspace.activeWindow = c;
+                return;
+            }}
+        }}
+    }}
+    QtObject {{
+        id: fade
+        property real p: 0
+        property real from: 1
+        property real to: 1
+        property bool hideAtEnd: false
+        onPChanged: if (root.win) root.win.opacity = from + (to - from) * p
+    }}
+    NumberAnimation {{
+        id: anim
+        target: fade
+        property: "p"
+        from: 0
+        to: 1
+        duration: {SLIDE_MS}
+        easing.type: Easing.Linear
+        onFinished: if (fade.hideAtEnd) root.park()
+    }}
+    Component.onCompleted: {{
+        for (const c of Workspace.windows) {{
+            if (c.pid === {pid} && String(c.resourceClass).toLowerCase() === "{APP_ID}") root.win = c;
+        }}
+        const w = root.win;
+        if (!w) return;{body}
+    }}
+}}
+"#
         )
     }
 }
@@ -129,66 +231,154 @@ pub(crate) fn send(action: Action) {
 }
 
 fn worker(actions: mpsc::Receiver<Action>) {
+    use mpsc::RecvTimeoutError::{Disconnected, Timeout};
     let mut reported = false;
+    let mut report = |error: anyhow::Error| {
+        if !std::mem::replace(&mut reported, true) {
+            eprintln!("spooky: KWin window control failed: {error:#}");
+        }
+    };
     let mut first = true;
-    for action in actions {
+    // A size asked for by a request that a later one replaced.
+    let mut asked: Option<(Dim, Dim)> = None;
+    let mut loaded: Option<Loaded> = None;
+    loop {
+        // The script stays loaded while its animation runs, then is unloaded on time.
+        let received = match &loaded {
+            Some(script) => {
+                actions.recv_timeout(script.until.saturating_duration_since(Instant::now()))
+            }
+            None => actions.recv().map_err(|_| Disconnected),
+        };
+        let mut action = match received {
+            Ok(action) => action.noting_size(&mut asked),
+            Err(Timeout) => {
+                if let Some(script) = loaded.take()
+                    && let Err(error) = block_on(script.unload())
+                {
+                    report(error);
+                }
+                continue;
+            }
+            Err(Disconnected) => break,
+        };
+        // Only the newest request matters: a press that came after another supersedes it,
+        // so a burst of presses ends where the last one says instead of replaying.
+        while let Ok(newer) = actions.try_recv() {
+            action = newer.noting_size(&mut asked);
+        }
         // The window is not mapped, so not known to KWin, until just after the first
         // reveal is requested; later ones find it.
-        if first && matches!(action, Action::Reveal { .. }) {
+        let mut fresh = first && matches!(action, Action::Reveal { .. });
+        if fresh {
             first = false;
             thread::sleep(FIRST_REVEAL_DELAY);
+            while let Ok(newer) = actions.try_recv() {
+                action = newer.noting_size(&mut asked);
+            }
+            fresh = matches!(action, Action::Reveal { .. });
         }
-        if let Err(error) = block_on(run_script(&action.script()))
-            && !std::mem::replace(&mut reported, true)
+        // The new script takes over from the one still animating.
+        if let Some(script) = loaded.take()
+            && let Err(error) = block_on(script.unload())
         {
-            eprintln!("spooky: KWin window control failed: {error:#}");
+            report(error);
+        }
+        match block_on(Loaded::run(&action.with_size(&mut asked).script(fresh))) {
+            Ok(script) => loaded = Some(script),
+            Err(error) => report(error),
         }
     }
 }
 
-/// Loads `source` into KWin, runs it once and unloads it.
-async fn run_script(source: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
-    let path = std::path::Path::new(&dir).join(format!("spooky-kwin-{}.js", std::process::id()));
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?
-        .write_all(source.as_bytes())?;
-    let name = format!("spooky-{}", std::process::id());
-    let connection = zbus::Connection::session().await?;
-    let scripting = zbus::Proxy::new(
-        &connection,
-        "org.kde.KWin",
-        "/Scripting",
-        "org.kde.kwin.Scripting",
-    )
-    .await?;
-    // A script left by a crashed run would make the load fail.
-    let _: bool = scripting.call("unloadScript", &(name.as_str(),)).await?;
-    let result = async {
-        let path = path
-            .to_str()
-            .context("the runtime directory is not UTF-8")?;
-        let id: i32 = scripting.call("loadScript", &(path, name.as_str())).await?;
-        anyhow::ensure!(id >= 0, "KWin refused to load the script");
-        let script = zbus::Proxy::new(
+/// A QML script loaded in KWin whose animation may still be running.
+struct Loaded {
+    scripting: zbus::Proxy<'static>,
+    name: String,
+    path: std::path::PathBuf,
+    /// When its animation has ended and it can be unloaded.
+    until: Instant,
+}
+
+impl Loaded {
+    /// Loads `source` into KWin as a QML script and runs it.
+    async fn run(source: &str) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
+        // KWin's QML engine caches a script by path, so each run has a file of its own.
+        let path = std::path::Path::new(&dir).join(format!(
+            "spooky-kwin-{}-{}.qml",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?
+            .write_all(source.as_bytes())?;
+        let name = format!("spooky-{}", std::process::id());
+        let connection = zbus::Connection::session().await?;
+        let scripting = zbus::Proxy::new(
             &connection,
             "org.kde.KWin",
-            format!("/Scripting/Script{id}"),
-            "org.kde.kwin.Script",
+            "/Scripting",
+            "org.kde.kwin.Scripting",
         )
         .await?;
-        script.call::<_, _, ()>("run", &()).await?;
-        anyhow::Ok(())
+        let loaded = Self {
+            scripting,
+            name,
+            path,
+            until: Instant::now() + Duration::from_millis(SLIDE_MS + 100),
+        };
+        // A script left by a crashed run would make the load fail.
+        let _: bool = loaded
+            .scripting
+            .call("unloadScript", &(loaded.name.as_str(),))
+            .await?;
+        let started = async {
+            let path = loaded
+                .path
+                .to_str()
+                .context("the runtime directory is not UTF-8")?;
+            let id: i32 = loaded
+                .scripting
+                .call("loadDeclarativeScript", &(path, loaded.name.as_str()))
+                .await?;
+            anyhow::ensure!(id >= 0, "KWin refused to load the script");
+            let script = zbus::Proxy::new(
+                &connection,
+                "org.kde.KWin",
+                format!("/Scripting/Script{id}"),
+                "org.kde.kwin.Script",
+            )
+            .await?;
+            script.call::<_, _, ()>("run", &()).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        match started {
+            Ok(()) => Ok(loaded),
+            Err(error) => {
+                let _ = loaded.unload().await;
+                Err(error)
+            }
+        }
     }
-    .await;
-    let _: bool = scripting.call("unloadScript", &(name.as_str(),)).await?;
-    let _ = std::fs::remove_file(&path);
-    result
+
+    /// Unloads the script, which ends its animation, and removes its file.
+    async fn unload(self) -> anyhow::Result<()> {
+        let _ = std::fs::remove_file(&self.path);
+        let _: bool = self
+            .scripting
+            .call("unloadScript", &(self.name.as_str(),))
+            .await?;
+        Ok(())
+    }
 }
 
 /// Registers `text` as the preferred trigger of the application's one shortcut and calls
@@ -290,6 +480,36 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_requests_keeps_the_size_that_was_asked_for() {
+        let sized = || Action::Reveal {
+            width: Dim::Px(1920),
+            height: Dim::Px(540),
+            above: false,
+        };
+        let placed = || Action::Reveal {
+            width: Dim::Keep,
+            height: Dim::Keep,
+            above: true,
+        };
+        // A sized reveal, a hide and a plain reveal arrive together; only the last runs,
+        // and the size is not lost with the first.
+        let mut asked = None;
+        sized().noting_size(&mut asked);
+        Action::Hide.noting_size(&mut asked);
+        let Action::Reveal { width, above, .. } =
+            placed().noting_size(&mut asked).with_size(&mut asked)
+        else {
+            panic!("a reveal stays a reveal");
+        };
+        assert!(matches!(width, Dim::Px(1920)) && above);
+        assert!(asked.is_none(), "the size is used once");
+        let Action::Reveal { width, .. } = placed().with_size(&mut asked) else {
+            panic!("a reveal stays a reveal");
+        };
+        assert!(matches!(width, Dim::Keep), "nothing is left to apply");
+    }
+
+    #[test]
     fn the_scripts_touch_only_this_applications_windows() {
         let reveal = Action::Reveal {
             width: Dim::Percent {
@@ -299,12 +519,20 @@ mod tests {
             height: Dim::Px(540),
             above: true,
         }
-        .script();
-        assert!(reveal.contains(&format!("w.pid !== {}", std::process::id())));
+        .script(false);
+        assert!(reveal.contains(&format!("c.pid === {}", std::process::id())));
         assert!(
             reveal.contains("Math.min(Math.max(720, Math.round(a.width * 100 / 100)), a.width)")
         );
         assert!(reveal.contains("Math.min(540, a.height)") && reveal.contains("keepAbove = true"));
-        assert!(Action::Hide.script().contains("w.minimized = true;"));
+        assert!(
+            Action::Hide
+                .script(false)
+                .contains("fade.hideAtEnd = true;")
+        );
+        assert!(
+            !Action::Hide.script(false).contains("w.minimized = true"),
+            "KWin's minimize effect flies the window to the task bar"
+        );
     }
 }
