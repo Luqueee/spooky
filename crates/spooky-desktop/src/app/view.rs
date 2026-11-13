@@ -664,6 +664,17 @@ impl App {
     }
 
     pub(crate) fn view(&self) -> Element<'_, Message> {
+        let screen = self.screen();
+        match self.slide {
+            // The content is moved inside the window, which clips it at its top edge.
+            Some(slide) => float(screen)
+                .translate(move |bounds, _| Vector::new(0.0, -slide.hidden_share() * bounds.height))
+                .into(),
+            None => screen,
+        }
+    }
+
+    fn screen(&self) -> Element<'_, Message> {
         let content = if self.settings.is_open() {
             crate::features::settings::view(&self.settings, &self.config, self.hotkeys.is_some())
         } else {

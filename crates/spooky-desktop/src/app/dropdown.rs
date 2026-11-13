@@ -1,8 +1,9 @@
 use super::{App, Message};
-use crate::features::window::{dropdown_origin, hides_on_blur, usable_area};
+use crate::features::window::{FIRST_DELAY, Slide, dropdown_origin, hides_on_blur, usable_area};
 #[cfg(target_os = "linux")]
 use crate::platform::kde;
 use iced::{Task, window};
+use std::time::{Duration, Instant};
 
 impl App {
     pub(super) fn window_message(&mut self, message: Message) -> Task<Message> {
@@ -35,8 +36,28 @@ impl App {
                     return self.hide(id);
                 }
             }
+            Message::SlideFrame(now) => {
+                if let Some(slide) = &mut self.slide {
+                    slide.advance(now);
+                    if slide.finished_open() {
+                        self.slide = None;
+                    }
+                }
+            }
             Message::Present(id, monitor, size) => {
+                // A window that was out of sight slides in, and so does the first one, which
+                // KWin only knows a moment after it is shown; one already shown is only
+                // placed.
+                let first = !std::mem::replace(&mut self.presented, true);
+                if (self.hidden || first) && kde::active() {
+                    let delay = if first { FIRST_DELAY } else { Duration::ZERO };
+                    self.slide = Some(Slide::open(Instant::now() + delay, self.slide_share(1.0)));
+                }
                 self.hidden = false;
+                // Without waiting for the focus event, so a quick second press hides it.
+                if kde::active() {
+                    self.focused = true;
+                }
                 if !self.settings.is_open() {
                     self.terminal_focused = true;
                 }
@@ -111,13 +132,22 @@ impl App {
         }
         Task::none()
     }
+    /// Where the content is now, or `idle` when no slide is in progress.
+    fn slide_share(&self, idle: f32) -> f32 {
+        self.slide.map_or(idle, |slide| slide.hidden_share())
+    }
+    /// Whether the slide needs frames.
+    pub(super) fn slide_running(&self) -> bool {
+        self.slide.is_some_and(|slide| slide.running())
+    }
     /// Takes the window off screen. Only offered while the global shortcut can bring it back.
     pub(super) fn hide(&mut self, id: window::Id) -> Task<Message> {
         self.hidden = true;
         self.focused = false;
-        #[cfg(target_os = "linux")]
         if kde::active() {
-            // Wayland cannot hide a window; KWin minimizes it.
+            // Wayland cannot hide a window: the content slides out, and KWin then parks it.
+            self.slide = Some(Slide::close(Instant::now(), self.slide_share(0.0)));
+            #[cfg(target_os = "linux")]
             kde::send(kde::Action::Hide);
             return Task::none();
         }

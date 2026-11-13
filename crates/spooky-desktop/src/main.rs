@@ -53,9 +53,12 @@ fn main() -> anyhow::Result<()> {
     .title("Spooky")
     .subscription(subscription)
     .theme(|_: &App| ui::theme())
+    .style(App::style)
     .default_font(iced::Font::MONOSPACE)
     .window(window::Settings {
         size,
+        // The window is clear behind the content while it slides, so it can be see-through.
+        transparent: platform::kde::active(),
         min_size: Some(config::MIN_WINDOW),
         level,
         // The class KWin and the desktop entry know the window by.
