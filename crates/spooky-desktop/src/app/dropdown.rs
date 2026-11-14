@@ -34,6 +34,22 @@ impl App {
                     return if !self.hidden && self.focused {
                         self.hide()
                     } else {
+                        #[cfg(target_os = "macos")]
+                        if self.hidden {
+                            self.slide = Some(Slide::open(Instant::now(), self.slide_share(1.0)));
+                            self.hidden = false;
+                            return Task::batch([
+                                window::set_mode(id, window::Mode::Windowed)
+                                    .chain(window::minimize(id, false))
+                                    .chain(window::gain_focus(id)),
+                                self.reveal(id),
+                            ]);
+                        }
+                        if self.hidden && self.slide_running() {
+                            // Reverse immediately, without waiting for the window measurements.
+                            self.slide = Some(Slide::open(Instant::now(), self.slide_share(1.0)));
+                            self.hidden = false;
+                        }
                         self.reveal(id)
                     };
                 }
@@ -227,7 +243,6 @@ impl App {
     /// Takes the window off screen. Only offered while the global shortcut can bring it back.
     pub(super) fn hide(&mut self) -> Task<Message> {
         self.hidden = true;
-        self.focused = false;
         self.resizing = false;
         // The content slides out. Wayland cannot hide a window, so KWin parks it; elsewhere
         // it is hidden when the slide ends.
