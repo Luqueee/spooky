@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use spooky_core::{Layout, MIN_SPLIT_SHARE, Workspace};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -52,6 +52,9 @@ pub struct Saved {
     /// The panes of those workspaces that are agents rather than shells.
     #[serde(default)]
     pub agents: Vec<SavedAgent>,
+    /// Last verified working directory for each terminal pane.
+    #[serde(default)]
+    pub pane_directories: BTreeMap<u64, String>,
 }
 
 impl Saved {
@@ -63,6 +66,7 @@ impl Saved {
             rows: 24,
             workspaces,
             agents: Vec::new(),
+            pane_directories: BTreeMap::new(),
         }
     }
 
@@ -75,6 +79,12 @@ impl Saved {
     /// Records which panes are agents and how to resume them.
     pub fn with_agents(mut self, agents: Vec<SavedAgent>) -> Self {
         self.agents = agents;
+        self
+    }
+
+    /// Records the last verified directory of each terminal pane.
+    pub fn with_pane_directories(mut self, directories: BTreeMap<u64, String>) -> Self {
+        self.pane_directories = directories;
         self
     }
 
@@ -96,18 +106,27 @@ impl Saved {
             self.format
         );
         let mut seen = HashSet::new();
+        let mut panes = HashSet::new();
         for workspace in &mut self.workspaces {
             claim(&mut seen, workspace.id, self.next_id)?;
-            ensure!(!workspace.tabs.is_empty(), "workspace without tabs");
             for tab in &mut workspace.tabs {
                 claim(&mut seen, tab.id, self.next_id)?;
-                claim_layout(&mut seen, &mut tab.layout, self.next_id)?;
+                claim_layout(&mut seen, &mut panes, &mut tab.layout, self.next_id)?;
+                let mut locked = HashSet::new();
+                for &pane in &tab.locked_panes {
+                    ensure!(
+                        tab.layout.contains(pane),
+                        "locked pane {pane} is not in its tab"
+                    );
+                    ensure!(locked.insert(pane), "pane {pane} is locked twice");
+                }
             }
         }
         let mut agents = HashSet::new();
+        let mut agent_only = HashSet::new();
         for agent in &self.agents {
             ensure!(
-                seen.contains(&agent.pane),
+                panes.contains(&agent.pane),
                 "agent {} is not in any layout",
                 agent.pane
             );
@@ -115,6 +134,19 @@ impl Saved {
                 agents.insert(agent.pane),
                 "agent {} appears twice",
                 agent.pane
+            );
+            if !agent.covers {
+                agent_only.insert(agent.pane);
+            }
+        }
+        for &pane in self.pane_directories.keys() {
+            ensure!(
+                panes.contains(&pane),
+                "directory refers to a non-pane identity {pane}"
+            );
+            ensure!(
+                !agent_only.contains(&pane),
+                "directory refers to an agent without a shell {pane}"
             );
         }
         Ok(())
@@ -127,9 +159,18 @@ fn claim(seen: &mut HashSet<u64>, id: u64, next_id: u64) -> Result<()> {
     Ok(())
 }
 
-fn claim_layout(seen: &mut HashSet<u64>, layout: &mut Layout, next_id: u64) -> Result<()> {
+fn claim_layout(
+    seen: &mut HashSet<u64>,
+    panes: &mut HashSet<u64>,
+    layout: &mut Layout,
+    next_id: u64,
+) -> Result<()> {
     match layout {
-        Layout::Pane(id) => claim(seen, *id, next_id),
+        Layout::Pane(id) => {
+            claim(seen, *id, next_id)?;
+            panes.insert(*id);
+            Ok(())
+        }
         Layout::Split {
             id,
             ratio,
@@ -139,8 +180,8 @@ fn claim_layout(seen: &mut HashSet<u64>, layout: &mut Layout, next_id: u64) -> R
         } => {
             claim(seen, *id, next_id)?;
             *ratio = (*ratio).clamp(MIN_SPLIT_SHARE, 1000 - MIN_SPLIT_SHARE);
-            claim_layout(seen, first, next_id)?;
-            claim_layout(seen, second, next_id)
+            claim_layout(seen, panes, first, next_id)?;
+            claim_layout(seen, panes, second, next_id)
         }
     }
 }
@@ -234,6 +275,8 @@ mod tests {
                 id: tab,
                 title: "Shell".into(),
                 renamed: false,
+                locked: false,
+                locked_panes: Vec::new(),
                 layout,
             }],
         }
@@ -260,6 +303,39 @@ mod tests {
             panic!("the split was lost");
         };
         assert_eq!((*id, *ratio), (5, 650));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn files_written_before_pane_directories_remain_readable() {
+        let dir = scratch();
+        let mut value = serde_json::to_value(Saved::new(4, vec![workspace(1, 2, Layout::Pane(3))]))
+            .expect("encode saved state");
+        value
+            .as_object_mut()
+            .expect("saved object")
+            .remove("pane_directories");
+        fs::write(
+            dir.join(NAME),
+            serde_json::to_vec(&value).expect("encode old state"),
+        )
+        .expect("write old state");
+        let restored = load(&dir)
+            .expect("load old state")
+            .expect("old state exists");
+        assert_eq!(restored.workspaces[0].id, 1);
+        assert!(restored.pane_directories.is_empty());
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_directory_cannot_be_assigned_to_a_workspace_or_tab_identity() {
+        let dir = scratch();
+        let saved = Saved::new(4, vec![workspace(1, 2, Layout::Pane(3))])
+            .with_pane_directories(std::collections::BTreeMap::from([(2, "/tmp".to_owned())]));
+        store(&dir, &saved).expect("store invalid state");
+        assert!(load(&dir).is_err());
+        assert!(dir.join(format!("{NAME}.corrupt")).exists());
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

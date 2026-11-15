@@ -77,7 +77,12 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
 }
 
 /// The conversation of the agent pane `pane`, and its composer.
-pub(crate) fn view<'a>(agents: &'a Agents, pane: u64, agent: &'a Agent) -> Element<'a, Message> {
+pub(crate) fn view<'a>(
+    agents: &'a Agents,
+    pane: u64,
+    agent: &'a Agent,
+    can_zoom: bool,
+) -> Element<'a, Message> {
     let mut conversation = column![].spacing(22).width(Length::Fill);
     if agent.dropped > 0 {
         conversation = conversation.push(
@@ -115,15 +120,12 @@ pub(crate) fn view<'a>(agents: &'a Agents, pane: u64, agent: &'a Agent) -> Eleme
     for dialog in &agent.dialogs {
         bottom = bottom.push(dialog_view(agents, pane, dialog));
     }
-    bottom = bottom.push(composer(agents, pane, agent, live));
+    bottom = bottom.push(composer(agents, pane, agent, live, can_zoom));
     bottom = bottom.push(footer(agents, pane, agent));
     body = body
         .push(centred(bottom.into()))
         .push(Space::new().height(6));
-    let page = container(body)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| surface(BACKGROUND));
+    let page = container(body).width(Length::Fill).height(Length::Fill);
     // A press anywhere that no control took closes an open list.
     if let Some(kind) = agents.menu(pane) {
         return mouse_area(stack![page, menu_layer(agents, pane, kind, agent)])
@@ -433,6 +435,7 @@ fn composer<'a>(
     pane: u64,
     agent: &'a Agent,
     live: bool,
+    can_zoom: bool,
 ) -> Element<'a, Message> {
     let Some(content) = agents.composer(pane) else {
         return Space::new().into();
@@ -482,6 +485,14 @@ fn composer<'a>(
                     )))
                 };
                 match press.key.as_ref() {
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                        if can_zoom
+                            && crate::shortcuts::primary(press.modifiers)
+                            && !press.modifiers.alt()
+                            && (!cfg!(target_os = "macos") || press.modifiers.shift()) =>
+                    {
+                        Some(text_editor::Binding::Custom(Message::TogglePaneZoom(pane)))
+                    }
                     // While a command is being typed, the list takes the keys that
                     // move through it and the ones that pick one.
                     keyboard::Key::Named(keyboard::key::Named::ArrowDown) if count > 0 => {

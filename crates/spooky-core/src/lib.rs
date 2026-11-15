@@ -9,7 +9,7 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 18;
 /// Maximum encoded request or response, including its newline delimiter.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
@@ -30,6 +30,12 @@ pub enum Request {
         /// Last applied revision from this server; reset after reconnecting.
         since: Option<u64>,
     },
+    /// Read a pane's verified shell directory or an agent's starting directory.
+    /// An unavailable directory is returned as an error, not a cached path.
+    Directory {
+        /// The pane on the server being queried.
+        pane: u64,
+    },
     /// Start a workspace with an initial tab and shell.
     CreateWorkspace {
         /// User-visible label.
@@ -44,10 +50,12 @@ pub enum Request {
         /// New display label.
         name: String,
     },
-    /// Start another tab in a workspace's working directory.
+    /// Start another tab, optionally using a pane's current directory.
     CreateTab {
         /// Workspace identity.
         workspace: u64,
+        /// Pane whose current directory is used, or absent for the workspace directory.
+        source: Option<u64>,
         /// New tab's display label.
         title: String,
     },
@@ -58,10 +66,24 @@ pub enum Request {
         /// New display label.
         title: String,
     },
-    /// Terminate every pane of a tab and remove it; closing a workspace's last tab removes the workspace.
+    /// Terminate every pane of an unlocked tab; its workspace remains.
     CloseTab {
         /// Tab to terminate.
         tab: u64,
+    },
+    /// Set whether a tab is protected against closure.
+    SetTabLocked {
+        /// Tab identity.
+        tab: u64,
+        /// Desired lock state.
+        locked: bool,
+    },
+    /// Set whether a pane is protected against closure.
+    SetPaneLocked {
+        /// Pane identity.
+        pane: u64,
+        /// Desired lock state.
+        locked: bool,
     },
     /// Replace a pane leaf with a split containing it and a new shell.
     Split {
@@ -69,6 +91,8 @@ pub enum Request {
         pane: u64,
         /// Direction of the divider.
         axis: Axis,
+        /// Start in the source shell's current directory rather than the workspace directory.
+        here: bool,
     },
     /// Write bytes to a shell's pseudoterminal without interpreting commands.
     Input {
@@ -92,6 +116,18 @@ pub enum Request {
         pane: u64,
         /// Positive scrolls toward earlier output; negative toward the bottom.
         lines: i32,
+    },
+    /// Clear the active viewport and its scrollback without sending input.
+    /// Alternate-screen applications are refused rather than disturbed.
+    ClearViewport {
+        /// Destination terminal pane.
+        pane: u64,
+    },
+    /// Copy all retained text from the pane's active terminal grid. The server
+    /// refuses results exceeding [`MAX_COPY_ALL_BYTES`] or [`MAX_COPY_ALL_LINES`].
+    CopyAll {
+        /// Source terminal pane.
+        pane: u64,
     },
     /// Terminate a pane's process and remove its layout leaf.
     ClosePane {
@@ -127,11 +163,12 @@ pub enum Request {
         /// Pane whose clipboard write to read.
         pane: u64,
     },
-    /// Start a tab in a workspace whose only pane is an agent (oh-my-pi) instead of a
-    /// shell. The server runs the agent in the workspace's directory.
+    /// Start an agent tab, optionally using a pane's current directory.
     CreateAgent {
         /// Workspace identity.
         workspace: u64,
+        /// Pane whose current directory is used, or absent for the workspace directory.
+        source: Option<u64>,
         /// Which agent program to run (`omp`, and others as the server supports them).
         backend: String,
     },
@@ -205,6 +242,13 @@ pub enum Request {
 pub enum Response {
     /// Workspace tree and full or changed terminal viewports, as requested.
     Snapshot(Snapshot),
+    /// A directory observed on the server for the requested pane.
+    Directory {
+        /// Whether this is a shell observation or an agent's starting directory.
+        kind: DirectoryKind,
+        /// Absolute UTF-8 path on the server.
+        path: String,
+    },
     /// No visible changes since the client's revision.
     Unchanged {
         /// Current revision.
@@ -235,12 +279,32 @@ pub enum Response {
         /// Decoded text, at most [`MAX_CLIPBOARD_BYTES`].
         text: String,
     },
+    /// Complete bounded text of a terminal pane, in display order.
+    AllText {
+        /// Source pane, used to reject stale replies.
+        pane: u64,
+        /// Text for the requesting client's clipboard.
+        text: String,
+    },
     /// Server identity and load.
     Status(ServerStatus),
 }
 
+/// The meaning of a pane directory returned by [`Response::Directory`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DirectoryKind {
+    /// The shell's directory, observed while no foreground program owns the PTY.
+    Shell,
+    /// The directory where the agent was started; not its live working directory.
+    AgentStart,
+}
+
 /// Longest OSC 52 write the server keeps, in bytes.
 pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+/// Maximum UTF-8 bytes in a single explicit copy-all operation.
+pub const MAX_COPY_ALL_BYTES: usize = 1024 * 1024;
+/// Maximum terminal grid lines scanned by an explicit copy-all operation.
+pub const MAX_COPY_ALL_LINES: usize = 100_000;
 
 /// Search order for [`Request::Find`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -449,6 +513,8 @@ pub struct Agent {
     pub backend: String,
     /// The agent is working on a turn.
     pub busy: bool,
+    /// Number of completed turns in this agent process.
+    pub turn_seq: u64,
     /// Why the agent process is gone, once it is.
     pub ended: Option<String>,
     /// Earlier entries dropped from the front to keep the conversation bounded.
@@ -570,6 +636,12 @@ pub struct Tab {
     /// terminal's title.
     #[serde(default)]
     pub renamed: bool,
+    /// Whether the tab is protected against closure.
+    #[serde(default)]
+    pub locked: bool,
+    /// Protected pane identities belonging to this tab's layout.
+    #[serde(default)]
+    pub locked_panes: Vec<u64>,
     /// Authoritative split tree.
     pub layout: Layout,
 }
@@ -620,6 +692,8 @@ impl Snapshot {
 pub struct Pane {
     /// Server-scoped identity.
     pub id: u64,
+    /// Number of nonempty PTY reads since this shell started; zero for agents.
+    pub output_seq: u64,
     /// Terminal title.
     pub title: String,
     /// Grid width.
@@ -670,6 +744,7 @@ impl Pane {
     /// every row, so rows beyond the new height are dropped and new ones filled.
     pub fn apply_update(&mut self, update: Self) {
         let Self {
+            output_seq,
             title,
             cols,
             rows,
@@ -689,6 +764,7 @@ impl Pane {
             agent,
             ..
         } = update;
+        self.output_seq = output_seq;
         self.title = title;
         self.cols = cols;
         self.rows = rows;
@@ -784,6 +860,10 @@ pub struct Run {
     pub fg: [u8; 3],
     /// Resolved RGB background.
     pub bg: [u8; 3],
+    /// The background was selected by the program rather than the terminal default.
+    /// Older servers omit this flag; clients can still detect non-default RGB values.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit_bg: bool,
     /// Bold styling.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bold: bool,
@@ -923,6 +1003,7 @@ mod tests {
             text: text.into(),
             fg: [1, 2, 3],
             bg: [0, 0, 0],
+            explicit_bg: false,
             bold: false,
             italic: false,
             underline: false,
@@ -932,9 +1013,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn explicit_background_flag_round_trips_and_old_servers_remain_readable() {
+        let mut original = run(0, "x", 0);
+        let legacy = serde_json::to_string(&original).expect("serialize");
+        assert!(!legacy.contains("explicit_bg"));
+        assert!(
+            !serde_json::from_str::<Run>(&legacy)
+                .expect("legacy run")
+                .explicit_bg
+        );
+        original.explicit_bg = true;
+        let encoded = serde_json::to_string(&original).expect("serialize explicit");
+        assert_eq!(
+            serde_json::from_str::<Run>(&encoded).expect("explicit run"),
+            original
+        );
+    }
+
     fn pane(cols: u16, rows: u16, lines: Vec<Line>) -> Pane {
         Pane {
             id: 1,
+            output_seq: 0,
             title: String::new(),
             cols,
             rows,

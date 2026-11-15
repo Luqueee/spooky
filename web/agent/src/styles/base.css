@@ -2,7 +2,7 @@
 --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace}
 *{box-sizing:border-box}
 html,body,#root{height:100%;margin:0}
-body{background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased;overflow:hidden;user-select:text}
+body{background:transparent;color:var(--fg);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased;overflow:hidden;user-select:text}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
 button:disabled{cursor:default;opacity:.45}
 .app{height:100%;display:flex;flex-direction:column;position:relative}

@@ -42,11 +42,22 @@ pub(crate) fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
+    let directory = if app.online() && !app.hidden && app.current_pane().is_some() {
+        iced::time::every(Duration::from_millis(500)).map(|_| Message::DirectoryTick)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
         Subscription::run(background_events),
         Subscription::run(hotkey_events),
         Subscription::run(web_events),
         blink,
+        if cfg!(target_os = "macos") {
+            iced::time::every(Duration::from_secs(1)).map(|_| Message::BackgroundTick)
+        } else {
+            Subscription::none()
+        },
+        directory,
         slide,
         event::listen_with(|event, status, id| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed {

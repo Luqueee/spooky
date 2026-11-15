@@ -68,6 +68,9 @@ pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option
         Key::Named(Named::PageDown) if !macos && !alt => return Some(Command::NextTab),
         Key::Named(Named::PageUp) if !macos && !alt => return Some(Command::PreviousTab),
         Key::Named(Named::ArrowDown) if alt => return Some(Command::NextWorkspace),
+        Key::Named(Named::Enter) if !alt && (!macos || mods.shift()) => {
+            return Some(Command::TogglePaneZoom);
+        }
         Key::Named(Named::ArrowUp) if alt => return Some(Command::PreviousWorkspace),
         _ => {}
     }
@@ -91,6 +94,9 @@ pub(crate) fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option
         ("f", false) => Some(Command::Find),
         ("g", false) => Some(Command::FindNext),
         ("g", true) => Some(Command::FindPrevious),
+        ("k", false) => Some(Command::ClearViewport),
+        ("a", false) => Some(Command::SelectAll),
+        ("a", true) => Some(Command::CopyAll),
         ("q", false) => Some(Command::Quit),
         // Cmd+Shift+P on macOS, Ctrl+Shift+P elsewhere.
         ("p", shift_or_alt) if shift_or_alt == macos => Some(Command::Palette),
@@ -268,12 +274,32 @@ mod tests {
             ("f", PRIMARY, Command::Find),
             ("g", PRIMARY, Command::FindNext),
             ("g", with_second, Command::FindPrevious),
+            ("k", PRIMARY, Command::ClearViewport),
+            ("a", PRIMARY, Command::SelectAll),
+            ("a", with_second, Command::CopyAll),
         ];
         for (text, mods, expected) in cases {
             assert_eq!(letter(text, mods), Some(expected), "{text} {mods:?}");
         }
         // The shifted letter reaches the app as an uppercase character.
         assert_eq!(letter("T", PRIMARY), Some(Command::NewTab));
+    }
+
+    #[test]
+    fn zoom_chord_does_not_take_plain_or_shift_enter() {
+        let zoom = if cfg!(target_os = "macos") {
+            Modifiers::LOGO | Modifiers::SHIFT
+        } else {
+            Modifiers::CTRL | Modifiers::SHIFT
+        };
+        let enter = Key::Named(Named::Enter);
+        let physical = Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified);
+        assert_eq!(
+            shortcut(&enter, physical, zoom),
+            Some(Command::TogglePaneZoom)
+        );
+        assert_eq!(shortcut(&enter, physical, Modifiers::empty()), None);
+        assert_eq!(shortcut(&enter, physical, Modifiers::SHIFT), None);
     }
 
     #[test]

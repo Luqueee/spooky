@@ -122,6 +122,7 @@ impl App {
                 let effects = self
                     .settings
                     .update(change, &mut self.config, &mut self.hotkeys);
+                self.sync_background();
                 self.apply_effects(effects)
             }
         }

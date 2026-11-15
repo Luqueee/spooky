@@ -97,7 +97,9 @@ impl App {
     fn overlay_open(&self) -> bool {
         self.menu_open
             || self.context_menu.is_some()
+            || self.directory_menu.is_some()
             || self.confirm.is_some()
+            || self.directory_fallback.is_some()
             || self.pending.is_some()
             || self.settings.is_shown()
             || self.palette.is_open()

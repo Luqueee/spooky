@@ -357,6 +357,11 @@ impl Agent {
         self.send(line)
     }
 
+    /// Directory in which this agent was started.
+    pub(crate) fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
     /// Whether the agent process is still running.
     pub(crate) fn is_alive(&self) -> bool {
         self.transcript.lock().is_ok_and(|held| !held.has_ended())
@@ -379,6 +384,7 @@ impl Agent {
         let held = self.lock()?;
         Ok(PaneSnapshot {
             id: self.id,
+            output_seq: 0,
             title: "Agent".into(),
             cols: 0,
             rows: 0,

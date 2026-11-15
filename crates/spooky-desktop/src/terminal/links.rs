@@ -170,6 +170,7 @@ mod tests {
             text: text.into(),
             fg: [1, 2, 3],
             bg: spooky_core::DEFAULT_BACKGROUND,
+            explicit_bg: false,
             bold: false,
             italic: false,
             underline: false,
@@ -182,6 +183,7 @@ mod tests {
     fn pane(runs: Vec<Run>) -> Pane {
         Pane {
             id: 1,
+            output_seq: 0,
             title: String::new(),
             cols: 80,
             rows: 1,

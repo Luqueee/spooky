@@ -56,6 +56,7 @@ pub(crate) const WIDTH_PX: std::ops::RangeInclusive<f32> = 400.0..=4096.0;
 pub(crate) const HEIGHT_PX: std::ops::RangeInclusive<f32> = 200.0..=2160.0;
 pub(crate) const WIDTH_PERCENT: std::ops::RangeInclusive<f32> = 30.0..=100.0;
 pub(crate) const HEIGHT_PERCENT: std::ops::RangeInclusive<f32> = 20.0..=100.0;
+pub(crate) const BACKGROUND_OPACITY: std::ops::RangeInclusive<f32> = 50.0..=100.0;
 
 /// Everything `config.toml` can set. Unknown keys are an error, so a typo is never
 /// silently ignored.
@@ -80,6 +81,8 @@ pub(crate) struct Config {
     pub height: Option<f32>,
     pub width_percent: f32,
     pub height_percent: f32,
+    /// Opacity of the macOS background, without changing the text opacity.
+    pub background_opacity: f32,
     pub shortcut: String,
     /// Keep a Dock icon on macOS. By default Spooky runs without one, like other
     /// dropdown terminals, whenever the global shortcut is available to bring it back.
@@ -103,6 +106,7 @@ impl Default for Config {
             height: None,
             width_percent: 100.0,
             height_percent: 50.0,
+            background_opacity: 90.0,
             shortcut: "Ctrl+Shift+Space".into(),
             dock_icon: false,
             osc52: Osc52::Write,
@@ -166,6 +170,11 @@ impl Config {
         check("width", self.width_px(), &WIDTH_PX)?;
         check("height", self.height_px(), &HEIGHT_PX)?;
         check("width_percent", self.width_percent, &WIDTH_PERCENT)?;
+        check(
+            "background_opacity",
+            self.background_opacity,
+            &BACKGROUND_OPACITY,
+        )?;
         check("height_percent", self.height_percent, &HEIGHT_PERCENT)
     }
 
@@ -315,6 +324,8 @@ mod tests {
             "width = 100.0",
             "height_percent = 5.0",
             "width_percent = 140.0",
+            "background_opacity = 49.0",
+            "background_opacity = 101.0",
         ] {
             let config = parse(bad).expect("parses");
             assert!(config.validate().is_err(), "{bad}");
@@ -323,6 +334,8 @@ mod tests {
             let config = parse(bad).expect("parses");
             assert!(config.validate().is_err(), "{bad}");
         }
+        let transparent = parse("background_opacity = 50.0").expect("parses");
+        assert!(transparent.validate().is_ok());
         let named = parse("font_family = \"JetBrains Mono\"").expect("parses");
         assert!(named.validate().is_ok());
         assert!(Config::default().validate().is_ok());

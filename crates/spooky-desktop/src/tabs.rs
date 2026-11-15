@@ -36,6 +36,8 @@ mod tests {
             id: 1,
             title: "Shell".into(),
             renamed,
+            locked: false,
+            locked_panes: Vec::new(),
             layout: spooky_core::Layout::Pane(1),
         };
         assert_eq!(label_for(&tab(false), Some("vim notes.md")), "vim notes.md");

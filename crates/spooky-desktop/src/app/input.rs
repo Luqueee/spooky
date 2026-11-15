@@ -25,6 +25,7 @@ impl App {
             Message::FocusPane(pane, report) => {
                 self.pane = Some(pane);
                 self.terminal_focused = true;
+                self.copy_pending = None;
                 self.selection = None;
                 if !report.is_empty() {
                     self.send(Request::Input {
@@ -39,10 +40,12 @@ impl App {
             Message::Select(p, a, b) => {
                 self.pane = Some(p);
                 self.terminal_focused = true;
+                self.copy_pending = None;
                 self.selection = (a != b).then_some(Selection {
                     pane: p,
                     anchor: a,
                     head: b,
+                    all: false,
                 });
             }
             Message::ScrollPane(p, lines) => {
@@ -70,8 +73,38 @@ impl App {
             }
             Message::Copy => {
                 self.context_menu = None;
-                if let Some(text) = self.selected_text() {
+                if self
+                    .selection
+                    .is_some_and(|selection| selection.all && Some(selection.pane) == self.pane)
+                {
+                    self.copy_all();
+                } else if let Some(text) = self.selected_text() {
+                    self.copy_pending = None;
                     return clipboard::write(text);
+                }
+            }
+            Message::SelectAll => {
+                self.context_menu = None;
+                if let Some(pane) = self.current_pane().filter(|pane| pane.agent.is_none()) {
+                    self.selection = Some(Selection {
+                        pane: pane.id,
+                        anchor: (0, 0),
+                        head: (0, 0),
+                        all: true,
+                    });
+                }
+            }
+            Message::CopyAll => {
+                self.context_menu = None;
+                self.copy_all();
+            }
+            Message::ClearViewport => {
+                self.context_menu = None;
+                if let Some(pane) = self.current_pane().filter(|pane| pane.agent.is_none()) {
+                    let id = pane.id;
+                    self.selection = None;
+                    self.copy_pending = None;
+                    self.send(Request::ClearViewport { pane: id });
                 }
             }
             Message::PasteClipboard => {
@@ -80,6 +113,14 @@ impl App {
             }
             Message::Key(key, physical, mods, typed, status) => {
                 self.blink_on = true;
+                if self.directory_fallback.is_some() {
+                    if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                        self.directory_fallback = None;
+                    } else if shortcuts::shortcut(&key, physical, mods) == Some(Command::Quit) {
+                        return iced::exit();
+                    }
+                    return Task::none();
+                }
                 if self.settings.recording() {
                     let effects = self.settings.record(
                         &key,
@@ -109,6 +150,7 @@ impl App {
                     && self.search.is_open()
                     && !(self.menu_open
                         || self.context_menu.is_some()
+                        || self.directory_menu.is_some()
                         || self.tailscale.is_open()
                         || self.renaming
                         || self.confirm.is_some()
@@ -119,6 +161,7 @@ impl App {
                 if key == keyboard::Key::Named(keyboard::key::Named::Escape)
                     && (self.menu_open
                         || self.context_menu.is_some()
+                        || self.directory_menu.is_some()
                         || self.tailscale.is_open()
                         || self.renaming
                         || self.confirm.is_some()
@@ -126,6 +169,7 @@ impl App {
                 {
                     self.menu_open = false;
                     self.context_menu = None;
+                    self.directory_menu = None;
                     self.rename_workspace = None;
                     self.rename_tab = None;
                     if self.tailscale.is_open() {
@@ -156,6 +200,7 @@ impl App {
                     && self.confirm.is_none()
                     && !(self.menu_open
                         || self.context_menu.is_some()
+                        || self.directory_menu.is_some()
                         || self.tailscale.is_open()
                         || self.renaming
                         || self.connection_open)
@@ -171,17 +216,14 @@ impl App {
                     && !self.menu_open
                     && !self.renaming
                     && self.context_menu.is_none()
+                    && self.directory_menu.is_none()
                     && !self.tailscale.is_open()
                 {
                     if let Some(command) = chord {
                         return self.run_command(command);
                     }
                     match clipboard_action(&key, mods) {
-                        Some(ClipboardAction::Copy) => {
-                            if let Some(s) = self.selected_text() {
-                                return clipboard::write(s);
-                            }
-                        }
+                        Some(ClipboardAction::Copy) => return Task::done(Message::Copy),
                         Some(ClipboardAction::Paste) => {
                             return clipboard::read().map(Message::Paste);
                         }
@@ -218,8 +260,10 @@ impl App {
         let message = match command {
             Command::NewTab => Some(Message::NewTab),
             Command::NewAgent => Some(Message::NewAgent),
+            Command::NewAgentHere => Some(Message::NewAgentHere),
             Command::NewWorkspace => Some(Message::NewWorkspace),
             Command::Split(axis) => Some(Message::Split(axis)),
+            Command::TogglePaneZoom => self.pane.map(Message::TogglePaneZoom),
             Command::ClosePane => Some(Message::AskClosePane),
             Command::CloseWorkspace => Some(Message::AskCloseWorkspace),
             Command::Tab(position) => shortcuts::nth(&tabs, position).map(Message::Tab),
@@ -255,6 +299,9 @@ impl App {
             Command::Attach => Some(Message::Attachments(attachments::Message::Attach)),
             Command::Capture => Some(Message::Attachments(attachments::Message::Capture)),
             Command::Copy => Some(Message::Copy),
+            Command::SelectAll => Some(Message::SelectAll),
+            Command::CopyAll => Some(Message::CopyAll),
+            Command::ClearViewport => Some(Message::ClearViewport),
             Command::Paste => Some(Message::PasteClipboard),
             Command::Connect => {
                 // The panel lives in the sidebar, so it has to be showing.
@@ -267,13 +314,44 @@ impl App {
         };
         message.map_or_else(Task::none, Task::done)
     }
+    fn copy_all(&mut self) {
+        let Some(pane) = self
+            .current_pane()
+            .filter(|pane| pane.agent.is_none())
+            .map(|pane| pane.id)
+        else {
+            return;
+        };
+        if !self.online() {
+            self.status = "Not connected; copy not sent".into();
+            return;
+        }
+        if self.copy_pending.is_some() {
+            self.status = "A copy is already running".into();
+            return;
+        }
+        self.copy_epoch = self.copy_epoch.wrapping_add(1);
+        let generation = self.connection.generation();
+        let epoch = self.copy_epoch;
+        if self
+            .link
+            .tx
+            .try_send(crate::link::Command::CopyAll(generation, pane, epoch))
+            .is_ok()
+        {
+            self.copy_pending = Some((generation, pane, epoch));
+        } else {
+            self.status = "Connection queue full; copy not sent".into();
+        }
+    }
     pub(super) fn selected_text(&self) -> Option<String> {
         let Selection {
             pane: id,
             anchor,
             head,
+            all,
         } = self.selection?;
-        if anchor == head {
+        if all || anchor == head {
             return None;
         }
         let pane = self.snapshot.as_ref()?.panes.iter().find(|p| p.id == id)?;

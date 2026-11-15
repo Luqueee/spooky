@@ -58,9 +58,16 @@ fn main() -> anyhow::Result<()> {
     .window(window::Settings {
         size,
         // The window is clear behind the content while it slides, so it can be see-through.
-        transparent: dropdown,
+        transparent: dropdown || cfg!(target_os = "macos"),
         min_size: Some(config::MIN_WINDOW),
         level,
+        #[cfg(target_os = "linux")]
+        icon: {
+            let image = image::load_from_memory(include_bytes!("../../../assets/logo-256.png"))?
+                .into_rgba8();
+            let (width, height) = image.dimensions();
+            Some(window::icon::from_rgba(image.into_raw(), width, height)?)
+        },
         // The class KWin and the desktop entry know the window by.
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {

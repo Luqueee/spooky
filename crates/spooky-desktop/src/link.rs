@@ -1,5 +1,5 @@
 use spooky_core::{
-    Request, Response, Snapshot,
+    DirectoryKind, Request, Response, Snapshot,
     client::{Client, Target, is_unrecoverable, upload, was_cancelled},
 };
 use std::{
@@ -15,8 +15,9 @@ use std::{
 use tokio::sync::{Mutex, watch};
 
 pub(crate) enum Command {
-    Request(u64, Request),
+    Request(u64, Request, Option<u64>),
     Upload(u64, u64, PathBuf),
+    CopyAll(u64, u64, u64),
     Target(u64, String),
 }
 /// One of the two server connections: ordered commands, or the snapshot stream.
@@ -25,11 +26,19 @@ pub(crate) enum Channel {
     Commands,
     Display,
 }
+/// One selection epoch, so even a return to the same pane rejects older replies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirectorySelection {
+    pub generation: u64,
+    pub pane: u64,
+    pub kind: DirectoryKind,
+    pub epoch: u64,
+}
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
     Snapshot(u64, Snapshot),
     Status(u64, String),
-    Failed(u64, String),
+    Failed(u64, String, Option<(Request, u64)>),
     Uploaded(u64, u64, String),
     Connection(u64, Channel, bool),
     /// The command connection could not be opened: why, and whether it will be retried.
@@ -38,6 +47,10 @@ pub(crate) enum Event {
     Found(u64, Option<(u32, u32)>),
     /// Text a program stored in the clipboard with OSC 52.
     Clipboard(u64, String),
+    /// A requested whole-grid export, identified by target, pane and selection epoch.
+    CopyAll(u64, u64, u64, Result<String, String>),
+    /// The result belongs only to this selection; the time precedes the request.
+    Directory(DirectorySelection, Option<(DirectoryKind, String)>, Instant),
 }
 static EVENTS: OnceLock<Mutex<tokio::sync::mpsc::Receiver<Event>>> = OnceLock::new();
 pub(crate) async fn next_event() -> Option<Event> {
@@ -96,6 +109,8 @@ pub(crate) struct Link {
     /// The newest target generation requested. Connection attempts for an older
     /// generation are abandoned instead of being waited out.
     latest: Arc<AtomicU64>,
+    directory: watch::Sender<Option<DirectorySelection>>,
+    directory_thread: thread::Thread,
 }
 impl Link {
     /// Points both connections at `host` (empty: this computer) as `generation`.
@@ -109,6 +124,12 @@ impl Link {
             self.latest.store(generation, Ordering::Release);
         }
         queued
+    }
+
+    /// Coalesces selection changes and wakes the independent directory connection.
+    pub fn select_directory(&self, selection: Option<DirectorySelection>) {
+        self.directory.send_replace(selection);
+        self.directory_thread.unpark();
     }
 
     pub fn start() -> Self {
@@ -125,6 +146,20 @@ impl Link {
         ));
         let latest = Arc::new(AtomicU64::new(0));
         let (targets, changes) = watch::channel((0, Target::Local));
+        let (directory, selected) = watch::channel(None);
+        let directory_targets = changes.clone();
+        let directory_events = events.clone();
+        let directory_latest = Arc::clone(&latest);
+        let directory_worker = thread::spawn(move || {
+            directories(
+                directory_targets,
+                selected,
+                directory_events,
+                &directory_latest,
+            );
+        });
+        let directory_thread = directory_worker.thread().clone();
+        let directory_wake = directory_thread.clone();
         let snapshot_events = events.clone();
         let snapshot_latest = Arc::clone(&latest);
         let command_latest = Arc::clone(&latest);
@@ -139,6 +174,7 @@ impl Link {
             let mut next_connect = Some(Instant::now());
             let mut backoff = Backoff::default();
             let uploading = Arc::new(AtomicBool::new(false));
+            let copying = Arc::new(AtomicBool::new(false));
             loop {
                 let command = match (client.is_some(), next_connect) {
                     (false, Some(at)) => {
@@ -161,14 +197,17 @@ impl Link {
                         backoff.reset();
                         targets.send_replace((generation, target.clone()));
                         snapshots.thread().unpark();
+                        directory_wake.unpark();
                     }
-                    Ok(Command::Request(g, request)) if g == generation => {
+                    Ok(Command::Request(g, request, workspace)) if g == generation => {
                         if let Some(c) = client.as_mut() {
                             match c.request(&request) {
                                 // Replies the UI acts on are never dropped: a refusal
                                 // must clear whatever the UI is waiting for.
                                 Ok(Response::Error(e)) => {
-                                    let _ = events.blocking_send(Event::Failed(generation, e));
+                                    let source = workspace.map(|id| (request, id));
+                                    let _ =
+                                        events.blocking_send(Event::Failed(generation, e, source));
                                 }
                                 Ok(Response::Found { current, total }) => {
                                     let _ = events.blocking_send(Event::Found(
@@ -222,6 +261,55 @@ impl Link {
                             });
                         }
                     }
+                    Ok(Command::CopyAll(g, pane, epoch)) if g == generation => {
+                        if copying.swap(true, Ordering::AcqRel) {
+                            let _ = events.blocking_send(Event::CopyAll(
+                                g,
+                                pane,
+                                epoch,
+                                Err("A copy is already running".into()),
+                            ));
+                        } else {
+                            let target = target.clone();
+                            let latest = Arc::clone(&command_latest);
+                            let busy = BusyGuard(Arc::clone(&copying));
+                            let output = events.clone();
+                            let spawned = thread::Builder::new()
+                                .name("spooky-copy-all".into())
+                                .spawn(move || {
+                                    let superseded = || latest.load(Ordering::Acquire) != g;
+                                    let result = Client::connect_cancellable(&target, &superseded)
+                                        .and_then(|mut client| {
+                                            client.request(&Request::CopyAll { pane })
+                                        })
+                                        .map_err(|error| format!("{error:#}"))
+                                        .and_then(|response| match response {
+                                            Response::AllText { pane: source, text }
+                                                if source == pane =>
+                                            {
+                                                Ok(text)
+                                            }
+                                            Response::Error(error) => Err(error),
+                                            other => {
+                                                Err(format!("Unexpected copy response: {other:?}"))
+                                            }
+                                        });
+                                    drop(busy);
+                                    if !superseded() {
+                                        let _ = output
+                                            .blocking_send(Event::CopyAll(g, pane, epoch, result));
+                                    }
+                                });
+                            if let Err(error) = spawned {
+                                let _ = events.blocking_send(Event::CopyAll(
+                                    g,
+                                    pane,
+                                    epoch,
+                                    Err(format!("Cannot start copy: {error}")),
+                                ));
+                            }
+                        }
+                    }
                     Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
@@ -254,8 +342,14 @@ impl Link {
             }
             drop(targets);
             snapshots.thread().unpark();
+            directory_wake.unpark();
         });
-        Self { tx, latest }
+        Self {
+            tx,
+            latest,
+            directory,
+            directory_thread,
+        }
     }
 }
 
@@ -310,6 +404,85 @@ fn spawn_upload(job: Upload) {
             generation,
             format!("Upload failed: cannot start the transfer thread: {error}"),
         ));
+    }
+}
+
+/// A third connection keeps process inspection and SSH delays off input and snapshots.
+/// Only the newest selection is retained, with at most one request in flight.
+fn directories(
+    mut targets: watch::Receiver<(u64, Target)>,
+    mut selected: watch::Receiver<Option<DirectorySelection>>,
+    events: tokio::sync::mpsc::Sender<Event>,
+    latest: &AtomicU64,
+) {
+    let mut client: Option<(u64, Client)> = None;
+    let mut previous = None;
+    let mut backoff = Backoff::default();
+    loop {
+        if targets.has_changed().is_err() || selected.has_changed().is_err() || events.is_closed() {
+            return;
+        }
+        let selection = *selected.borrow_and_update();
+        let (generation, target) = targets.borrow_and_update().clone();
+        if selection != previous {
+            previous = selection;
+            backoff.reset();
+        }
+        let Some(selection) = selection
+            .filter(|s| s.generation == generation && latest.load(Ordering::Acquire) == generation)
+        else {
+            client = None;
+            thread::park_timeout(Duration::from_secs(5));
+            continue;
+        };
+        if client.as_ref().is_some_and(|(g, _)| *g != generation) {
+            client = None;
+        }
+        if client.is_none() {
+            let superseded = || {
+                latest.load(Ordering::Acquire) != generation
+                    || *selected.borrow() != Some(selection)
+                    || !matches!(targets.has_changed(), Ok(false))
+            };
+            match Client::connect_cancellable(&target, &superseded) {
+                Ok(connected) => client = Some((generation, connected)),
+                Err(error) => {
+                    if !was_cancelled(&error) {
+                        let _ = events.try_send(Event::Directory(selection, None, Instant::now()));
+                        thread::park_timeout(backoff.next());
+                    }
+                    continue;
+                }
+            }
+        }
+        let started = Instant::now();
+        let response = client.as_mut().map(|(_, client)| {
+            client.request(&Request::Directory {
+                pane: selection.pane,
+            })
+        });
+        let result = match response {
+            Some(Ok(Response::Directory { kind, path })) => {
+                backoff.reset();
+                Some((kind, path))
+            }
+            Some(Ok(_)) => {
+                backoff.reset();
+                None
+            }
+            Some(Err(_)) | None => {
+                client = None;
+                None
+            }
+        };
+        if *selected.borrow() == Some(selection) && latest.load(Ordering::Acquire) == generation {
+            let _ = events.try_send(Event::Directory(selection, result, started));
+        }
+        thread::park_timeout(if client.is_some() {
+            Duration::from_secs(1)
+        } else {
+            backoff.next()
+        });
     }
 }
 

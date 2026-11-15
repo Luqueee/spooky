@@ -125,6 +125,8 @@ pub(crate) fn view<'a>(
     settings: &'a Settings,
     config: &'a Config,
     shortcuts_available: bool,
+    glass_available: bool,
+    reduce_transparency: bool,
 ) -> Element<'a, Message> {
     let recording = settings.recording();
 
@@ -213,6 +215,25 @@ pub(crate) fn view<'a>(
         ]),
     ));
     if cfg!(target_os = "macos") {
+        window.push(option(
+            "Background opacity",
+            if !glass_available {
+                "Native blur unavailable; the background stays solid"
+            } else if reduce_transparency {
+                "macOS Reduce Transparency is on; the background stays solid"
+            } else {
+                "Subtle background blur; 100% uses a solid background"
+            },
+            stepper(
+                format!("{} %", config.background_opacity),
+                apply(Change::BackgroundOpacity(
+                    config.background_opacity - PERCENT_STEP,
+                )),
+                apply(Change::BackgroundOpacity(
+                    config.background_opacity + PERCENT_STEP,
+                )),
+            ),
+        ));
         window.push(option(
             "Dock icon",
             "Off runs without a Dock icon; the global shortcut is the way back",
@@ -333,7 +354,6 @@ pub(crate) fn view<'a>(
     ])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(|_| surface(BACKGROUND))
     .into()
 }
 

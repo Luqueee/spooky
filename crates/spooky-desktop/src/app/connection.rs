@@ -2,7 +2,7 @@ use super::{App, Message};
 use crate::{
     config::Osc52,
     features::{
-        agent,
+        activity, agent,
         attachments::{self},
     },
     link::Event,
@@ -15,6 +15,9 @@ impl App {
     pub(super) fn connection_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Link(e) => match e {
+                Event::Directory(selection, result, started) => {
+                    self.directory.receive(selection, result, started);
+                }
                 Event::Snapshot(g, mut s) if g == self.connection.generation() => {
                     if let Some(mut current) = self.snapshot.take() {
                         current.apply_update(s);
@@ -27,8 +30,25 @@ impl App {
                         self.create_workspace("Workspace 1".into());
                     }
                     self.reconcile(&s);
+                    let viewed = activity::viewed_tab(
+                        &s,
+                        self.workspace,
+                        self.tab,
+                        self.zoomed,
+                        self.focused && !self.hidden && !self.settings.is_shown(),
+                    );
+                    self.activity.observe(&s, viewed);
                     let fetch = self.clipboard_writes(&s);
                     self.snapshot = Some(s);
+                    if self
+                        .directory_fallback
+                        .as_ref()
+                        .is_some_and(|(request, workspace, _)| {
+                            self.fallback_workspace(request, *workspace).is_none()
+                        })
+                    {
+                        self.directory_fallback = None;
+                    }
                     self.settle_splits();
                     for pane in fetch {
                         self.send(Request::Clipboard { pane });
@@ -44,18 +64,29 @@ impl App {
                 }
                 Event::Connection(g, channel, online) if g == self.connection.generation() => {
                     let update = self.connection.channel(channel, online);
+                    if !online {
+                        self.copy_pending = None;
+                        self.directory_fallback = None;
+                    }
                     if update.forget_panes {
                         self.grids.clear();
                         self.clipboard_seen.clear();
+                        self.activity.clear();
                     }
                     if let Some(line) = update.status {
                         self.status = line;
                     }
                 }
-                Event::Failed(g, s) if g == self.connection.generation() => {
+                Event::Failed(g, error, request) if g == self.connection.generation() => {
                     self.pending = None;
                     self.splits.failed();
-                    self.status = s;
+                    self.status.clone_from(&error);
+                    if let Some((request, workspace)) = request
+                        && self.online()
+                        && self.fallback_workspace(&request, workspace).is_some()
+                    {
+                        self.directory_fallback = Some((request, workspace, error));
+                    }
                 }
                 Event::Uploaded(g, pane, path) if g == self.connection.generation() => {
                     return self.attached(pane, &path);
@@ -63,9 +94,25 @@ impl App {
                 Event::Found(g, result) if g == self.connection.generation() => {
                     self.search.found(result)
                 }
+                Event::CopyAll(generation, pane, epoch, result)
+                    if self.copy_pending == Some((generation, pane, epoch))
+                        && self.connection.generation() == generation
+                        && self.pane == Some(pane)
+                        && self.online() =>
+                {
+                    self.copy_pending = None;
+                    match result {
+                        Ok(text) => {
+                            self.status = format!("Copied {} bytes", text.len());
+                            return clipboard::write(text);
+                        }
+                        Err(error) => self.status = format!("Copy failed: {error}"),
+                    }
+                }
                 Event::Clipboard(g, text)
                     if g == self.connection.generation() && self.config.osc52 == Osc52::Write =>
                 {
+                    self.copy_pending = None;
                     self.status = format!(
                         "A terminal program set the clipboard ({} bytes)",
                         text.len()
@@ -95,12 +142,15 @@ impl App {
                 self.workspaces_open = true;
                 self.menu_open = false;
                 self.confirm = None;
+                self.directory_fallback = None;
                 self.renaming = false;
                 let (generation, target) = self.connection.reconnect();
+                self.activity.clear();
                 self.snapshot = None;
                 self.workspace = None;
                 self.tab = None;
                 self.pane = None;
+                self.zoomed = None;
                 self.agents_seen = None;
                 self.pending = None;
                 self.grids.clear();

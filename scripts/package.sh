@@ -26,8 +26,8 @@ case "$(uname -s)" in
     iconset="$(mktemp -d)/Spooky.iconset"
     mkdir "$iconset"
     for size in 16 32 128 256 512; do
-      sips -z "$size" "$size" packaging/macos/icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
-      sips -z "$((size * 2))" "$((size * 2))" packaging/macos/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+      sips -z "$size" "$size" assets/logo.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+      sips -z "$((size * 2))" "$((size * 2))" assets/logo.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/Spooky.icns"
     rm -rf "$(dirname "$iconset")"
@@ -66,6 +66,8 @@ case "$(uname -s)" in
     mkdir -p "$out/bin" "$out/share/applications"
     cp target/release/spooky target/release/spooky-server "$out/bin/"
     cp packaging/linux/dev.spooky.terminal.desktop "$out/share/applications/"
+    mkdir -p "$out/share/icons/hicolor/256x256/apps"
+    cp assets/logo-256.png "$out/share/icons/hicolor/256x256/apps/dev.spooky.terminal.png"
     tar -czf "$out.tar.gz" -C "$out" .
     printf 'Built archive: %s.tar.gz\n' "$out"
     ;;

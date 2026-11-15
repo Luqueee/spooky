@@ -70,7 +70,7 @@ pub(crate) fn create(window: &dyn iced::window::Window) -> Result<(), String> {
             .with_visible(false)
             .with_devtools(false)
             .with_accept_first_mouse(true)
-            .with_background_color((34, 37, 46, 255))
+            .with_transparent(true)
             .with_ipc_handler(move |request| {
                 // A full queue drops the message: the page is not waited for.
                 let _ = CHANNEL.tx.clone().try_send(request.into_body());

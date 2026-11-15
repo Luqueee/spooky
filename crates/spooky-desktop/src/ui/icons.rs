@@ -10,18 +10,19 @@ use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub enum Icon {
-    Ghost,
     Folder,
     Plus,
     Terminal,
     SplitColumns,
     SplitRows,
+    Zoom,
     More,
     Sidebar,
     Server,
     Chevron,
     ChevronRight,
     Close,
+    Lock,
     Pencil,
     Settings,
     Search,
@@ -91,6 +92,12 @@ impl canvas::Program<Message> for Vector {
                         _ => line(&[(12., 4.), (12., 20.)]),
                     }
                 }
+                Icon::Zoom => {
+                    line(&[(4., 9.), (4., 4.), (9., 4.)]);
+                    line(&[(15., 4.), (20., 4.), (20., 9.)]);
+                    line(&[(20., 15.), (20., 20.), (15., 20.)]);
+                    line(&[(9., 20.), (4., 20.), (4., 15.)]);
+                }
                 Icon::Chevron => line(&[(8., 10.), (12., 14.), (16., 10.)]),
                 Icon::ChevronRight => line(&[(10., 8.), (14., 12.), (10., 16.)]),
                 Icon::ChevronUp => line(&[(8., 14.), (12., 10.), (16., 14.)]),
@@ -98,6 +105,18 @@ impl canvas::Program<Message> for Vector {
                 Icon::Close => {
                     line(&[(6., 6.), (18., 18.)]);
                     line(&[(18., 6.), (6., 18.)]);
+                }
+                Icon::Lock => {
+                    line(&[(6., 10.), (18., 10.), (18., 20.), (6., 20.), (6., 10.)]);
+                    line(&[
+                        (8., 10.),
+                        (8., 7.),
+                        (9., 4.),
+                        (12., 3.),
+                        (15., 4.),
+                        (16., 7.),
+                        (16., 10.),
+                    ]);
                 }
                 Icon::Pencil => line(&[
                     (5., 16.),
@@ -112,18 +131,6 @@ impl canvas::Program<Message> for Vector {
                     line(&[(4., 7.), (20., 7.)]);
                     line(&[(4., 12.), (20., 12.)]);
                     line(&[(4., 17.), (20., 17.)]);
-                }
-                Icon::Ghost => {
-                    p.move_to(Point::new(5., 20.));
-                    p.line_to(Point::new(5., 10.));
-                    p.bezier_curve_to(
-                        Point::new(5., 1.),
-                        Point::new(19., 1.),
-                        Point::new(19., 10.),
-                    );
-                    for (x, y) in [(19., 20.), (15.5, 17.), (12., 20.), (8.5, 17.), (5., 20.)] {
-                        p.line_to(Point::new(x, y));
-                    }
                 }
                 Icon::Copy => {
                     line(&[(9., 9.), (20., 9.), (20., 20.), (9., 20.), (9., 9.)]);
@@ -153,11 +160,6 @@ impl canvas::Program<Message> for Vector {
         });
         frame.stroke(&path, stroke);
         match self.icon {
-            Icon::Ghost => {
-                for x in [9., 15.] {
-                    frame.fill(&canvas::Path::circle(Point::new(x, 10.), 1.), self.color);
-                }
-            }
             Icon::Search => frame.stroke(&canvas::Path::circle(Point::new(11., 11.), 6.), stroke),
             Icon::More => {
                 for x in [5., 12., 19.] {

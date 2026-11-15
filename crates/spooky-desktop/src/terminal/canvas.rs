@@ -249,7 +249,6 @@ impl canvas::Program<Message> for Terminal<'_> {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let (cw, ch) = metrics(self.font_size, self.font.advance);
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), crate::ui::BACKGROUND);
         let selection = self
             .selection
             .map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
@@ -257,7 +256,7 @@ impl canvas::Program<Message> for Terminal<'_> {
         for line in &self.pane.lines {
             let y = f32::from(line.row) * ch;
             for run in &line.runs {
-                if run.bg != spooky_core::DEFAULT_BACKGROUND {
+                if run.explicit_bg || run.bg != spooky_core::DEFAULT_BACKGROUND {
                     frame.fill_rectangle(
                         Point::new(f32::from(run.col) * cw, y),
                         Size::new(f32::from(run.columns()) * cw, ch),

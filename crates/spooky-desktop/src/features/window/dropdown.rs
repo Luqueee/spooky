@@ -1,23 +1,22 @@
 //! Where the dropdown window goes, and what it does when it loses the focus.
 
 use crate::config::OnBlur;
-use iced::{Point, Size, window};
+use iced::{Point, Rectangle, Size, window};
 
-/// Where a dropdown window of `window` size goes on a display of `monitor` size:
-/// horizontally centred against the top edge. `None` when the display is unknown,
-/// leaving placement to the system.
-pub(crate) fn dropdown_origin(monitor: Option<Size>, window: Size) -> Option<Point> {
+/// Horizontally centres a window against the selected display's global top edge.
+/// `None` leaves placement to the system when the display is unknown.
+pub(crate) fn dropdown_origin(monitor: Option<Rectangle>, window: Size) -> Option<Point> {
     let monitor = monitor?;
     Some(Point::new(
-        ((monitor.width - window.width) / 2.0).max(0.0),
-        0.0,
+        monitor.x + ((monitor.width - window.width) / 2.0).max(0.0),
+        monitor.y,
     ))
 }
 /// [`dropdown_origin`] as the window's starting position, so it is created where it
 /// stays instead of appearing elsewhere and moving. Before the display is known it
 /// falls back to the top-left corner.
 pub(crate) fn initial_position(window: Size, monitor: Size) -> Point {
-    dropdown_origin(Some(monitor), window).unwrap_or(Point::ORIGIN)
+    dropdown_origin(Some(Rectangle::new(Point::ORIGIN, monitor)), window).unwrap_or(Point::ORIGIN)
 }
 /// Whether losing the keyboard focus should hide the window: only when asked to, while
 /// the window is shown, no native dialog took the focus, and the global shortcut can
@@ -57,15 +56,34 @@ mod tests {
     fn the_dropdown_is_centred_against_the_top_and_never_starts_off_screen() {
         let window = Size::new(1440.0, 900.0);
         assert_eq!(
-            dropdown_origin(Some(Size::new(1920.0, 1080.0)), window),
+            dropdown_origin(
+                Some(Rectangle::new(Point::ORIGIN, Size::new(1920.0, 1080.0))),
+                window
+            ),
             Some(Point::new(240.0, 0.0))
         );
         assert_eq!(
-            dropdown_origin(Some(Size::new(1280.0, 800.0)), window),
+            dropdown_origin(
+                Some(Rectangle::new(Point::ORIGIN, Size::new(1280.0, 800.0))),
+                window
+            ),
             Some(Point::new(0.0, 0.0)),
             "a window wider than its display starts at the left edge"
         );
         assert_eq!(dropdown_origin(None, window), None);
+    }
+    #[test]
+    fn dropdown_uses_the_selected_displays_global_origin() {
+        let display = iced::Rectangle {
+            x: -607.0,
+            y: -1440.0,
+            width: 3440.0,
+            height: 1440.0,
+        };
+        assert_eq!(
+            dropdown_origin(Some(display), Size::new(1720.0, 720.0)),
+            Some(Point::new(253.0, -1440.0))
+        );
     }
 
     #[test]

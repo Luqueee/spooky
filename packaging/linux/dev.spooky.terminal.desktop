@@ -3,6 +3,7 @@ Type=Application
 Name=Spooky
 Comment=Persistent GPU terminal workspaces
 Exec=spooky
+Icon=dev.spooky.terminal
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupWMClass=dev.spooky.terminal

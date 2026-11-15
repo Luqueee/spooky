@@ -18,6 +18,7 @@ use std::{
 /// ("think"), exits on "die", and records its pid, its arguments and every line it gets.
 const FAKE_OMP: &str = r#"#!/bin/sh
 echo $$ > "$FAKE_PIDFILE"
+pwd -P > "$FAKE_CWD"
 echo "$*" >> "$FAKE_ARGS"
 MODEL=m1
 LEVEL=low
@@ -118,6 +119,7 @@ impl Fixture {
             .env("PI_CODING_AGENT_DIR", &dir)
             .env("FAKE_SESSION", dir.join("fake-session.jsonl"))
             .env("FAKE_ARGS", dir.join("args"))
+            .env("FAKE_CWD", dir.join("cwd"))
             .env("FAKE_LOG", dir.join("log"))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -258,8 +260,81 @@ fn create_agent(client: &mut Connection) {
     let workspace = client.snapshot().workspaces[0].id;
     ok(client.request(Request::CreateAgent {
         workspace,
+        source: None,
         backend: "omp".into(),
     }));
+}
+
+#[test]
+fn agent_tab_starts_in_the_selected_shell_directory() {
+    let fixture = Fixture::start();
+    let directory = fixture.dir.join("project with spaces");
+    fs::create_dir(&directory).expect("create project directory");
+    let expected = directory
+        .canonicalize()
+        .expect("canonical project directory");
+    let mut client = fixture.connect();
+    start_workspace(&mut client, &fixture.dir);
+    let snapshot = client.snapshot();
+    let workspace = snapshot.workspaces[0].id;
+    let source = snapshot.panes[0].id;
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: format!(
+            "cd '{}' && printf 'READY-%s\\n' AGENT\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| screen_has(&mut client, "READY-AGENT"));
+    ok(client.request(Request::CreateAgent {
+        workspace,
+        source: Some(source),
+        backend: "omp".into(),
+    }));
+    wait_for(|| {
+        fs::read_to_string(fixture.dir.join("cwd"))
+            .is_ok_and(|cwd| cwd.trim_end() == expected.to_string_lossy())
+    });
+    let agent = client.agent_pane().expect("agent pane").id;
+    assert!(matches!(
+        client.request(Request::Directory { pane: agent }),
+        Response::Directory { kind: spooky_core::DirectoryKind::AgentStart, ref path }
+            if path == &expected.to_string_lossy()
+    ));
+    ok(client.request(Request::CreateTab {
+        workspace,
+        source: Some(agent),
+        title: "from agent".into(),
+    }));
+    let shell = client
+        .snapshot()
+        .panes
+        .into_iter()
+        .find(|pane| pane.id != source && pane.id != agent)
+        .expect("new shell")
+        .id;
+    ok(client.request(Request::Input {
+        pane: shell,
+        bytes: format!(
+            "test \"$PWD\" -ef '{}' && printf 'FROM-%s\\n' AGENT\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| screen_has(&mut client, "FROM-AGENT"));
+    ok(client.request(Request::CreateAgent {
+        workspace,
+        source: Some(agent),
+        backend: "omp".into(),
+    }));
+    wait_for(|| fixture.agent_starts().len() == 2);
+    assert_eq!(
+        fs::read_to_string(fixture.dir.join("cwd"))
+            .expect("agent directory")
+            .trim_end(),
+        expected.to_string_lossy()
+    );
 }
 
 #[test]
@@ -288,6 +363,10 @@ fn a_conversation_streams_and_every_client_sees_the_same_one() {
         .agent_pane()
         .and_then(|p| p.agent)
         .unwrap_or_else(|| panic!("agent"));
+    assert_eq!(
+        agent.turn_seq, 1,
+        "completed turn survives snapshot coalescing"
+    );
     assert_eq!(agent.messages[0].role, AgentRole::User);
     assert_eq!(agent.messages[0].text, "hello");
     assert_eq!(agent.messages[1].role, AgentRole::Assistant);
@@ -325,6 +404,7 @@ fn an_agent_pane_refuses_terminal_requests_and_a_terminal_refuses_agent_requests
         Request::Split {
             pane: agent,
             axis: spooky_core::Axis::Vertical,
+            here: false,
         },
     ] {
         let message = error(client.request(request));
@@ -350,6 +430,7 @@ fn closing_the_tab_ends_the_agent_process_and_an_unknown_backend_is_refused() {
     let workspace = client.snapshot().workspaces[0].id;
     let message = error(client.request(Request::CreateAgent {
         workspace,
+        source: None,
         backend: "nope".into(),
     }));
     assert!(message.contains("unknown agent backend"), "{message}");
@@ -649,6 +730,10 @@ fn a_question_waits_for_the_user_and_only_a_valid_answer_reaches_the_agent() {
     }));
     wait_for(|| agent_state(&mut client).is_some_and(|a| !a.dialogs.is_empty()));
     let agent = agent_state(&mut client).unwrap_or_else(|| panic!("agent"));
+    assert_eq!(
+        agent.turn_seq, 0,
+        "waiting for an answer has not ended the turn"
+    );
     assert!(agent.busy, "the turn waits for the answer");
     assert_eq!(agent.dialogs[0].options, ["Red", "Blue"]);
     let tool = agent
@@ -705,6 +790,7 @@ fn a_question_waits_for_the_user_and_only_a_valid_answer_reaches_the_agent() {
                 })
         })
     });
+    assert_eq!(agent_state(&mut client).expect("agent").turn_seq, 1);
     let log = fixture.agent_log();
     assert_eq!(log.matches("extension_ui_response").count(), 1);
     assert!(log.contains("\"value\":\"Blue\""), "{log}");
@@ -784,6 +870,80 @@ fn an_agent_comes_back_after_a_server_restart_with_its_conversation() {
     let agent = agent_state(&mut client).unwrap_or_else(|| panic!("agent"));
     assert_eq!(agent.messages[0].role, AgentRole::User);
     assert_eq!(agent.messages[0].text, "earlier question");
+}
+
+#[test]
+fn a_shell_exiting_under_an_agent_does_not_close_the_agent() {
+    let fixture = Fixture::start();
+    let mut client = fixture.connect();
+    start_workspace(&mut client, &fixture.dir);
+    let shell = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane: shell,
+        bytes: b"sleep 1; exit\n".to_vec(),
+    }));
+    ok(client.request(Request::OpenAgent {
+        pane: shell,
+        backend: "omp".into(),
+        cwd: fixture.dir.to_string_lossy().into_owned(),
+        args: Vec::new(),
+    }));
+    wait_for(
+        || matches!(client.request(Request::Status), Response::Status(status) if status.running == 0 && status.agents == 1),
+    );
+    wait_for(|| {
+        fs::read_to_string(fixture.dir.join("workspaces.json"))
+            .is_ok_and(|saved| saved.contains("\"covers\":false"))
+    });
+    let snapshot = client.snapshot();
+    assert_eq!(snapshot.workspaces[0].tabs.len(), 1);
+    assert_eq!(client.agent_pane().map(|pane| pane.id), Some(shell));
+    ok(client.request(Request::AgentPrompt {
+        pane: shell,
+        text: "hello".into(),
+    }));
+    wait_for(|| agent_state(&mut client).is_some_and(|a| !a.busy && a.messages.len() == 2));
+}
+
+#[test]
+fn a_shell_under_a_restored_agent_keeps_its_own_directory() {
+    let fixture = Fixture::start();
+    let directory = fixture.dir.join("covered project");
+    fs::create_dir(&directory).expect("project directory");
+    let mut client = fixture.connect();
+    start_workspace(&mut client, &fixture.dir);
+    let shell = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane: shell,
+        bytes: format!(
+            "cd '{}' && printf 'READY-%s\\n' COVERED\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| screen_has(&mut client, "READY-COVERED"));
+    ok(client.request(Request::OpenAgent {
+        pane: shell,
+        backend: "omp".into(),
+        cwd: fixture.dir.to_string_lossy().into_owned(),
+        args: Vec::new(),
+    }));
+    wait_for(|| agent_state(&mut client).is_some_and(|agent| agent.model.is_some()));
+    drop(client);
+    let fixture = fixture.restart();
+    let mut client = fixture.connect();
+    wait_for(|| agent_state(&mut client).is_some_and(|agent| agent.model.is_some()));
+    ok(client.request(Request::ClosePane { pane: shell }));
+    wait_for(|| client.agent_pane().is_none());
+    ok(client.request(Request::Input {
+        pane: shell,
+        bytes: format!(
+            "test \"$PWD\" -ef '{}' && printf 'RESTORED-%s\\n' COVERED\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| screen_has(&mut client, "RESTORED-COVERED"));
 }
 
 #[test]

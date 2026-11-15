@@ -47,6 +47,7 @@ const MAX_REMEMBERED_CALLS: usize = 512;
 #[derive(Default)]
 pub(crate) struct Transcript {
     busy: bool,
+    turn_seq: u64,
     ended: Option<String>,
     dropped: u32,
     messages: Vec<AgentMessage>,
@@ -75,6 +76,7 @@ impl Transcript {
                 true
             }
             Event::TurnEnded => {
+                self.turn_seq = self.turn_seq.wrapping_add(1);
                 self.busy = false;
                 self.streaming = None;
                 true
@@ -287,6 +289,7 @@ impl Transcript {
         AgentSnapshot {
             backend: backend.to_owned(),
             busy: self.busy,
+            turn_seq: self.turn_seq,
             ended: self.ended.clone(),
             dropped: self.dropped,
             messages: self.messages.clone(),
@@ -512,6 +515,24 @@ mod tests {
             !transcript.apply(Event::Commands(commands)),
             "the same list changes nothing a client shows"
         );
+    }
+
+    #[test]
+    fn completed_turns_remain_observable_when_snapshots_skip_busy_states() {
+        let mut transcript = Transcript::default();
+        assert_eq!(transcript.snapshot("x").turn_seq, 0);
+        apply(
+            &mut transcript,
+            vec![
+                Event::TurnStarted,
+                Event::TurnEnded,
+                Event::TurnStarted,
+                Event::TurnEnded,
+            ],
+        );
+        let snapshot = transcript.snapshot("x");
+        assert!(!snapshot.busy);
+        assert_eq!(snapshot.turn_seq, 2);
     }
 
     #[test]

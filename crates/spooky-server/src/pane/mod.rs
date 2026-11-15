@@ -4,18 +4,24 @@ use crate::search;
 use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
     grid::{Dimensions, Scroll},
-    term::{Config, Term, TermMode, cell::Flags, point_to_viewport},
-    vte::ansi::{CursorShape, CursorStyle, Processor, Rgb},
+    index::{Column, Line as GridLine},
+    term::{
+        Config, Term, TermMode,
+        cell::{Flags, LineLength},
+        point_to_viewport,
+    },
+    vte::ansi::{ClearMode, CursorShape, CursorStyle, Handler, Processor, Rgb},
 };
 use anyhow::{Context, Result, anyhow};
 use portable_pty::{ChildKiller, MasterPty, PtySize, native_pty_system};
 use spooky_core::{
     Cursor, CursorShape as WireCursorShape, FindDirection, Highlight, Line, MAX_CLIPBOARD_BYTES,
-    MouseEncoding, MouseTracking, Pane as PaneSnapshot, Response,
+    MAX_COPY_ALL_BYTES, MAX_COPY_ALL_LINES, MouseEncoding, MouseTracking, Pane as PaneSnapshot,
+    Response,
 };
 use std::{
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -40,6 +46,12 @@ impl Changes {
         if let Ok(mut revision) = self.revision.lock() {
             *revision = revision.wrapping_add(1);
             dirty.store(*revision, Ordering::Release);
+            self.wake.notify_all();
+        }
+    }
+    pub(crate) fn signal(&self) {
+        if let Ok(mut revision) = self.revision.lock() {
+            *revision = revision.wrapping_add(1);
             self.wake.notify_all();
         }
     }
@@ -175,10 +187,15 @@ pub(crate) struct Pane {
     pub(crate) clipboard: Arc<Clipboard>,
     pub(crate) dimensions: Arc<AtomicU32>,
     pub(crate) exited: Arc<AtomicBool>,
+    pub(crate) normal_exit: Arc<AtomicBool>,
+    shell_pid: Option<u32>,
+    saved_directory: Mutex<PathBuf>,
     pub(crate) master: Mutex<Box<dyn MasterPty + Send>>,
     pub(crate) writer: SyncSender<Vec<u8>>,
     pub(crate) killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pub(crate) revision: Arc<AtomicU64>,
+    /// Changes only when nonempty PTY output is read, under the terminal lock.
+    output_seq: Arc<AtomicU64>,
     pub(crate) viewport: Mutex<RowCache>,
     pub(crate) changes: Arc<Changes>,
     pub(crate) find: Mutex<FindState>,
@@ -194,10 +211,12 @@ impl Pane {
         cwd: &Path,
         size: Size,
         changes: Arc<Changes>,
+        exit_changes: Arc<Changes>,
         scrollback: usize,
         shim: Option<&crate::shim::Shim>,
     ) -> Result<Arc<Self>> {
         let revision = Arc::new(AtomicU64::new(0));
+        let output_seq = Arc::new(AtomicU64::new(0));
         let pair = native_pty_system().openpty(size.pty())?;
         let mut reader = pair.master.try_clone_reader()?;
         let mut output = pair.master.take_writer()?;
@@ -210,6 +229,7 @@ impl Pane {
         }
         let mut child = pair.slave.spawn_command(cmd).context("starting shell")?;
         drop(pair.slave);
+        let shell_pid = child.process_id();
         let killer = child.clone_killer();
         let (writer, rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE);
         let title = Arc::new(Mutex::new(spooky_core::DEFAULT_TITLE.to_string()));
@@ -231,6 +251,7 @@ impl Pane {
             listener,
         )));
         let exited = Arc::new(AtomicBool::new(false));
+        let normal_exit = Arc::new(AtomicBool::new(false));
         let pane = Arc::new(Self {
             id,
             terminal: terminal.clone(),
@@ -238,10 +259,14 @@ impl Pane {
             clipboard,
             dimensions: dimensions.clone(),
             exited: exited.clone(),
+            normal_exit: normal_exit.clone(),
+            shell_pid,
+            saved_directory: Mutex::new(cwd.to_path_buf()),
             master: Mutex::new(pair.master),
             writer: writer.clone(),
             killer: Mutex::new(killer),
             revision: revision.clone(),
+            output_seq: output_seq.clone(),
             changes: changes.clone(),
             viewport: Mutex::new(RowCache::default()),
             find: Mutex::new(FindState::default()),
@@ -264,6 +289,7 @@ impl Pane {
                     Ok(n) => {
                         let replies = if let Ok(mut term) = terminal.lock() {
                             parser.advance(&mut *term, &buffer[..n]);
+                            output_seq.fetch_add(1, Ordering::Relaxed);
                             output_changes.advance(&output_revision);
                             let events = match pending.lock() {
                                 Ok(mut events) => std::mem::take(&mut *events),
@@ -315,12 +341,158 @@ impl Pane {
             }
         });
         thread::spawn(move || {
-            let _ = child.wait();
+            let normal = child.wait().is_ok_and(|status| status.signal().is_none());
+            normal_exit.store(normal, Ordering::Release);
             exited.store(true, Ordering::Release);
             changes.advance(&revision);
+            if normal {
+                exit_changes.signal();
+            }
         });
         Ok(pane)
     }
+    /// Reads the shell's directory on this server, never from terminal output.
+    pub(crate) fn current_directory(&self) -> Result<PathBuf> {
+        if self.exited.load(Ordering::Acquire) {
+            return Err(anyhow!("the source shell has exited"));
+        }
+        let pid = self
+            .shell_pid
+            .context("the source shell has no process ID")?;
+        let foreground = self
+            .master
+            .lock()
+            .map_err(|_| anyhow!("terminal state poisoned"))?
+            .process_group_leader()
+            .context("cannot identify the foreground process")?;
+        if u32::try_from(foreground).ok() != Some(pid) {
+            return Err(anyhow!(
+                "the source shell is running a foreground program; its current directory is unknown"
+            ));
+        }
+        let pid = sysinfo::Pid::from_u32(pid);
+        let mut system = sysinfo::System::new();
+        let directory = self.inspect_shell_directory(&mut system)?;
+        // With job control disabled, a foreground child can share the shell's
+        // process group. Do not mistake a nested SSH session for the local shell.
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+        );
+        if system.process(pid).is_none() {
+            return Err(anyhow!("the source shell has exited"));
+        }
+        for child in system
+            .processes()
+            .values()
+            .filter(|child| child.parent() == Some(pid))
+        {
+            let child_pid = i32::try_from(child.pid().as_u32())
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .context("cannot identify a shell child")?;
+            let group = rustix::process::getpgid(Some(child_pid))
+                .context("cannot identify a shell child's process group")?;
+            if group.as_raw_pid() == foreground {
+                return Err(anyhow!(
+                    "the source shell is running a foreground program; its current directory is unknown"
+                ));
+            }
+        }
+        if self.exited.load(Ordering::Acquire)
+            || self
+                .master
+                .lock()
+                .map_err(|_| anyhow!("terminal state poisoned"))?
+                .process_group_leader()
+                != Some(foreground)
+        {
+            return Err(anyhow!(
+                "the source shell changed while reading its directory"
+            ));
+        }
+        Ok(directory)
+    }
+    /// Captures the original shell's own directory, including while a child runs.
+    fn inspect_shell_directory(&self, system: &mut sysinfo::System) -> Result<PathBuf> {
+        if self.exited.load(Ordering::Acquire) {
+            return Err(anyhow!("the source shell has exited"));
+        }
+        let pid = sysinfo::Pid::from_u32(
+            self.shell_pid
+                .context("the source shell has no process ID")?,
+        );
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing()
+                .without_tasks()
+                .with_exe(sysinfo::UpdateKind::Always)
+                .with_cwd(sysinfo::UpdateKind::Always),
+        );
+        let process = system
+            .process(pid)
+            .context("cannot inspect the source shell")?;
+        let name = process
+            .exe()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        if !matches!(
+            name,
+            Some(
+                "sh" | "bash"
+                    | "zsh"
+                    | "fish"
+                    | "dash"
+                    | "ksh"
+                    | "csh"
+                    | "tcsh"
+                    | "elvish"
+                    | "nu"
+                    | "xonsh"
+            )
+        ) {
+            return Err(anyhow!(
+                "the source process is not a recognized shell; its current directory is unknown"
+            ));
+        }
+        let directory = process
+            .cwd()
+            .context("cannot read the source shell's current directory")?
+            .to_path_buf();
+        if self.exited.load(Ordering::Acquire) {
+            return Err(anyhow!("the source shell has exited"));
+        }
+        Ok(directory)
+    }
+
+    /// Refreshes the checkpoint without holding the workspace state lock.
+    pub(crate) fn refresh_saved_directory(&self) -> Result<bool> {
+        let mut saved = self
+            .saved_directory
+            .lock()
+            .map_err(|_| anyhow!("saved directory state poisoned"))?;
+        let directory = self.inspect_shell_directory(&mut sysinfo::System::new())?;
+        if *saved == directory {
+            return Ok(false);
+        }
+        let path = directory
+            .to_str()
+            .context("working directory is not valid UTF-8")?;
+        let directory = crate::state::validated_cwd(Some(path))?;
+        let changed = *saved != directory;
+        *saved = directory;
+        Ok(changed)
+    }
+
+    pub(crate) fn saved_directory(&self) -> Result<PathBuf> {
+        self.saved_directory
+            .lock()
+            .map(|path| path.clone())
+            .map_err(|_| anyhow!("saved directory state poisoned"))
+    }
+
     pub(crate) fn size(&self) -> Size {
         let size = self.dimensions.load(Ordering::Relaxed);
         Size {
@@ -359,6 +531,13 @@ impl Pane {
             };
             let mut fg = color(cell.fg, content.colors);
             let mut bg = color(cell.bg, content.colors);
+            let explicit_bg = cell.flags.contains(Flags::INVERSE)
+                || cell.bg
+                    != alacritty_terminal::vte::ansi::Color::Named(
+                        alacritty_terminal::vte::ansi::NamedColor::Background,
+                    )
+                || content.colors[alacritty_terminal::vte::ansi::NamedColor::Background as usize]
+                    .is_some();
             if cell.flags.contains(Flags::DIM) {
                 fg = fg.map(|channel| (u16::from(channel) * 2 / 3) as u8);
             }
@@ -383,6 +562,7 @@ impl Pane {
                 Style {
                     fg,
                     bg,
+                    explicit_bg,
                     bold: cell.flags.contains(Flags::BOLD),
                     italic: cell.flags.contains(Flags::ITALIC),
                     underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
@@ -431,6 +611,7 @@ impl Pane {
         let highlights = self.highlights(&term, size)?;
         Ok(PaneSnapshot {
             id: self.id,
+            output_seq: self.output_seq.load(Ordering::Relaxed),
             title,
             cols: size.cols,
             rows: size.rows,
@@ -482,6 +663,96 @@ impl Pane {
             self.changes.advance(&self.revision);
         }
         Ok(())
+    }
+    /// Clear the viewport and scrollback without feeding a command to the foreground process.
+    pub(crate) fn clear_viewport(&self) -> Result<()> {
+        let mut term = self
+            .terminal
+            .lock()
+            .map_err(|_| anyhow!("terminal state poisoned"))?;
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return Err(anyhow!("cannot clear an alternate-screen application"));
+        }
+        term.scroll_display(Scroll::Bottom);
+        let cursor_line = term.grid().cursor.point.line.0;
+        let last_column = Column(term.columns() - 1);
+        let mut start = cursor_line;
+        while start > 0
+            && term.grid()[GridLine(start - 1)][last_column]
+                .flags
+                .contains(Flags::WRAPLINE)
+        {
+            start -= 1;
+        }
+        let mut end = cursor_line;
+        let last_line = term.screen_lines() as i32 - 1;
+        while end < last_line
+            && term.grid()[GridLine(end)][last_column]
+                .flags
+                .contains(Flags::WRAPLINE)
+        {
+            end += 1;
+        }
+        let editing_rows = (start..=end)
+            .map(|line| term.grid()[GridLine(line)].clone())
+            .collect::<Vec<_>>();
+        term.clear_screen(ClearMode::All);
+        term.clear_screen(ClearMode::Saved);
+        for (line, row) in editing_rows.into_iter().enumerate() {
+            term.grid_mut()[GridLine(line as i32)] = row;
+        }
+        term.grid_mut().cursor.point.line = GridLine(cursor_line - start);
+        self.changes.advance(&self.revision);
+        Ok(())
+    }
+
+    /// Extract the complete retained grid with bounded time and output size.
+    pub(crate) fn copy_all(&self) -> Result<String> {
+        let term = self
+            .terminal
+            .lock()
+            .map_err(|_| anyhow!("terminal state poisoned"))?;
+        let grid = term.grid();
+        let lines = grid.total_lines();
+        if lines > MAX_COPY_ALL_LINES || lines.saturating_mul(grid.columns()) > 16_000_000 {
+            return Err(anyhow!("terminal history is too large to copy at once"));
+        }
+        let mut text = String::new();
+        let mut push = |c: char| -> Result<()> {
+            if text.len() + c.len_utf8() > MAX_COPY_ALL_BYTES {
+                return Err(anyhow!("terminal text exceeds the 1 MiB copy limit"));
+            }
+            text.push(c);
+            Ok(())
+        };
+        for line in -(grid.history_size() as i32)..grid.screen_lines() as i32 {
+            let row = &grid[GridLine(line)];
+            let length = row.line_length().0;
+            for column in 0..length {
+                let cell = &row[Column(column)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                if cell.flags.contains(Flags::HIDDEN) {
+                    push(' ')?;
+                } else {
+                    push(cell.c)?;
+                    for character in cell.zerowidth().into_iter().flatten() {
+                        push(*character)?;
+                    }
+                }
+            }
+            if length == 0 || !row[Column(length - 1)].flags.contains(Flags::WRAPLINE) {
+                push('\n')?;
+            }
+        }
+        while text.ends_with('\n') {
+            text.pop();
+        }
+        Ok(text)
     }
     /// Ends the shell if it is still running.
     pub(crate) fn terminate(&self) {

@@ -20,3 +20,4 @@ portable-pty = "0.9"
 libc = "0.2"
 rustix = { version = "1", features = ["process"] }
 toml = "0.8"
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }

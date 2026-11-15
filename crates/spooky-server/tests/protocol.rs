@@ -126,6 +126,708 @@ fn wait_for(mut f: impl FnMut() -> bool) {
 }
 
 #[test]
+fn shell_output_sequence_changes_for_pty_output_but_not_a_resize() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "activity".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"stty -echo; printf 'SEQ_%s\\n' READY; exec cat\n".to_vec(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|pane| {
+            screen_rows(pane)
+                .iter()
+                .any(|row| row.contains("SEQ_READY"))
+        })
+    });
+    let before = client.snapshot().panes[0].output_seq;
+    ok(client.request(Request::Resize {
+        pane,
+        cols: 110,
+        rows: 30,
+    }));
+    assert_eq!(client.snapshot().panes[0].output_seq, before);
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"ACTIVITY_MARKER\n".to_vec(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|pane| {
+            pane.output_seq != before
+                && screen_rows(pane)
+                    .iter()
+                    .any(|row| row.contains("ACTIVITY_MARKER"))
+        })
+    });
+}
+
+fn saved_pane_directory(server: &Server, pane: u64) -> Option<String> {
+    let text = fs::read_to_string(server.dir.join("workspaces.json")).ok()?;
+    let saved: serde_json::Value = serde_json::from_str(&text).ok()?;
+    saved
+        .get("pane_directories")?
+        .get(pane.to_string())?
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[test]
+fn each_shell_recovers_its_own_directory_after_a_server_restart() {
+    let server = Server::start();
+    let first_dir = server.dir.join("first project");
+    let second_dir = server.dir.join("second project");
+    fs::create_dir(&first_dir).expect("first directory");
+    fs::create_dir(&second_dir).expect("second directory");
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let first = client.snapshot().panes[0].id;
+    ok(client.request(Request::Split {
+        pane: first,
+        axis: Axis::Vertical,
+        here: false,
+    }));
+    let second = client
+        .snapshot()
+        .panes
+        .into_iter()
+        .find(|pane| pane.id != first)
+        .expect("second shell")
+        .id;
+    for (pane, directory, marker) in [(first, &first_dir, "ONE"), (second, &second_dir, "TWO")] {
+        ok(client.request(Request::Input {
+            pane,
+            bytes: format!(
+                "cd '{}' && printf 'READY-%s\\n' {marker}\n",
+                directory.display()
+            )
+            .into_bytes(),
+        }));
+    }
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        [(first, "READY-ONE"), (second, "READY-TWO")]
+            .iter()
+            .all(|(id, marker)| {
+                snapshot.panes.iter().any(|pane| {
+                    pane.id == *id && screen_rows(pane).iter().any(|row| row.contains(marker))
+                })
+            })
+    });
+    ok(client.request(Request::Shutdown));
+    drop(client);
+    let dir = server.wait_for_exit();
+    let restored = Server::start_in(dir, |_| {});
+    let mut client = restored.connect();
+    for (pane, directory, marker) in [(first, &first_dir, "ONE"), (second, &second_dir, "TWO")] {
+        ok(client.request(Request::Input {
+            pane,
+            bytes: format!(
+                "test \"$PWD\" -ef '{}' && printf 'RESTORED-%s\\n' {marker}\n",
+                directory.display()
+            )
+            .into_bytes(),
+        }));
+    }
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        [(first, "RESTORED-ONE"), (second, "RESTORED-TWO")]
+            .iter()
+            .all(|(id, marker)| {
+                snapshot.panes.iter().any(|pane| {
+                    pane.id == *id && screen_rows(pane).iter().any(|row| row.contains(marker))
+                })
+            })
+    });
+}
+
+#[test]
+fn a_checkpoint_survives_an_abrupt_server_exit() {
+    let mut server = Server::start();
+    let directory = server.dir.join("checkpoint project");
+    fs::create_dir(&directory).expect("project directory");
+    let expected = directory.canonicalize().expect("canonical directory");
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    wait_for(|| saved_pane_directory(&server, pane).is_some());
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!(
+            "cd '{}' && printf 'READY-%s\\n' CHECKPOINT\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        saved_pane_directory(&server, pane).is_some_and(|saved| saved == expected.to_string_lossy())
+    });
+    drop(client);
+    server.child.kill().expect("terminate isolated server");
+    let dir = server.wait_for_exit();
+    let restored = Server::start_in(dir, |_| {});
+    let mut client = restored.connect();
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!(
+            "test \"$PWD\" -ef '{}' && printf 'RESTORED-%s\\n' CHECKPOINT\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|p| {
+            p.id == pane
+                && screen_rows(p)
+                    .iter()
+                    .any(|row| row.contains("RESTORED-CHECKPOINT"))
+        })
+    });
+}
+
+#[test]
+fn a_busy_shell_restores_its_own_directory_not_its_childs() {
+    let server = Server::start();
+    let directory = server.dir.join("busy project");
+    fs::create_dir(&directory).expect("project directory");
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let initial = client.snapshot();
+    let workspace = initial.workspaces[0].id;
+    let pane = initial.panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!(
+            "cd '{}' && (cd / && printf '\\033]2;busy-directory\\007' && exec sleep 5)\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        client
+            .snapshot()
+            .panes
+            .iter()
+            .any(|p| p.id == pane && p.title == "busy-directory")
+    });
+    let busy = client.request(Request::CreateTab {
+        workspace,
+        source: Some(pane),
+        title: "busy".into(),
+    });
+    assert!(matches!(busy, Response::Error(message) if message.contains("foreground program")));
+    ok(client.request(Request::Shutdown));
+    drop(client);
+    let dir = server.wait_for_exit();
+    let restored = Server::start_in(dir, |_| {});
+    let mut client = restored.connect();
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!(
+            "test \"$PWD\" -ef '{}' && printf 'RESTORED-%s\\n' BUSY\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|p| {
+            p.id == pane
+                && screen_rows(p)
+                    .iter()
+                    .any(|row| row.contains("RESTORED-BUSY"))
+        })
+    });
+}
+
+#[test]
+fn a_missing_saved_directory_falls_back_to_the_workspace() {
+    let server = Server::start();
+    let workspace_dir = server.dir.clone();
+    let directory = workspace_dir.join("deleted project");
+    fs::create_dir(&directory).expect("project directory");
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(workspace_dir.to_string_lossy().into_owned()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!(
+            "cd '{}' && printf 'READY-%s\\n' FALLBACK\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|p| {
+            p.id == pane
+                && screen_rows(p)
+                    .iter()
+                    .any(|row| row.contains("READY-FALLBACK"))
+        })
+    });
+    ok(client.request(Request::Shutdown));
+    drop(client);
+    let dir = server.wait_for_exit();
+    fs::remove_dir(&directory).expect("remove saved directory");
+    let restored = Server::start_in(dir, |_| {});
+    let mut client = restored.connect();
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!(
+            "test \"$PWD\" -ef '{}' && printf 'RESTORED-%s\\n' FALLBACK\n",
+            workspace_dir.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|p| {
+            p.id == pane
+                && screen_rows(p)
+                    .iter()
+                    .any(|row| row.contains("RESTORED-FALLBACK"))
+        })
+    });
+    let log = fs::read_to_string(restored.dir.join("server.log")).expect("server log");
+    assert!(log.contains("cannot restore directory for pane"));
+}
+
+#[test]
+fn exiting_a_shell_closes_its_tab_without_stopping_the_other_tab() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let initial = client.snapshot();
+    let workspace = initial.workspaces[0].id;
+    let first = initial.panes[0].id;
+    ok(client.request(Request::CreateTab {
+        workspace,
+        source: None,
+        title: "second".into(),
+    }));
+    let before = client.snapshot();
+    let second = before
+        .panes
+        .iter()
+        .find(|pane| pane.id != first)
+        .expect("second shell")
+        .id;
+    let second_tab = before.workspaces[0]
+        .tabs
+        .iter()
+        .find(|tab| tab.layout.contains(second))
+        .expect("second tab")
+        .id;
+    ok(client.request(Request::Input {
+        pane: second,
+        bytes: b"exit\n".to_vec(),
+    }));
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .all(|tab| tab.id != second_tab)
+            && snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.id == first && !pane.exited)
+            && snapshot.panes.iter().all(|pane| pane.id != second)
+    });
+}
+
+#[test]
+fn exiting_split_and_last_shell_preserves_empty_workspace_across_restart() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "keep me".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let initial = client.snapshot();
+    let workspace = initial.workspaces[0].id;
+    let first = initial.panes[0].id;
+    ok(client.request(Request::Split {
+        pane: first,
+        axis: Axis::Vertical,
+        here: false,
+    }));
+    let second = client
+        .snapshot()
+        .panes
+        .into_iter()
+        .find(|pane| pane.id != first)
+        .expect("split shell")
+        .id;
+    ok(client.request(Request::Input {
+        pane: second,
+        bytes: b"exit\n".to_vec(),
+    }));
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        snapshot.panes.len() == 1
+            && matches!(snapshot.workspaces[0].tabs[0].layout, Layout::Pane(id) if id == first)
+    });
+    ok(client.request(Request::Input {
+        pane: first,
+        bytes: b"exit 7\n".to_vec(),
+    }));
+    drop(client);
+    let mut client = server.connect();
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        snapshot.workspaces.len() == 1
+            && snapshot.workspaces[0].id == workspace
+            && snapshot.workspaces[0].tabs.is_empty()
+            && snapshot.panes.is_empty()
+    });
+    ok(client.request(Request::Shutdown));
+    drop(client);
+    let dir = server.wait_for_exit();
+    let restored = Server::start_in(dir, |_| {});
+    let mut client = restored.connect();
+    let snapshot = client.snapshot();
+    assert_eq!(snapshot.workspaces.len(), 1);
+    assert_eq!(snapshot.workspaces[0].id, workspace);
+    assert!(snapshot.workspaces[0].tabs.is_empty());
+    ok(client.request(Request::CreateTab {
+        workspace,
+        source: None,
+        title: "new".into(),
+    }));
+    assert_eq!(client.snapshot().panes.len(), 1);
+}
+
+#[test]
+fn directory_query_tracks_the_shell_and_refuses_foreground_programs() {
+    let server = Server::start();
+    let directory = server.dir.join("project with spaces");
+    fs::create_dir(&directory).expect("create project directory");
+    let expected = directory.canonicalize().expect("canonical directory");
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: format!("cd '{}' && printf 'READY-%s\\n' DIR\n", directory.display()).into_bytes(),
+    }));
+    wait_for(|| {
+        client
+            .snapshot()
+            .panes
+            .iter()
+            .any(|p| p.id == pane && screen_rows(p).iter().any(|row| row.contains("READY-DIR")))
+    });
+    wait_for(|| {
+        matches!(
+            client.request(Request::Directory { pane }),
+            Response::Directory { kind: spooky_core::DirectoryKind::Shell, ref path }
+                if path == &expected.to_string_lossy()
+        )
+    });
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"sh -c 'printf \"\\033]2;directory-busy\\007\"; exec sleep 30'\n".to_vec(),
+    }));
+    wait_for(|| {
+        client
+            .snapshot()
+            .panes
+            .iter()
+            .any(|p| p.title == "directory-busy")
+    });
+    assert!(matches!(
+        client.request(Request::Directory { pane }),
+        Response::Error(_)
+    ));
+    ok(client.request(Request::Input {
+        pane,
+        bytes: vec![3],
+    }));
+    wait_for(|| {
+        matches!(
+            client.request(Request::Directory { pane }),
+            Response::Directory { kind: spooky_core::DirectoryKind::Shell, ref path }
+                if path == &expected.to_string_lossy()
+        )
+    });
+    assert!(matches!(
+        client.request(Request::Directory { pane: u64::MAX }),
+        Response::Error(_)
+    ));
+}
+
+#[test]
+fn new_tabs_and_splits_start_in_the_selected_shell_directory() {
+    let server = Server::start();
+    let directory = server.dir.join("project with spaces");
+    fs::create_dir(&directory).expect("create project directory");
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let snapshot = client.snapshot();
+    let workspace = snapshot.workspaces[0].id;
+    let source = snapshot.panes[0].id;
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: format!("cd '{}' && printf 'READY-%s\\n' CWD\n", directory.display()).into_bytes(),
+    }));
+    wait_for(|| {
+        client
+            .snapshot()
+            .panes
+            .iter()
+            .any(|p| p.id == source && screen_rows(p).iter().any(|row| row.contains("READY-CWD")))
+    });
+
+    ok(client.request(Request::CreateTab {
+        workspace,
+        source: Some(source),
+        title: "new".into(),
+    }));
+    ok(client.request(Request::Split {
+        pane: source,
+        axis: Axis::Vertical,
+        here: true,
+    }));
+    let panes: Vec<_> = client
+        .snapshot()
+        .panes
+        .into_iter()
+        .filter(|pane| pane.id != source)
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(panes.len(), 2);
+    for pane in &panes {
+        ok(client.request(Request::Input {
+            pane: *pane,
+            bytes: format!(
+                "test \"$PWD\" -ef '{}' && printf 'FOUND-%s\\n' CWD\n",
+                directory.display()
+            )
+            .into_bytes(),
+        }));
+    }
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        panes.iter().all(|id| {
+            snapshot.panes.iter().any(|pane| {
+                pane.id == *id
+                    && screen_rows(pane)
+                        .iter()
+                        .any(|row| row.contains("FOUND-CWD"))
+            })
+        })
+    });
+}
+
+#[test]
+fn busy_shell_refuses_here_without_preventing_an_ordinary_split() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let source = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: b"sh -c 'printf \"\\033]2;busy-test\\007\"; exec sleep 30'\n".to_vec(),
+    }));
+    wait_for(|| {
+        client
+            .snapshot()
+            .panes
+            .iter()
+            .any(|pane| pane.id == source && pane.title == "busy-test")
+    });
+    let result = client.request(Request::Split {
+        pane: source,
+        axis: Axis::Vertical,
+        here: true,
+    });
+    assert!(
+        matches!(&result, Response::Error(message) if message.contains("foreground program")),
+        "{result:?}"
+    );
+    assert_eq!(client.snapshot().panes.len(), 1);
+    ok(client.request(Request::Split {
+        pane: source,
+        axis: Axis::Vertical,
+        here: false,
+    }));
+    assert_eq!(client.snapshot().panes.len(), 2);
+}
+
+#[test]
+fn a_foreground_child_sharing_the_shell_group_does_not_supply_a_directory() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let source = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: b"set +m; sh -c 'printf \"\\033]2;no-job-control\\007\"; exec sleep 30'\n".to_vec(),
+    }));
+    wait_for(|| {
+        client
+            .snapshot()
+            .panes
+            .iter()
+            .any(|pane| pane.id == source && pane.title == "no-job-control")
+    });
+    let result = client.request(Request::Split {
+        pane: source,
+        axis: Axis::Vertical,
+        here: true,
+    });
+    assert!(
+        matches!(&result, Response::Error(message) if message.contains("foreground program")),
+        "{result:?}"
+    );
+    assert_eq!(client.snapshot().panes.len(), 1);
+}
+
+#[test]
+fn a_shell_replaced_by_a_foreground_program_does_not_supply_a_directory() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "work".into(),
+        cwd: Some(server.dir.to_string_lossy().into_owned()),
+    }));
+    let snapshot = client.snapshot();
+    let source = snapshot.panes[0].id;
+    let workspace = snapshot.workspaces[0].id;
+    let directory = server.dir.join("last recognized shell directory");
+    fs::create_dir(&directory).expect("project directory");
+    wait_for(|| saved_pane_directory(&server, source).is_some());
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: format!(
+            "cd '{}' && printf 'READY-%s\\n' REPLACEMENT\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    let expected = directory.canonicalize().expect("canonical directory");
+    wait_for(|| {
+        saved_pane_directory(&server, source)
+            .is_some_and(|saved| saved == expected.to_string_lossy())
+    });
+    let pid_file = server.dir.join("shell-pid");
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: format!(
+            "cd /; printf '%s' $$ > '{}'; exec /bin/sleep 30\n",
+            pid_file.display()
+        )
+        .into_bytes(),
+    }));
+    let mut system = sysinfo::System::new();
+    wait_for(|| {
+        let Ok(text) = fs::read_to_string(&pid_file) else {
+            return false;
+        };
+        let Ok(raw) = text.parse::<u32>() else {
+            return false;
+        };
+        let pid = sysinfo::Pid::from_u32(raw);
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
+        );
+        system
+            .process(pid)
+            .and_then(sysinfo::Process::exe)
+            .and_then(|path| path.file_name())
+            .is_some_and(|name| name == "sleep")
+    });
+    let result = client.request(Request::CreateTab {
+        workspace,
+        source: Some(source),
+        title: "here".into(),
+    });
+    assert!(
+        matches!(&result, Response::Error(message) if message.contains("not a recognized shell")),
+        "{result:?}"
+    );
+    assert_eq!(client.snapshot().workspaces[0].tabs.len(), 1);
+    ok(client.request(Request::Shutdown));
+    drop(client);
+    let dir = server.wait_for_exit();
+    let restored = Server::start_in(dir, |_| {});
+    let mut client = restored.connect();
+    ok(client.request(Request::Input {
+        pane: source,
+        bytes: format!(
+            "test \"$PWD\" -ef '{}' && printf 'RESTORED-%s\\n' REPLACEMENT\n",
+            directory.display()
+        )
+        .into_bytes(),
+    }));
+    wait_for(|| {
+        client.snapshot().panes.iter().any(|p| {
+            p.id == source
+                && screen_rows(p)
+                    .iter()
+                    .any(|row| row.contains("RESTORED-REPLACEMENT"))
+        })
+    });
+}
+
+#[test]
+fn a_source_pane_cannot_be_used_from_another_workspace() {
+    let server = Server::start();
+    let mut client = server.connect();
+    for name in ["first", "second"] {
+        ok(client.request(Request::CreateWorkspace {
+            name: name.into(),
+            cwd: Some(server.dir.to_string_lossy().into_owned()),
+        }));
+    }
+    let snapshot = client.snapshot();
+    let source = snapshot.panes[0].id;
+    let workspace = snapshot.workspaces[1].id;
+    let result = client.request(Request::CreateTab {
+        workspace,
+        source: Some(source),
+        title: "wrong workspace".into(),
+    });
+    assert!(
+        matches!(&result, Response::Error(message) if message.contains("not in the workspace")),
+        "{result:?}"
+    );
+    assert_eq!(client.snapshot().workspaces[1].tabs.len(), 1);
+}
+
+#[test]
 fn screen_survives_disconnect_and_interprets_terminal_sequences() {
     let server = Server::start();
     let mut client = server.connect();
@@ -175,6 +877,7 @@ fn split_and_close_final_panes_keep_tree_consistent() {
     ok(client.request(Request::Split {
         pane: original,
         axis: Axis::Horizontal,
+        here: false,
     }));
     let snapshot = client.snapshot();
     assert_eq!(snapshot.panes.len(), 2);
@@ -190,7 +893,7 @@ fn split_and_close_final_panes_keep_tree_consistent() {
     assert_eq!(snapshot.panes[0].id, other);
     ok(client.request(Request::ClosePane { pane: other }));
     let snapshot = client.snapshot();
-    assert!(snapshot.workspaces.is_empty());
+    assert!(snapshot.workspaces[0].tabs.is_empty());
     assert!(snapshot.panes.is_empty());
 }
 
@@ -205,6 +908,7 @@ fn a_tab_is_renamed_and_closed_with_every_shell_it_holds() {
     let workspace = client.snapshot().workspaces[0].id;
     ok(client.request(Request::CreateTab {
         workspace,
+        source: None,
         title: "second".into(),
     }));
     let snapshot = client.snapshot();
@@ -217,6 +921,7 @@ fn a_tab_is_renamed_and_closed_with_every_shell_it_holds() {
     ok(client.request(Request::Split {
         pane: first_panes[0],
         axis: Axis::Vertical,
+        here: false,
     }));
     assert_eq!(client.snapshot().panes.len(), 3);
 
@@ -258,10 +963,8 @@ fn a_tab_is_renamed_and_closed_with_every_shell_it_holds() {
 
     ok(client.request(Request::CloseTab { tab: second.id }));
     let snapshot = client.snapshot();
-    assert!(
-        snapshot.workspaces.is_empty(),
-        "the last tab takes its workspace with it"
-    );
+    assert_eq!(snapshot.workspaces[0].id, workspace);
+    assert!(snapshot.workspaces[0].tabs.is_empty());
     assert!(snapshot.panes.is_empty());
 }
 
@@ -447,6 +1150,30 @@ fn has_cell(
         .iter()
         .flat_map(|line| &line.runs)
         .any(|run| style(run) && run.cells().any(|(_, cell, _)| cell == text))
+}
+#[test]
+fn explicit_background_equal_to_default_survives_the_pty_protocol() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "background".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"printf '\\033[H\\033[2J\\033[0mA\\033[48;2;34;37;46mB \\033[0mC\\033[7mD\\033[0m\\n'\n".to_vec(),
+    }));
+    wait_for(|| has_cell(&client.snapshot().panes[0], "D", |run| run.explicit_bg));
+    let snapshot = client.snapshot();
+    let pane = &snapshot.panes[0];
+    assert!(has_cell(pane, "A", |run| !run.explicit_bg));
+    assert!(has_cell(pane, "B", |run| run.explicit_bg
+        && run.bg == spooky_core::DEFAULT_BACKGROUND));
+    assert!(has_cell(pane, " ", |run| run.explicit_bg
+        && run.bg == spooky_core::DEFAULT_BACKGROUND));
+    assert!(has_cell(pane, "C", |run| !run.explicit_bg));
+    assert!(has_cell(pane, "D", |run| run.explicit_bg));
 }
 
 /// Applies updates until the server reports nothing further changed.
@@ -649,6 +1376,7 @@ fn workspaces_survive_a_server_stop_and_stopping_asks_before_ending_shells() {
     ok(client.request(Request::Split {
         pane,
         axis: Axis::Vertical,
+        here: false,
     }));
     let split = split_id(&mut client);
     ok(client.request(Request::SetSplitRatio { split, ratio: 700 }));
@@ -714,6 +1442,7 @@ fn workspaces_survive_a_server_stop_and_stopping_asks_before_ending_shells() {
         .expect("identities");
     ok(client.request(Request::CreateTab {
         workspace,
+        source: None,
         title: "later".into(),
     }));
     let later = client.snapshot().workspaces[0]
@@ -742,6 +1471,7 @@ fn a_divider_moves_only_within_its_bounds() {
     ok(client.request(Request::Split {
         pane,
         axis: Axis::Horizontal,
+        here: false,
     }));
     let split = split_id(&mut client);
     assert_eq!(split_ratio(&mut client), spooky_core::EVEN_SPLIT);
@@ -761,6 +1491,295 @@ fn a_divider_moves_only_within_its_bounds() {
     });
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
     assert_eq!(split_ratio(&mut client), 250);
+}
+
+#[test]
+fn locks_prevent_indirect_closure_and_survive_reconnect() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "protected".into(),
+        cwd: Some("/".into()),
+    }));
+    let snapshot = client.snapshot();
+    let workspace = snapshot.workspaces[0].id;
+    let tab = snapshot.workspaces[0].tabs[0].id;
+    let pane = snapshot.panes[0].id;
+    assert!(!snapshot.workspaces[0].tabs[0].locked);
+    assert!(snapshot.workspaces[0].tabs[0].locked_panes.is_empty());
+    ok(client.request(Request::SetPaneLocked { pane, locked: true }));
+    let mut other = server.connect();
+    assert_eq!(other.snapshot().workspaces[0].tabs[0].locked_panes, [pane]);
+    for request in [
+        Request::ClosePane { pane },
+        Request::CloseTab { tab },
+        Request::CloseWorkspace { workspace },
+    ] {
+        assert!(matches!(other.request(request), Response::Error(_)));
+    }
+    ok(client.request(Request::SetPaneLocked {
+        pane,
+        locked: false,
+    }));
+    ok(client.request(Request::SetTabLocked { tab, locked: true }));
+    assert!(other.snapshot().workspaces[0].tabs[0].locked);
+    assert!(matches!(
+        other.request(Request::ClosePane { pane }),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        other.request(Request::CloseTab { tab }),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        other.request(Request::CloseWorkspace { workspace }),
+        Response::Error(_)
+    ));
+    ok(client.request(Request::SetTabLocked { tab, locked: false }));
+    ok(client.request(Request::CloseTab { tab }));
+    let snapshot = other.snapshot();
+    assert_eq!(snapshot.workspaces[0].id, workspace);
+    assert!(snapshot.workspaces[0].tabs.is_empty());
+}
+
+#[test]
+fn locks_survive_server_restart() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "persistent locks".into(),
+        cwd: Some("/".into()),
+    }));
+    let snapshot = client.snapshot();
+    let tab = snapshot.workspaces[0].tabs[0].id;
+    let pane = snapshot.panes[0].id;
+    ok(client.request(Request::SetTabLocked { tab, locked: true }));
+    ok(client.request(Request::SetPaneLocked { pane, locked: true }));
+    ok(client.request(Request::Shutdown));
+    drop(client);
+    let directory = server.wait_for_exit();
+    let server = Server::start_in(directory, |_| {});
+    let mut client = server.connect();
+    let snapshot = client.snapshot();
+    assert!(snapshot.workspaces[0].tabs[0].locked);
+    assert_eq!(snapshot.workspaces[0].tabs[0].locked_panes, [pane]);
+    assert!(matches!(
+        client.request(Request::CloseTab { tab }),
+        Response::Error(_)
+    ));
+}
+
+#[test]
+fn normal_exit_removes_only_the_exited_panes_lock() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "exit with locks".into(),
+        cwd: Some("/".into()),
+    }));
+    let snapshot = client.snapshot();
+    let tab = snapshot.workspaces[0].tabs[0].id;
+    let pane = snapshot.panes[0].id;
+    ok(client.request(Request::Split {
+        pane,
+        axis: Axis::Vertical,
+        here: false,
+    }));
+    ok(client.request(Request::SetTabLocked { tab, locked: true }));
+    ok(client.request(Request::SetPaneLocked { pane, locked: true }));
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"exit\n".to_vec(),
+    }));
+    wait_for(|| !client.snapshot().panes.iter().any(|p| p.id == pane));
+    let snapshot = client.snapshot();
+    assert!(snapshot.workspaces[0].tabs[0].locked);
+    assert!(snapshot.workspaces[0].tabs[0].locked_panes.is_empty());
+    assert_eq!(snapshot.panes.len(), 1);
+}
+
+#[test]
+fn clear_removes_history_and_preserves_unsubmitted_input() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "copy".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Resize {
+        pane,
+        cols: 80,
+        rows: 5,
+    }));
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"seq 1 60\n".to_vec(),
+    }));
+    wait_for(|| shows_line(&mut client, "60"));
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"echo unfinished".to_vec(),
+    }));
+    wait_for(|| {
+        screen_rows(&client.snapshot().panes[0])
+            .iter()
+            .any(|s| s.contains("echo unfinished"))
+    });
+    assert!(client.snapshot().panes[0].cursor.row > 0);
+    let Response::AllText { text, .. } = client.request(Request::CopyAll { pane }) else {
+        panic!("copy-all did not return terminal text");
+    };
+    assert!(text.lines().any(|line| line == "1"), "{text:?}");
+    assert!(text.lines().any(|line| line == "60"), "{text:?}");
+    ok(client.request(Request::ClearViewport { pane }));
+    let after = client.snapshot();
+    let rows = screen_rows(&after.panes[0]);
+    assert_eq!(
+        after.panes[0].cursor.row, 0,
+        "cursor should move to the top"
+    );
+    assert!(rows[0].contains("echo unfinished"), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.trim() == "60"), "{rows:?}");
+    let Response::AllText { text, .. } = client.request(Request::CopyAll { pane }) else {
+        panic!("copy-all did not return terminal text");
+    };
+    assert!(!text.lines().any(|line| line == "1"), "{text:?}");
+    assert!(!text.lines().any(|line| line == "60"), "{text:?}");
+    assert!(text.contains("echo unfinished"), "{text:?}");
+    ok(client.request(Request::Scroll { pane, lines: 30 }));
+    assert_eq!(screen_rows(&client.snapshot().panes[0]), rows);
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"\n".to_vec(),
+    }));
+    wait_for(|| shows_line(&mut client, "unfinished"));
+}
+
+#[test]
+fn clear_preserves_wrapped_text_after_the_cursor() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "wrapped-input".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Resize {
+        pane,
+        cols: 10,
+        rows: 6,
+    }));
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"stty -echo; printf '\\033[2J\\033[H\\n\\nABCDEFGHIJKLMNO\\033[1A\\033[5G'; read value\n".to_vec(),
+    }));
+    wait_for(|| {
+        let snapshot = client.snapshot();
+        let screen = &snapshot.panes[0];
+        screen.row_text(2).starts_with("ABCDEFGHIJ")
+            && screen.row_text(3).starts_with("KLMNO")
+            && screen.cursor.row == 2
+            && screen.cursor.col == 4
+    });
+    ok(client.request(Request::ClearViewport { pane }));
+    let snapshot = client.snapshot();
+    let screen = &snapshot.panes[0];
+    assert!(screen.row_text(0).starts_with("ABCDEFGHIJ"));
+    assert!(screen.row_text(1).starts_with("KLMNO"));
+    assert_eq!((screen.cursor.row, screen.cursor.col), (0, 4));
+}
+
+#[test]
+fn clear_refuses_to_disturb_the_alternate_screen() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "alt".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    emit(&mut client, pane, "\\033[?1049hALT-\\123CREEN-MARKER");
+    wait_for(|| {
+        screen_rows(&client.snapshot().panes[0])
+            .iter()
+            .any(|s| s.contains("ALT-SCREEN-MARKER"))
+    });
+    assert!(matches!(
+        client.request(Request::ClearViewport { pane }),
+        Response::Error(_)
+    ));
+    assert!(
+        screen_rows(&client.snapshot().panes[0])
+            .iter()
+            .any(|s| s.contains("ALT-SCREEN-MARKER"))
+    );
+}
+
+#[test]
+fn copy_all_preserves_wrapped_unicode_and_masks_hidden_text() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "unicode".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"stty -echo; echo ECHO-OFF-DONE\n".to_vec(),
+    }));
+    wait_for(|| shows_line(&mut client, "ECHO-OFF-DONE"));
+    ok(client.request(Request::Resize {
+        pane,
+        cols: 10,
+        rows: 10,
+    }));
+    ok(client.request(Request::Input {
+        pane,
+        bytes: "printf '\\033[2J\\033[HABCDEFGHIJKLMN界e\u{301}\\033[8mSECRET\\033[0mVISIBLE'\n"
+            .as_bytes()
+            .to_vec(),
+    }));
+    let mut copied = String::new();
+    wait_for(|| {
+        if let Response::AllText { text, .. } = client.request(Request::CopyAll { pane }) {
+            copied = text;
+            copied.contains("VISIBLE")
+        } else {
+            false
+        }
+    });
+    assert!(copied.contains("ABCDEFGHIJKLMN界e\u{301}"), "{copied:?}");
+    assert!(!copied.contains("SECRET"), "{copied:?}");
+}
+
+#[test]
+fn copy_all_refuses_oversized_history_without_returning_partial_text() {
+    let server = Server::start();
+    let mut client = server.connect();
+    ok(client.request(Request::CreateWorkspace {
+        name: "limit".into(),
+        cwd: Some("/".into()),
+    }));
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Resize {
+        pane,
+        cols: 160,
+        rows: 5,
+    }));
+    ok(client.request(Request::Input {
+        pane,
+        bytes:
+            b"stty -echo; x=$(printf '%0120d' 0); yes \"$x\" | head -n 9000; echo COPY-LIMIT-DONE\n"
+                .to_vec(),
+    }));
+    wait_for(|| shows_line(&mut client, "COPY-LIMIT-DONE"));
+    let response = client.request(Request::CopyAll { pane });
+    assert!(
+        matches!(response, Response::Error(ref message) if message.contains("1 MiB")),
+        "{response:?}"
+    );
 }
 
 #[test]
@@ -913,6 +1932,7 @@ fn new_panes_start_at_the_size_of_the_window_sized_pane() {
     let workspace = first.workspaces[0].id;
     ok(client.request(Request::CreateTab {
         workspace,
+        source: None,
         title: "next".into(),
     }));
     ok(client.request(Request::CreateWorkspace {

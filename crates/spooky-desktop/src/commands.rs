@@ -13,8 +13,10 @@ pub(crate) enum Command {
     NewTab,
     /// Start an agent in a new tab.
     NewAgent,
+    NewAgentHere,
     NewWorkspace,
     Split(Axis),
+    TogglePaneZoom,
     ClosePane,
     CloseWorkspace,
     /// A zero-based tab position; position 8 means the last tab.
@@ -43,6 +45,12 @@ pub(crate) enum Command {
     Capture,
     /// Copy the selection.
     Copy,
+    /// Select every retained terminal row.
+    SelectAll,
+    /// Copy all retained terminal text directly.
+    CopyAll,
+    /// Clear the visible terminal while preserving scrollback.
+    ClearViewport,
     /// Paste the clipboard into the selected pane.
     Paste,
     /// Show the panel for connecting to another machine.
@@ -77,9 +85,11 @@ const WORKSPACE_IDS: [&str; 9] = [
 pub(crate) const LISTED: &[Command] = &[
     Command::NewTab,
     Command::NewAgent,
+    Command::NewAgentHere,
     Command::NewWorkspace,
     Command::Split(Axis::Vertical),
     Command::Split(Axis::Horizontal),
+    Command::TogglePaneZoom,
     Command::NextTab,
     Command::PreviousTab,
     Command::NextWorkspace,
@@ -92,6 +102,9 @@ pub(crate) const LISTED: &[Command] = &[
     Command::FindNext,
     Command::FindPrevious,
     Command::Copy,
+    Command::SelectAll,
+    Command::CopyAll,
+    Command::ClearViewport,
     Command::Paste,
     Command::Attach,
     Command::Capture,
@@ -107,9 +120,11 @@ impl Command {
         match self {
             Self::NewTab => "core.tab.new",
             Self::NewAgent => "core.agent.new",
+            Self::NewAgentHere => "core.agent.new.here",
             Self::NewWorkspace => "core.workspace.new",
             Self::Split(Axis::Vertical) => "core.pane.split.columns",
             Self::Split(Axis::Horizontal) => "core.pane.split.rows",
+            Self::TogglePaneZoom => "core.pane.zoom",
             Self::ClosePane => "core.pane.close",
             Self::CloseWorkspace => "core.workspace.close",
             Self::Tab(position) => TAB_IDS[position.min(8)],
@@ -130,6 +145,9 @@ impl Command {
             Self::Attach => "core.file.attach",
             Self::Capture => "core.pane.capture",
             Self::Copy => "core.clipboard.copy",
+            Self::SelectAll => "core.terminal.select_all",
+            Self::CopyAll => "core.terminal.copy_all",
+            Self::ClearViewport => "core.terminal.clear",
             Self::Paste => "core.clipboard.paste",
             Self::Connect => "core.connection.open",
         }
@@ -140,9 +158,11 @@ impl Command {
         match self {
             Self::NewTab => "New tab",
             Self::NewAgent => "New agent",
+            Self::NewAgentHere => "New agent here",
             Self::NewWorkspace => "New workspace",
             Self::Split(Axis::Vertical) => "Split columns",
             Self::Split(Axis::Horizontal) => "Split rows",
+            Self::TogglePaneZoom => "Zoom or restore pane",
             Self::ClosePane => "Close pane",
             Self::CloseWorkspace => "Close workspace",
             Self::Tab(_) => "Go to tab",
@@ -163,6 +183,9 @@ impl Command {
             Self::Attach => "Attach file",
             Self::Capture => "Capture pane as PNG",
             Self::Copy => "Copy selection",
+            Self::SelectAll => "Select all text",
+            Self::CopyAll => "Copy all text",
+            Self::ClearViewport => "Clear terminal",
             Self::Paste => "Paste",
             Self::Connect => "Connect to a machine",
         }
@@ -210,8 +233,8 @@ mod tests {
             ids.iter().all(|id| id.starts_with("core.")
                 && id
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.')),
-            "ids are lowercase dotted names under core."
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_')),
+            "ids are lowercase names under core."
         );
         assert_eq!(Command::Tab(8).id(), "core.tab.9");
         assert_eq!(
@@ -257,7 +280,15 @@ mod tests {
     fn titles_starting_with_the_first_word_come_first_and_the_rest_keep_their_order() {
         let titles: Vec<&str> = matching("re").into_iter().map(Command::title).collect();
         assert_eq!(&titles[..2], ["Rename tab", "Rename workspace"]);
-        // "Previous tab" is listed before the renames but only contains the word.
-        assert_eq!(titles[2], "Previous tab");
+        // Commands containing the word retain their listed order after prefix matches.
+        let previous_tab = titles
+            .iter()
+            .position(|title| *title == "Previous tab")
+            .expect("previous tab");
+        let previous_workspace = titles
+            .iter()
+            .position(|title| *title == "Previous workspace")
+            .expect("previous workspace");
+        assert!(previous_tab >= 2 && previous_tab < previous_workspace);
     }
 }

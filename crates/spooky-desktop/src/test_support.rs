@@ -19,6 +19,7 @@ pub(crate) fn pane(rows: &[&str]) -> spooky_core::Pane {
                     text: text.trim_end().to_owned(),
                     fg: [0; 3],
                     bg: [0; 3],
+                    explicit_bg: false,
                     bold: false,
                     italic: false,
                     underline: false,
@@ -31,6 +32,7 @@ pub(crate) fn pane(rows: &[&str]) -> spooky_core::Pane {
         .collect();
     spooky_core::Pane {
         id: 1,
+        output_seq: 0,
         title: String::new(),
         cols: cols as u16,
         rows: rows.len() as u16,

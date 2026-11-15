@@ -37,6 +37,7 @@ pub(crate) enum Change {
     HeightPercent(f32),
     WidthPixels(f32),
     HeightPixels(f32),
+    BackgroundOpacity(f32),
     /// Width and height as percentages of the display.
     Preset(f32, f32),
     OnBlur(OnBlur),
@@ -196,6 +197,9 @@ impl Settings {
             Change::HeightPixels(value) => {
                 next.size = Some(SizeMode::Pixels);
                 next.height = Some(clamp(value, &config::HEIGHT_PX));
+            }
+            Change::BackgroundOpacity(value) => {
+                next.background_opacity = clamp(value, &config::BACKGROUND_OPACITY);
             }
             Change::Preset(width, height) => {
                 next.size = Some(SizeMode::Percent);

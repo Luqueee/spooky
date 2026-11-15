@@ -6,6 +6,7 @@ use crate::commands::Command;
 const RESIZE_GRIP: f32 = 5.0;
 use crate::{
     features::{
+        activity::Indicator,
         agent,
         splits::{Divider, THICKNESS},
     },
@@ -15,12 +16,12 @@ use crate::{
 use iced::{
     Alignment, Border, Color, Element, Length, Padding, Point, Rectangle, Vector, mouse,
     widget::{
-        Space, button, canvas, column, container, float, mouse_area, opaque, row, scrollable,
-        stack, text, text_input, tooltip,
+        Space, button, canvas, column, container, float, image, mouse_area, opaque, row,
+        scrollable, stack, text, text_input, tooltip,
     },
 };
 use spooky_core::{Axis, Layout};
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 /// Padding around each terminal pane. The divider geometry accounts for it.
 pub(crate) const PANE_PADDING_X: f32 = 9.0;
@@ -30,6 +31,41 @@ const HEADER_HEIGHT: f32 = 36.0;
 /// Width of a tab's close button plus the gap before it: a tab that is not selected
 /// keeps this much room so selecting tabs never moves or resizes the others.
 const TAB_CLOSE_SLOT: f32 = 23.0;
+
+fn brand_logo() -> Element<'static, Message> {
+    static LOGO: LazyLock<image::Handle> = LazyLock::new(|| {
+        image::Handle::from_bytes(include_bytes!("../../../../assets/logo-256.png").as_slice())
+    });
+    image(LOGO.clone())
+        .width(18)
+        .height(18)
+        .border_radius(3)
+        .into()
+}
+
+fn activity_marker(indicator: Option<Indicator>) -> Element<'static, Message> {
+    let Some(indicator) = indicator else {
+        return Space::new().width(10).into();
+    };
+    let (symbol, color, label) = match indicator {
+        Indicator::Output => ("•", ACCENT, "New terminal output"),
+        Indicator::AgentDone => ("✓", SUCCESS, "Agent response finished"),
+        Indicator::Attention => (
+            "!",
+            Color::from_rgb8(218, 184, 126),
+            "Agent needs your answer",
+        ),
+    };
+    tooltip(
+        container(text(symbol).size(11).color(color))
+            .width(10)
+            .center_x(10),
+        text(label).size(10),
+        tooltip::Position::Bottom,
+    )
+    .delay(Duration::from_millis(450))
+    .into()
+}
 
 /// What the split buttons say; the shortcut differs by platform.
 const SPLIT_COLUMNS: &str = if cfg!(target_os = "macos") {
@@ -160,7 +196,7 @@ impl App {
             .spacing(6);
         if self.sidebar_open {
             brand = brand
-                .push(icon(Icon::Ghost, TEXT))
+                .push(brand_logo())
                 .push(text("Spooky").size(11).color(TEXT))
                 .push(Space::new().width(Length::Fill));
         }
@@ -193,7 +229,13 @@ impl App {
                             },
                             if selected { TEXT } else { MUTED }
                         ),
-                        text(self.tab_label(tab)).size(11)
+                        text(self.tab_label(tab)).size(11),
+                        activity_marker(self.activity.indicator(&tab.layout)),
+                        if tab.locked || !tab.locked_panes.is_empty() {
+                            icon(Icon::Lock, MUTED)
+                        } else {
+                            Space::new().width(0).into()
+                        }
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),
@@ -206,9 +248,7 @@ impl App {
                 })
                 .style(move |t, s| selectable(selected, t, s))
                 .on_press(Message::Tab(id));
-                // Only the selected tab shows its close button; a middle click
-                // closes any tab and a right-click opens its menu. Closing always
-                // confirms first.
+                // Middle-click closes any tab and right-click opens its menu.
                 let entry = if selected {
                     row![
                         label,
@@ -279,6 +319,11 @@ impl App {
         ]
         .spacing(3)
         .align_y(Alignment::Center);
+        let chrome = SIDEBAR.scale_alpha(if self.background_opacity() < 1.0 {
+            0.55
+        } else {
+            1.0
+        });
         let header = container(
             row![
                 brand,
@@ -298,7 +343,7 @@ impl App {
             .align_y(Alignment::Center),
         )
         .height(HEADER_HEIGHT)
-        .style(|_| surface(SIDEBAR));
+        .style(move |_| surface(chrome));
         mouse_area(header).on_press(Message::DragWindow).into()
     }
 
@@ -450,6 +495,11 @@ impl App {
                 Message::ToggleConnection,
             ));
         }
+        let chrome = SIDEBAR.scale_alpha(if self.background_opacity() < 1.0 {
+            0.55
+        } else {
+            1.0
+        });
         container(column![
             container(column![section, machine].spacing(2)).padding([4, 6]),
             container(scrollable(spaces))
@@ -460,8 +510,26 @@ impl App {
         ])
         .width(SIDEBAR_WIDTH)
         .height(Length::Fill)
-        .style(|_| surface(SIDEBAR))
+        .style(move |_| surface(chrome))
         .into()
+    }
+
+    fn pane_locked(&self, pane: u64) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| {
+            s.workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .any(|t| t.locked_panes.contains(&pane))
+        })
+    }
+
+    fn tab_locked(&self, tab: u64) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| {
+            s.workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .any(|t| t.id == tab && t.locked)
+        })
     }
 
     fn terminal_layout<'a>(&'a self, layout: &'a Layout) -> Element<'a, Message> {
@@ -481,17 +549,38 @@ impl App {
                     if self.web_target() == Some(id) {
                         return super::web::area();
                     }
-                    return mouse_area(agent::view(&self.agents, id, conversation))
+                    let can_zoom = self
+                        .active()
+                        .is_some_and(|(_, tab)| matches!(tab.layout, Layout::Split { .. }));
+                    return mouse_area(agent::view(&self.agents, id, conversation, can_zoom))
                         .on_press(Message::FocusPane(id, Vec::new()))
                         .into();
                 }
                 let selected = self.pane == Some(*id);
-                let selection = self
-                    .selection
-                    .and_then(|s| (s.pane == *id).then_some((s.anchor, s.head)));
+                let selection = self.selection.and_then(|s| {
+                    (s.pane == *id).then_some(if s.all {
+                        (
+                            (0, 0),
+                            (pane.rows.saturating_sub(1), pane.cols.saturating_sub(1)),
+                        )
+                    } else {
+                        (s.anchor, s.head)
+                    })
+                });
                 let quick: Element<'_, Message> =
                     if self.hover_pane == Some(*id) && self.context_menu.is_none() {
                         self.pane_actions(*id, pane.scrolled > 0)
+                    } else if self.pane_locked(*id) {
+                        container(icon(Icon::Lock, MUTED))
+                            .align_right(Length::Fill)
+                            .align_top(Length::Fill)
+                            .padding(Padding {
+                                top: if pane.scrolled > 0 { 30.0 } else { 9.0 },
+                                right: 15.0,
+                                bottom: 0.0,
+                                left: 0.0,
+                            })
+                            .into()
                     } else {
                         Space::new().into()
                     };
@@ -512,8 +601,7 @@ impl App {
                     )
                     .padding([PANE_PADDING_Y, PANE_PADDING_X])
                     .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(|_| surface(BACKGROUND)),
+                    .height(Length::Fill),
                     quick
                 ])
                 .on_enter(Message::HoverPane(*id, true))
@@ -580,6 +668,24 @@ impl App {
                     SPLIT_ROWS,
                     Message::SplitPane(id, Axis::Horizontal)
                 ),
+                action(
+                    Icon::Zoom,
+                    if self.zoomed.is_some_and(|(_, pane)| pane == id) {
+                        "Restore pane"
+                    } else {
+                        "Zoom pane"
+                    },
+                    Message::TogglePaneZoom(id)
+                ),
+                action(
+                    Icon::Lock,
+                    if self.pane_locked(id) {
+                        "Unlock pane"
+                    } else {
+                        "Lock pane"
+                    },
+                    Message::TogglePaneLock(id)
+                ),
                 action(Icon::Close, "Close pane", Message::AskClosePaneOf(id)),
             ]
             .spacing(1),
@@ -623,6 +729,23 @@ impl App {
                         .padding([6, 10])
                         .style(primary)
                         .on_press(Message::Run(Command::NewWorkspace)),
+                ]
+                .spacing(10)
+                .align_x(Alignment::Center),
+            )
+            .center(Length::Fill)
+            .into()
+        } else if self
+            .active_workspace()
+            .is_some_and(|workspace| workspace.tabs.is_empty())
+        {
+            container(
+                column![
+                    text("No tabs in this workspace").size(12).color(MUTED),
+                    button(text("New tab").size(11))
+                        .padding([6, 10])
+                        .style(primary)
+                        .on_press(Message::Run(Command::NewTab)),
                 ]
                 .spacing(10)
                 .align_x(Alignment::Center),
@@ -684,22 +807,37 @@ impl App {
     }
 
     pub(crate) fn view(&self) -> Element<'_, Message> {
-        let screen = self.screen();
+        let background = BACKGROUND.scale_alpha(self.background_opacity());
+        let screen = container(self.screen())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| surface(background));
         match self.slide {
             // The content is moved inside the window, which clips it at its top edge.
             Some(slide) => float(screen)
                 .translate(move |bounds, _| Vector::new(0.0, -slide.hidden_share() * bounds.height))
                 .into(),
-            None => screen,
+            None => screen.into(),
         }
     }
 
     fn screen(&self) -> Element<'_, Message> {
         let content = if self.settings.is_shown() {
-            crate::features::settings::view(&self.settings, &self.config, self.hotkeys.is_some())
+            crate::features::settings::view(
+                &self.settings,
+                &self.config,
+                self.hotkeys.is_some(),
+                self.glass_available,
+                self.reduce_transparency,
+            )
         } else {
             self.active()
-                .map(|(_, tab)| self.terminal_layout(&tab.layout))
+                .map(|(_, tab)| {
+                    let pane = self
+                        .zoomed
+                        .and_then(|(id, pane)| (id == tab.id).then_some(pane));
+                    self.terminal_layout(crate::layout::visible_layout(&tab.layout, pane))
+                })
                 .unwrap_or_else(|| self.empty_state())
         };
         let grid = self
@@ -713,6 +851,11 @@ impl App {
                 )
             })
             .unwrap_or_default();
+        let chrome = SIDEBAR.scale_alpha(if self.background_opacity() < 1.0 {
+            0.55
+        } else {
+            1.0
+        });
         let footer = container(
             row![
                 dot(if self.online() { SUCCESS } else { MUTED }),
@@ -722,7 +865,25 @@ impl App {
                         .color(MUTED)
                         .wrapping(text::Wrapping::None),
                 )
-                .width(Length::Fill)
+                .width(Length::FillPortion(1))
+                .clip(true),
+                container(
+                    button(
+                        text(self.directory.text(self.connection.is_remote()))
+                            .size(9)
+                            .color(MUTED)
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .padding(0)
+                    .width(Length::Fill)
+                    .style(quiet)
+                    .on_press_maybe(
+                        self.directory
+                            .current()
+                            .map(|_| Message::ToggleDirectoryMenu)
+                    ),
+                )
+                .width(Length::FillPortion(2))
                 .clip(true),
                 text(grid).size(9).color(MUTED),
                 Space::new().width(10),
@@ -734,7 +895,7 @@ impl App {
         .padding([0, 10])
         .height(20)
         .align_y(Alignment::Center)
-        .style(|_| surface(SIDEBAR));
+        .style(move |_| surface(chrome));
         let mut main = column![].width(Length::Fill).height(Length::Fill);
         if !self.settings.is_shown()
             && let Some(bar) = crate::features::search::view(&self.search)
@@ -742,12 +903,7 @@ impl App {
             main = main.push(bar).push(separator());
         }
         let main = main
-            .push(
-                container(content)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(|_| surface(SIDEBAR)),
-            )
+            .push(container(content).width(Length::Fill).height(Length::Fill))
             .push(separator())
             .push(footer);
         let body: Element<'_, Message> = if self.sidebar_open {
@@ -780,6 +936,15 @@ impl App {
                         "Split rows",
                         Message::Run(Command::Split(Axis::Horizontal))
                     ),
+                    menu_item(
+                        Icon::Zoom,
+                        if self.zoomed.is_some() {
+                            "Restore pane"
+                        } else {
+                            "Zoom pane"
+                        },
+                        Message::Run(Command::TogglePaneZoom)
+                    ),
                     separator(),
                     menu_item(
                         Icon::Pencil,
@@ -787,6 +952,24 @@ impl App {
                         Message::Run(Command::RenameWorkspace)
                     ),
                     menu_item(Icon::Pencil, "Rename tab", Message::Run(Command::RenameTab)),
+                    menu_item(
+                        Icon::Lock,
+                        if self.pane_locked(self.pane.unwrap_or_default()) {
+                            "Unlock pane"
+                        } else {
+                            "Lock pane"
+                        },
+                        Message::TogglePaneLock(self.pane.unwrap_or_default())
+                    ),
+                    menu_item(
+                        Icon::Lock,
+                        if self.tab_locked(self.tab.unwrap_or_default()) {
+                            "Unlock tab"
+                        } else {
+                            "Lock tab"
+                        },
+                        Message::ToggleTabLock(self.tab.unwrap_or_default())
+                    ),
                     separator(),
                     menu_item(Icon::Close, "Close pane", Message::Run(Command::ClosePane))
                         .style(destructive),
@@ -833,6 +1016,70 @@ impl App {
             ]
             .into();
         }
+        if let Some((selection, path)) = &self.directory_menu {
+            let kind = match selection.kind {
+                spooky_core::DirectoryKind::Shell => "Recent directory",
+                spooky_core::DirectoryKind::AgentStart => "Agent starting directory",
+            };
+            let location = if self.connection.is_remote() {
+                format!(
+                    "SSH: {}",
+                    super::directory::full_path(self.connection.connected_target())
+                )
+            } else {
+                "This computer".into()
+            };
+            let mut items = column![
+                text(kind).size(12).color(TEXT),
+                text(location).size(10).color(MUTED),
+                container(
+                    scrollable(
+                        text(super::directory::full_path(path))
+                            .size(11)
+                            .color(TEXT)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                    )
+                    .height(Length::Shrink),
+                )
+                .max_height(90),
+                separator(),
+                menu_item(Icon::Copy, "Copy path", Message::CopyDirectory),
+            ]
+            .spacing(6);
+            if !self.connection.is_remote() && cfg!(any(target_os = "macos", target_os = "linux")) {
+                items = items.push(
+                    menu_item(
+                        Icon::Folder,
+                        if cfg!(target_os = "macos") {
+                            "Open in Finder"
+                        } else {
+                            "Open folder"
+                        },
+                        Message::OpenDirectory,
+                    )
+                    .on_press_maybe((!self.directory_opening).then_some(Message::OpenDirectory)),
+                );
+            }
+            let menu = container(items).padding(10).width(400).style(menu_style);
+            body = stack![
+                body,
+                opaque(
+                    mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                        .on_press(Message::ToggleDirectoryMenu)
+                        .on_right_press(Message::ToggleDirectoryMenu)
+                ),
+                container(opaque(menu))
+                    .center_x(Length::Fill)
+                    .align_bottom(Length::Fill)
+                    .padding(Padding {
+                        top: 0.0,
+                        right: 6.0,
+                        bottom: 25.0,
+                        left: 6.0
+                    }),
+            ]
+            .into();
+        }
         if let Some((target, position)) = self.context_menu {
             let items = match target {
                 ContextTarget::Workspace(id) => column![
@@ -848,6 +1095,15 @@ impl App {
                 ContextTarget::Tab(id) => column![
                     menu_item(Icon::Pencil, "Rename tab", Message::RenameTab(id)),
                     menu_item(Icon::Plus, "New tab", Message::Run(Command::NewTab)),
+                    menu_item(
+                        Icon::Lock,
+                        if self.tab_locked(id) {
+                            "Unlock tab"
+                        } else {
+                            "Lock tab"
+                        },
+                        Message::ToggleTabLock(id)
+                    ),
                     menu_item(Icon::Agent, "New agent", Message::Run(Command::NewAgent)),
                     separator(),
                     menu_item(Icon::Close, "Close tab", Message::AskCloseTab(id))
@@ -855,16 +1111,42 @@ impl App {
                 ],
                 ContextTarget::Pane(id) => {
                     let mut copy = menu_item(Icon::Copy, "Copy", Message::Run(Command::Copy));
-                    if self.selected_text().is_none() {
+                    if self.selected_text().is_none()
+                        && !self
+                            .selection
+                            .is_some_and(|selection| selection.pane == id && selection.all)
+                    {
                         copy = copy.on_press_maybe(None);
                     }
                     column![
                         copy,
                         menu_item(Icon::Paste, "Paste", Message::Run(Command::Paste)),
+                        menu_item(Icon::Copy, "Select all", Message::Run(Command::SelectAll)),
+                        menu_item(Icon::Copy, "Copy all", Message::Run(Command::CopyAll)),
+                        menu_item(
+                            Icon::Lock,
+                            if self.pane_locked(id) {
+                                "Unlock pane"
+                            } else {
+                                "Lock pane"
+                            },
+                            Message::TogglePaneLock(id)
+                        ),
+                        menu_item(
+                            Icon::Close,
+                            "Clear terminal",
+                            Message::Run(Command::ClearViewport)
+                        ),
                         menu_item(
                             Icon::Search,
                             "Find in scrollback",
                             Message::Run(Command::Find)
+                        ),
+                        menu_item(Icon::Plus, "New tab", Message::Run(Command::NewTab)),
+                        menu_item(
+                            Icon::Agent,
+                            "New agent here",
+                            Message::Run(Command::NewAgentHere)
                         ),
                         separator(),
                         menu_item(
@@ -876,6 +1158,15 @@ impl App {
                             Icon::SplitRows,
                             "Split rows",
                             Message::SplitPane(id, Axis::Horizontal)
+                        ),
+                        menu_item(
+                            Icon::Zoom,
+                            if self.zoomed.is_some_and(|(_, pane)| pane == id) {
+                                "Restore pane"
+                            } else {
+                                "Zoom pane"
+                            },
+                            Message::TogglePaneZoom(id)
                         ),
                         separator(),
                         menu_item(Icon::Close, "Close pane", Message::AskClosePaneOf(id))
@@ -966,62 +1257,49 @@ impl App {
                 None,
             );
         }
+        if let Some((request, id, error)) = &self.directory_fallback
+            && let Some(workspace) = self.fallback_workspace(request, *id)
+        {
+            let detail: String = error.chars().take(400).collect();
+            body = modal(
+                body,
+                column![
+                    text("Could not create from this pane").size(14).color(TEXT),
+                    text(detail).size(11).color(MUTED),
+                    text(format!(
+                        "Try the starting directory of workspace \"{}\"?\n{}",
+                        workspace.name, workspace.cwd
+                    ))
+                    .size(11)
+                    .color(MUTED),
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("Cancel").size(11))
+                            .padding([6, 10])
+                            .style(quiet)
+                            .on_press(Message::CancelWorkspaceDirectory),
+                        button(text("Use workspace directory").size(11))
+                            .padding([6, 10])
+                            .style(primary)
+                            .on_press(Message::UseWorkspaceDirectory),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(14)
+                .into(),
+                None,
+            );
+        }
         if let Some(confirm) = self.confirm {
-            let (title, detail) = match confirm {
-                Confirm::Pane(pane) => {
-                    // The server removes a tab with its last pane, and a workspace with its last tab.
-                    let located = self.snapshot.as_ref().and_then(|s| {
-                        s.workspaces.iter().find_map(|w| {
-                            w.tabs
-                                .iter()
-                                .find(|t| t.layout.contains(pane))
-                                .map(|t| (w, t))
-                        })
-                    });
-                    match located {
-                        Some((w, t))
-                            if matches!(t.layout, Layout::Pane(_)) && w.tabs.len() == 1 =>
-                        {
-                            (
-                                format!("Close \"{}\"?", w.name),
-                                "This is its only pane, so the workspace closes and its shell is terminated.",
-                            )
-                        }
-                        Some((_, t)) if matches!(t.layout, Layout::Pane(_)) => (
-                            format!("Close tab \"{}\"?", t.title),
-                            "This is its only pane, so the tab closes and its shell is terminated.",
-                        ),
-                        _ => (
-                            "Close this pane?".to_owned(),
-                            "Its shell and running commands will be terminated.",
-                        ),
-                    }
-                }
-                Confirm::Tab(id) => (
-                    format!(
-                        "Close tab \"{}\"?",
-                        self.snapshot
-                            .as_ref()
-                            .and_then(|s| s
-                                .workspaces
-                                .iter()
-                                .flat_map(|w| &w.tabs)
-                                .find(|t| t.id == id))
-                            .map_or("tab", |t| t.title.as_str())
-                    ),
-                    "Every shell and running command in this tab will be terminated. Closing a workspace's last tab closes the workspace.",
-                ),
-                Confirm::Workspace(id) => (
-                    format!(
-                        "Close \"{}\"?",
-                        self.snapshot
-                            .as_ref()
-                            .and_then(|s| s.workspaces.iter().find(|w| w.id == id))
-                            .map_or("workspace", |w| w.name.as_str())
-                    ),
-                    "Every shell and running command in this workspace will be terminated.",
-                ),
-            };
+            let Confirm::Workspace(id) = confirm;
+            let title = format!(
+                "Close \"{}\"?",
+                self.snapshot
+                    .as_ref()
+                    .and_then(|s| s.workspaces.iter().find(|w| w.id == id))
+                    .map_or("workspace", |w| w.name.as_str())
+            );
+            let detail = "Every shell and running command in this workspace will be terminated.";
             body = modal(
                 body,
                 column![

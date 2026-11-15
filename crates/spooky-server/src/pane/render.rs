@@ -42,6 +42,7 @@ impl RowCache {
 pub(crate) struct Style {
     pub(crate) fg: [u8; 3],
     pub(crate) bg: [u8; 3],
+    pub(crate) explicit_bg: bool,
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) underline: bool,
@@ -74,6 +75,7 @@ pub(crate) fn push_cell(
     let link = link_target(link);
     if text == " "
         && style.bg == spooky_core::DEFAULT_BACKGROUND
+        && !style.explicit_bg
         && !style.underline
         && !style.strikethrough
         && link.is_none()
@@ -86,6 +88,7 @@ pub(crate) fn push_cell(
         && last.width == 0
         && last.fg == style.fg
         && last.bg == style.bg
+        && last.explicit_bg == style.explicit_bg
         && last.bold == style.bold
         && last.italic == style.italic
         && last.underline == style.underline
@@ -101,6 +104,7 @@ pub(crate) fn push_cell(
         text,
         fg: style.fg,
         bg: style.bg,
+        explicit_bg: style.explicit_bg,
         bold: style.bold,
         italic: style.italic,
         underline: style.underline,

@@ -12,8 +12,8 @@ use crate::state::{
 use alacritty_terminal::grid::Scroll;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use spooky_core::{
-    EVEN_SPLIT, Layout, MAX_AGENT_ARG_BYTES, MAX_AGENT_ARGS, MAX_MESSAGE_BYTES, MIN_SPLIT_SHARE,
-    PROTOCOL_VERSION, Request, Response, ServerStatus, Snapshot, Tab, Workspace,
+    DirectoryKind, EVEN_SPLIT, Layout, MAX_AGENT_ARG_BYTES, MAX_AGENT_ARGS, MAX_MESSAGE_BYTES,
+    MIN_SPLIT_SHARE, PROTOCOL_VERSION, Request, Response, ServerStatus, Snapshot, Tab, Workspace,
 };
 use std::{
     collections::BTreeMap,
@@ -62,6 +62,7 @@ impl Saver {
 pub(crate) struct Server {
     pub(crate) state: Mutex<State>,
     pub(crate) changes: Arc<Changes>,
+    pub(crate) exit_changes: Arc<Changes>,
     pub(crate) layout_revision: AtomicU64,
     pub(crate) settings: Settings,
     pub(crate) started: Instant,
@@ -96,6 +97,7 @@ impl Server {
                 agents: BTreeMap::new(),
             }),
             changes: Arc::new(Changes::default()),
+            exit_changes: Arc::new(Changes::default()),
             layout_revision: AtomicU64::new(0),
             settings,
             started: Instant::now(),
@@ -113,6 +115,7 @@ impl Server {
     }
     fn changed(&self) {
         self.changes.advance(&self.layout_revision);
+        self.exit_changes.signal();
         self.saver.mark();
     }
     fn reserve_id(&self) -> Result<u64> {
@@ -149,20 +152,122 @@ impl Server {
             cwd,
             size,
             self.changes.clone(),
+            self.exit_changes.clone(),
             self.settings.scrollback_lines,
             self.shim.as_ref(),
         )
     }
-    fn workspace_cwd(&self, workspace: u64) -> Result<PathBuf> {
-        let state = self.lock()?;
-        Ok(PathBuf::from(
-            &state
+    /// Checks active panes on a worker, without inspecting processes under the workspace lock.
+    pub(crate) fn checkpoint_directories(&self, seen: &mut BTreeMap<u64, u64>) -> Result<()> {
+        let panes = {
+            let state = self.lock()?;
+            seen.retain(|id, _| state.panes.contains_key(id));
+            state.panes.values().cloned().collect::<Vec<_>>()
+        };
+        let mut changed = false;
+        for pane in panes {
+            let revision = pane.revision.load(Ordering::Acquire);
+            if seen.get(&pane.id) == Some(&revision) {
+                continue;
+            }
+            seen.insert(pane.id, revision);
+            if pane.refresh_saved_directory().unwrap_or(false) {
+                changed = true;
+            }
+        }
+        if changed {
+            self.saver.mark();
+        }
+        Ok(())
+    }
+    /// Removes normally exited shells without closing a workspace or an agent.
+    pub(crate) fn remove_exited_panes(&self) -> Result<()> {
+        let removed = {
+            let mut state = self.lock()?;
+            let ids: Vec<u64> = state
+                .panes
+                .iter()
+                .filter_map(|(&id, pane)| pane.normal_exit.load(Ordering::Acquire).then_some(id))
+                .collect();
+            let mut removed = Vec::new();
+            for id in ids {
+                if !state.agents.contains_key(&id) {
+                    let Some((wi, ti)) =
+                        state
+                            .workspaces
+                            .iter()
+                            .enumerate()
+                            .find_map(|(wi, workspace)| {
+                                workspace
+                                    .tabs
+                                    .iter()
+                                    .position(|tab| tab.layout.contains(id))
+                                    .map(|ti| (wi, ti))
+                            })
+                    else {
+                        continue;
+                    };
+                    let tabs = &mut state.workspaces[wi].tabs;
+                    if matches!(tabs[ti].layout, Layout::Pane(_)) {
+                        tabs.remove(ti);
+                    } else {
+                        if let Err(error) = remove_leaf(&mut tabs[ti].layout, id) {
+                            info!("could not remove exited pane {id}: {error:#}");
+                            continue;
+                        }
+                        tabs[ti].locked_panes.retain(|&pane| pane != id);
+                    }
+                }
+                if let Some(pane) = state.panes.remove(&id) {
+                    removed.push(pane);
+                }
+            }
+            if !removed.is_empty() {
+                self.changed();
+            }
+            removed
+        };
+        drop(removed);
+        Ok(())
+    }
+    fn workspace_cwd(&self, workspace: u64, source: Option<u64>) -> Result<PathBuf> {
+        let (fallback, pane, agent) = {
+            let state = self.lock()?;
+            let ws = state
                 .workspaces
                 .iter()
                 .find(|w| w.id == workspace)
-                .context("workspace not found")?
-                .cwd,
-        ))
+                .context("workspace not found")?;
+            if let Some(id) = source {
+                ensure!(
+                    ws.tabs.iter().any(|tab| tab.layout.contains(id)),
+                    "source pane is not in the workspace"
+                );
+                (
+                    None,
+                    state.panes.get(&id).cloned(),
+                    state.agents.get(&id).cloned(),
+                )
+            } else {
+                (Some(PathBuf::from(&ws.cwd)), None, None)
+            }
+        };
+        if let Some(agent) = agent {
+            return validated_cwd(Some(
+                agent
+                    .cwd()
+                    .to_str()
+                    .context("working directory is not valid UTF-8")?,
+            ));
+        }
+        if let Some(pane) = pane {
+            let cwd = pane.current_directory()?;
+            return validated_cwd(Some(
+                cwd.to_str()
+                    .context("working directory is not valid UTF-8")?,
+            ));
+        }
+        fallback.context("source pane not found")
     }
     /// Starts `backend` with the user's `args` in `cwd`: over the terminal pane `over`,
     /// which keeps running underneath and shows again when the agent is closed, or,
@@ -201,6 +306,8 @@ impl Server {
                 id: tab,
                 title: "Agent".into(),
                 renamed: false,
+                locked: false,
+                locked_panes: Vec::new(),
                 layout: Layout::Pane(id),
             });
         } else if !state.panes.contains_key(&id) {
@@ -238,7 +345,7 @@ impl Server {
             .save_lock
             .lock()
             .map_err(|_| anyhow!("save state poisoned"))?;
-        let (next_id, workspaces, agents, size) = {
+        let (next_id, workspaces, agents, panes, size) = {
             let state = self.lock()?;
             let agents = state
                 .agents
@@ -253,13 +360,28 @@ impl Server {
                 state.next_id,
                 state.workspaces.clone(),
                 agents,
+                state
+                    .panes
+                    .iter()
+                    .map(|(&id, pane)| (id, pane.clone()))
+                    .collect::<Vec<_>>(),
                 largest_pane(&state, self.fallback_size),
             )
         };
+        let mut directories = BTreeMap::new();
+        for (id, pane) in panes {
+            let _ = pane.refresh_saved_directory();
+            let directory = pane.saved_directory()?;
+            let path = directory
+                .to_str()
+                .context("saved directory is not valid UTF-8")?;
+            directories.insert(id, path.to_owned());
+        }
         persist::store(
             &self.state_dir,
             &Saved::new(next_id, workspaces)
                 .with_agents(agents)
+                .with_pane_directories(directories)
                 .sized(size.cols, size.rows),
         )
     }
@@ -270,6 +392,7 @@ impl Server {
         let (cols, rows) = saved.size();
         let size = Size { cols, rows };
         let agents: BTreeMap<u64, &SavedAgent> = saved.agents.iter().map(|a| (a.pane, a)).collect();
+        let directories = saved.pane_directories;
         let mut state = self.lock()?;
         state.next_id = saved.next_id;
         for mut workspace in saved.workspaces {
@@ -282,14 +405,24 @@ impl Server {
                 let mut panes = Vec::new();
                 let mut resumed = Vec::new();
                 let spawned = ids.into_iter().try_for_each(|id| {
+                    let shell_cwd = directories.get(&id).and_then(|path| {
+                        match validated_cwd(Some(path)) {
+                            Ok(directory) => Some(directory),
+                            Err(error) => {
+                                info!("cannot restore directory for pane {id}: {error:#}; using the workspace directory");
+                                None
+                            }
+                        }
+                    });
+                    let shell_cwd = shell_cwd.as_deref().unwrap_or(&cwd);
                     match agents.get(&id) {
                         Some(saved) => {
                             resumed.push((id, self.restore_agent(id, saved)?));
                             if saved.covers {
-                                panes.push((id, self.spawn_pane(id, &cwd, size)?));
+                                panes.push((id, self.spawn_pane(id, shell_cwd, size)?));
                             }
                         }
-                        None => panes.push((id, self.spawn_pane(id, &cwd, size)?)),
+                        None => panes.push((id, self.spawn_pane(id, shell_cwd, size)?)),
                     }
                     Ok::<(), anyhow::Error>(())
                 });
@@ -305,10 +438,8 @@ impl Server {
                     ),
                 }
             }
-            if !tabs.is_empty() {
-                workspace.tabs = tabs;
-                state.workspaces.push(workspace);
-            }
+            workspace.tabs = tabs;
+            state.workspaces.push(workspace);
         }
         Ok(())
     }
@@ -404,6 +535,33 @@ impl Server {
                     panes,
                 }));
             }
+            Request::Directory { pane } => {
+                let (shell, agent) = {
+                    let state = self.lock()?;
+                    (
+                        state.panes.get(&pane).cloned(),
+                        state.agents.get(&pane).cloned(),
+                    )
+                };
+                let (kind, directory) = if let Some(agent) = agent {
+                    (DirectoryKind::AgentStart, agent.cwd().to_path_buf())
+                } else if let Some(shell) = shell {
+                    let cwd = shell.current_directory()?;
+                    let path = cwd
+                        .to_str()
+                        .context("working directory is not valid UTF-8")?;
+                    (DirectoryKind::Shell, validated_cwd(Some(path))?)
+                } else {
+                    bail!("pane not found");
+                };
+                return Ok(Response::Directory {
+                    kind,
+                    path: directory
+                        .to_str()
+                        .context("working directory is not valid UTF-8")?
+                        .to_owned(),
+                });
+            }
             Request::CreateWorkspace { name, cwd } => {
                 validate_name(&name)?;
                 let cwd = validated_cwd(cwd.as_deref())?;
@@ -422,6 +580,8 @@ impl Server {
                         id: tab,
                         title: spooky_core::DEFAULT_TITLE.into(),
                         renamed: false,
+                        locked: false,
+                        locked_panes: Vec::new(),
                         layout: Layout::Pane(id),
                     }],
                 });
@@ -438,19 +598,13 @@ impl Server {
                     .name = name;
                 self.changed();
             }
-            Request::CreateTab { workspace, title } => {
+            Request::CreateTab {
+                workspace,
+                source,
+                title,
+            } => {
                 validate_name(&title)?;
-                let cwd = {
-                    let state = self.lock()?;
-                    PathBuf::from(
-                        &state
-                            .workspaces
-                            .iter()
-                            .find(|w| w.id == workspace)
-                            .context("workspace not found")?
-                            .cwd,
-                    )
-                };
+                let cwd = self.workspace_cwd(workspace, source)?;
                 let id = self.reserve_id()?;
                 let tab = self.reserve_id()?;
                 let size = self.pane_size()?;
@@ -465,6 +619,8 @@ impl Server {
                     id: tab,
                     title,
                     renamed: false,
+                    locked: false,
+                    locked_panes: Vec::new(),
                     layout: Layout::Pane(id),
                 });
                 state.panes.insert(id, pane);
@@ -483,6 +639,32 @@ impl Server {
                 tab.renamed = true;
                 self.changed();
             }
+            Request::SetTabLocked { tab, locked } => {
+                let mut state = self.lock()?;
+                let tab = state
+                    .workspaces
+                    .iter_mut()
+                    .flat_map(|w| &mut w.tabs)
+                    .find(|t| t.id == tab)
+                    .context("tab not found")?;
+                tab.locked = locked;
+                self.changed();
+            }
+            Request::SetPaneLocked { pane, locked } => {
+                let mut state = self.lock()?;
+                let tab = state
+                    .workspaces
+                    .iter_mut()
+                    .flat_map(|w| &mut w.tabs)
+                    .find(|t| t.layout.contains(pane))
+                    .context("pane not found")?;
+                if locked && !tab.locked_panes.contains(&pane) {
+                    tab.locked_panes.push(pane);
+                } else if !locked {
+                    tab.locked_panes.retain(|&id| id != pane);
+                }
+                self.changed();
+            }
             Request::CloseTab { tab } => {
                 let removed = {
                     let mut state = self.lock()?;
@@ -497,10 +679,15 @@ impl Server {
                         .iter()
                         .position(|t| t.id == tab)
                         .context("tab not found")?;
+                    ensure!(
+                        !ws.tabs[ti].locked,
+                        "tab is locked; unlock it before closing"
+                    );
+                    ensure!(
+                        ws.tabs[ti].locked_panes.is_empty(),
+                        "tab contains a locked pane"
+                    );
                     let closed = ws.tabs.remove(ti);
-                    if ws.tabs.is_empty() {
-                        state.workspaces.remove(wi);
-                    }
                     let mut ids = Vec::new();
                     closed.layout.panes(&mut ids);
                     let panes = ids
@@ -518,8 +705,8 @@ impl Server {
                 // Shells are terminated outside the lock.
                 drop(removed);
             }
-            Request::Split { pane, axis } => {
-                let (cwd, size) = {
+            Request::Split { pane, axis, here } => {
+                let (workspace, size) = {
                     let state = self.lock()?;
                     if state.agents.contains_key(&pane) {
                         bail!("an agent pane cannot be split");
@@ -530,8 +717,9 @@ impl Server {
                         .iter()
                         .find(|w| w.tabs.iter().any(|t| t.layout.contains(pane)))
                         .context("pane is detached")?;
-                    (PathBuf::from(&ws.cwd), p.size())
+                    (ws.id, p.size())
                 };
+                let cwd = self.workspace_cwd(workspace, here.then_some(pane))?;
                 let id = self.reserve_id()?;
                 let split = self.reserve_id()?;
                 let new_pane = self.spawn_pane(id, &cwd, size)?;
@@ -582,9 +770,30 @@ impl Server {
                 term.scroll_display(Scroll::Delta(lines));
                 pane.changes.advance(&pane.revision);
             }
+            Request::ClearViewport { pane } => self.pane(pane)?.clear_viewport()?,
+            Request::CopyAll { pane } => {
+                let text = self.pane(pane)?.copy_all()?;
+                return Ok(Response::AllText { pane, text });
+            }
             Request::ClosePane { pane } => {
                 let removed = {
                     let mut state = self.lock()?;
+                    let tab = state
+                        .workspaces
+                        .iter()
+                        .flat_map(|w| &w.tabs)
+                        .find(|t| t.layout.contains(pane))
+                        .context("pane not found")?;
+                    ensure!(
+                        !tab.locked_panes.contains(&pane),
+                        "pane is locked; unlock it before closing"
+                    );
+                    if !(state.panes.contains_key(&pane) && state.agents.contains_key(&pane)) {
+                        ensure!(
+                            !(tab.locked && matches!(tab.layout, Layout::Pane(_))),
+                            "tab is locked; unlock it before closing its last pane"
+                        );
+                    }
                     if state.panes.contains_key(&pane)
                         && let Some(agent) = state.agents.remove(&pane)
                     {
@@ -610,9 +819,6 @@ impl Server {
                     } else {
                         remove_leaf(&mut ws.tabs[ti].layout, pane)?;
                     }
-                    if ws.tabs.is_empty() {
-                        state.workspaces.remove(wi);
-                    }
                     let removed = state.panes.remove(&pane);
                     let agent = state.agents.remove(&pane);
                     let removed = (removed, agent);
@@ -629,6 +835,13 @@ impl Server {
                         .iter()
                         .position(|w| w.id == workspace)
                         .context("workspace not found")?;
+                    ensure!(
+                        state.workspaces[index]
+                            .tabs
+                            .iter()
+                            .all(|t| !t.locked && t.locked_panes.is_empty()),
+                        "workspace contains a locked tab or pane"
+                    );
                     let ws = state.workspaces.remove(index);
                     let mut ids = Vec::new();
                     for tab in ws.tabs {
@@ -685,8 +898,12 @@ impl Server {
                 };
                 return Ok(Response::Clipboard { seq, text });
             }
-            Request::CreateAgent { workspace, backend } => {
-                let cwd = self.workspace_cwd(workspace)?;
+            Request::CreateAgent {
+                workspace,
+                source,
+                backend,
+            } => {
+                let cwd = self.workspace_cwd(workspace, source)?;
                 self.create_agent(workspace, &backend, &[], cwd, None)?;
             }
             Request::OpenAgent {

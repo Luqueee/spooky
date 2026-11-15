@@ -1,4 +1,4 @@
-//! PTY exit preserves rendered output and navigable terminal history.
+//! A shell terminated by a signal preserves rendered output and terminal history.
 #![cfg(unix)]
 
 use spooky_core::{Request, Response, Snapshot};
@@ -82,7 +82,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn exited_shell_keeps_scrollback_and_invalidates_revision() {
+fn signaled_shell_keeps_scrollback_and_invalidates_revision() {
     let mut server = Fixture::new();
     assert!(matches!(
         server.request(Request::CreateWorkspace {
@@ -104,7 +104,8 @@ fn exited_shell_keeps_scrollback_and_invalidates_revision() {
     assert!(matches!(
         server.request(Request::Input {
             pane,
-            bytes: b"printf 'FIRSTLINE\\nsecond\\nthird\\nfourth\\nfifth\\n'; exit\n".to_vec()
+            bytes: b"printf 'FIRSTLINE\\nsecond\\nthird\\nfourth\\nfifth\\n'; kill -KILL $$\n"
+                .to_vec()
         }),
         Response::Ok
     ));

@@ -16,6 +16,7 @@ use std::{
     },
     sync::{Arc, atomic::Ordering},
     thread,
+    time::Duration,
 };
 
 pub(crate) fn serve() -> Result<()> {
@@ -87,6 +88,35 @@ pub(crate) fn serve() -> Result<()> {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     let saver = server.clone();
     thread::spawn(move || save_loop(&saver));
+    let checkpoints = server.clone();
+    thread::spawn(move || {
+        let mut seen = std::collections::BTreeMap::new();
+        loop {
+            thread::sleep(Duration::from_secs(2));
+            if let Err(error) = checkpoints.checkpoint_directories(&mut seen) {
+                info!("checking shell directories failed: {error:#}");
+            }
+        }
+    });
+    let reaper = server.clone();
+    thread::spawn(move || {
+        let mut since = None;
+        loop {
+            match reaper.exit_changes.wait(since) {
+                Ok(revision) if since != Some(revision) => {
+                    if let Err(error) = reaper.remove_exited_panes() {
+                        info!("removing exited panes failed: {error:#}");
+                    }
+                    since = Some(revision);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    info!("exit notification failed: {error:#}");
+                    break;
+                }
+            }
+        }
+    });
     info!("listening on {}", path.display());
     for stream in listener.incoming() {
         match stream {
