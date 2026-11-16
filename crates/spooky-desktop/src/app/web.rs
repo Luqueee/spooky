@@ -6,7 +6,7 @@
 //! fills its tab is shown this way; a split keeps the native agent view.
 
 use super::{App, Message};
-use crate::{features::agent::web, platform::webview, ui::BACKGROUND};
+use crate::{features::agent::web, platform::webview, ui::color_palette_for};
 use iced::{
     Element, Length, Rectangle, Task, mouse,
     widget::{canvas, canvas::Geometry},
@@ -67,12 +67,16 @@ impl canvas::Program<Message> for Area {
         &self,
         _: &Self::State,
         renderer: &iced::Renderer,
-        _: &iced::Theme,
+        theme: &iced::Theme,
         bounds: Rectangle,
         _: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), BACKGROUND);
+        frame.fill_rectangle(
+            iced::Point::ORIGIN,
+            bounds.size(),
+            color_palette_for(theme).background,
+        );
         vec![frame.into_geometry()]
     }
 }
@@ -137,7 +141,13 @@ impl App {
         let Some(agent) = self.current_pane().and_then(|p| p.agent.as_ref()) else {
             return Task::none();
         };
-        let state = web::state(pane, agent, self.agents.attachments(pane));
+        let state = web::state(
+            pane,
+            agent,
+            self.agents.attachments(pane),
+            self.theme_id(),
+            self.appearance_colors(),
+        );
         if state != self.web.pushed {
             webview::push(&state);
             self.web.pushed = state;

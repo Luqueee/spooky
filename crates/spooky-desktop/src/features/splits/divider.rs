@@ -1,9 +1,6 @@
 //! The draggable divider between the two sides of a split.
 
-use crate::{
-    Message,
-    ui::{ACCENT, BACKGROUND, BORDER},
-};
+use crate::{Message, ui::color_palette_for};
 
 /// The message a divider sends.
 fn tell(message: super::Message) -> Message {
@@ -98,19 +95,18 @@ impl canvas::Program<Message> for Divider {
         &self,
         state: &State,
         renderer: &iced::Renderer,
-        _: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let colors = color_palette_for(theme);
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // The gap takes the terminals' own background, so the two panes read as
-        // one surface with a single hairline between them.
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
+        // Leave the gap transparent so it shares the panes' blurred background.
         let active = state.dragging || cursor.is_over(bounds);
         let (thickness, color) = if active {
-            (2.0, ACCENT.scale_alpha(0.7))
+            (2.0, colors.accent.scale_alpha(0.7))
         } else {
-            (1.0, BORDER)
+            (1.0, colors.border)
         };
         let (origin, size) = match self.axis {
             Axis::Vertical => (

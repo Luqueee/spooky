@@ -8,7 +8,7 @@ mod page;
 pub(crate) use page::view;
 
 use crate::{
-    config::{self, Config, OnBlur, Osc52, SizeMode},
+    config::{self, Appearance, Config, OnBlur, Osc52, SizeMode},
     shortcuts,
 };
 use iced::keyboard;
@@ -40,6 +40,7 @@ pub(crate) enum Change {
     BackgroundOpacity(f32),
     /// Width and height as percentages of the display.
     Preset(f32, f32),
+    Appearance(String),
     OnBlur(OnBlur),
     DockIcon(bool),
     CursorBlink(bool),
@@ -216,6 +217,21 @@ impl Settings {
                 next.on_blur = on_blur;
             }
             Change::DockIcon(show) => next.dock_icon = show,
+            Change::Appearance(id) => match id.as_str() {
+                "spooky" => {
+                    next.appearance = Appearance::Spooky;
+                    next.custom_theme = None;
+                }
+                "nord" => {
+                    next.appearance = Appearance::Nord;
+                    next.custom_theme = None;
+                }
+                "dracula" => {
+                    next.appearance = Appearance::Dracula;
+                    next.custom_theme = None;
+                }
+                _ => next.custom_theme = Some(id),
+            },
             Change::CursorBlink(on) => next.cursor_blink = on,
             Change::Osc52(on) => next.osc52 = if on { Osc52::Write } else { Osc52::Off },
             Change::RecordShortcut => {
@@ -399,6 +415,11 @@ mod tests {
             [Effect::OnBlur(OnBlur::Top)]
         );
         assert_eq!(with(&|c| c.cursor_blink = false), [], "read at draw time");
+        assert_eq!(
+            with(&|c| c.appearance = Appearance::Nord),
+            [],
+            "the view reads the appearance directly"
+        );
     }
 
     #[test]

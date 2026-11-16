@@ -239,11 +239,12 @@ impl canvas::Program<Message> for Terminal<'_> {
             _ => None,
         }
     }
+
     fn draw(
         &self,
         state: &State,
         renderer: &iced::Renderer,
-        _: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
@@ -338,7 +339,7 @@ impl canvas::Program<Message> for Terminal<'_> {
                     f32::from(link.row) * ch + ch - 2.0,
                 ),
                 Size::new(f32::from(link.end.saturating_sub(link.start) + 1) * cw, 1.0),
-                crate::ui::ACCENT,
+                crate::ui::color_palette_for(theme).accent,
             );
         }
         if self.pane.cursor.visible && self.cursor_on {
@@ -347,9 +348,9 @@ impl canvas::Program<Message> for Terminal<'_> {
                 f32::from(self.pane.cursor.row) * ch,
             );
             let color = if self.focused {
-                crate::ui::ACCENT
+                crate::ui::color_palette_for(theme).accent
             } else {
-                Color::from_rgb8(100, 110, 125)
+                crate::ui::color_palette_for(theme).muted
             };
             match (self.pane.cursor.shape, self.focused) {
                 // A translucent block keeps the glyph under it readable.
@@ -383,33 +384,6 @@ impl canvas::Program<Message> for Terminal<'_> {
                 }
             }
         }
-        if self.pane.scrolled > 0 && self.pane.history > 0 {
-            let history = self.pane.history as f32;
-            let track = bounds.height;
-            let thumb = (track * f32::from(self.pane.rows) / (f32::from(self.pane.rows) + history))
-                .clamp(16.0, track);
-            let from_top = 1.0 - self.pane.scrolled as f32 / history;
-            frame.fill_rectangle(
-                Point::new(bounds.width - 4.0, (track - thumb) * from_top),
-                Size::new(3.0, thumb),
-                crate::ui::MUTED.scale_alpha(0.7),
-            );
-            let label = format!("↑ {} of {} lines", self.pane.scrolled, self.pane.history);
-            let width = label.chars().count() as f32 * 6.2 + 14.0;
-            frame.fill_rectangle(
-                Point::new(bounds.width - width - 12.0, 4.0),
-                Size::new(width, 18.0),
-                crate::ui::SIDEBAR.scale_alpha(0.9),
-            );
-            frame.fill_text(canvas::Text {
-                content: label,
-                position: Point::new(bounds.width - width - 5.0, 8.0),
-                color: crate::ui::TEXT,
-                size: 10.0.into(),
-                font: self.font.font,
-                ..Default::default()
-            });
-        }
         vec![frame.into_geometry()]
     }
     fn mouse_interaction(
@@ -427,5 +401,39 @@ impl canvas::Program<Message> for Terminal<'_> {
         } else {
             mouse::Interaction::Text
         }
+    }
+}
+
+/// A passive scrollback indicator drawn at the pane's outer edge.
+pub(crate) struct ScrollIndicator<'a> {
+    pub pane: &'a Pane,
+}
+
+impl canvas::Program<Message> for ScrollIndicator<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &iced::Renderer,
+        theme: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        if self.pane.scrolled > 0 && self.pane.history > 0 {
+            let history = self.pane.history as f32;
+            let thumb = (bounds.height * f32::from(self.pane.rows)
+                / (f32::from(self.pane.rows) + history))
+                .clamp(0.0, bounds.height);
+            let thumb = thumb.max(16.0_f32.min(bounds.height));
+            let from_top = 1.0 - self.pane.scrolled as f32 / history;
+            frame.fill_rectangle(
+                Point::new(bounds.width - 2.0, (bounds.height - thumb) * from_top),
+                Size::new(2.0, thumb),
+                crate::ui::color_palette_for(theme).muted.scale_alpha(0.55),
+            );
+        }
+        vec![frame.into_geometry()]
     }
 }

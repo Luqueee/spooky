@@ -4,9 +4,10 @@
 //! trusted to be well behaved: every message it posts is parsed into a closed set of
 //! actions, bounded, and mapped to the same [`Message`]s the native view sends. Nothing the
 //! page says reaches the server or the agent any other way.
-
 use super::{Attachment, Message};
-use crate::{commands::Command, shortcuts};
+use crate::commands::Command;
+use crate::shortcuts;
+use crate::ui::ColorPalette;
 use iced::keyboard::{
     Key, Modifiers,
     key::{Code, Named, Physical},
@@ -239,15 +240,62 @@ struct File<'a> {
 /// What the page is given: the agent of the pane on show, what the next message carries,
 /// and the platform it runs on.
 #[derive(serde::Serialize)]
+struct CssColors {
+    background: String,
+    sidebar: String,
+    hover: String,
+    selected: String,
+    border: String,
+    text: String,
+    muted: String,
+    accent: String,
+    success: String,
+    warning: String,
+    danger: String,
+}
+
+#[derive(serde::Serialize)]
 struct View<'a> {
     pane: u64,
     agent: &'a Agent,
     attachments: Vec<File<'a>>,
     platform: &'static str,
+    appearance: &'a str,
+    colors: CssColors,
+}
+
+fn css_colors(colors: ColorPalette) -> CssColors {
+    let color = |color: iced::Color| {
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            (color.r * 255.0).round() as u8,
+            (color.g * 255.0).round() as u8,
+            (color.b * 255.0).round() as u8,
+        )
+    };
+    CssColors {
+        background: color(colors.background),
+        sidebar: color(colors.sidebar),
+        hover: color(colors.hover),
+        selected: color(colors.selected),
+        border: color(colors.border),
+        text: color(colors.text),
+        muted: color(colors.muted),
+        accent: color(colors.accent),
+        success: color(colors.success),
+        warning: color(colors.warning),
+        danger: color(colors.danger),
+    }
 }
 
 /// The JSON the page's `update` function takes.
-pub(crate) fn state(pane: u64, agent: &Agent, attachments: &[Attachment]) -> String {
+pub(crate) fn state(
+    pane: u64,
+    agent: &Agent,
+    attachments: &[Attachment],
+    appearance: &str,
+    colors: ColorPalette,
+) -> String {
     let view = View {
         pane,
         agent,
@@ -264,6 +312,8 @@ pub(crate) fn state(pane: u64, agent: &Agent, attachments: &[Attachment]) -> Str
         } else {
             "other"
         },
+        appearance,
+        colors: css_colors(colors),
     };
     // A conversation always serializes; the empty view is the page's own idle state.
     serde_json::to_string(&view).unwrap_or_else(|_| "{\"pane\":null,\"agent\":null}".into())
@@ -405,8 +455,14 @@ mod tests {
                 preview: None,
             },
         ];
-        let value: serde_json::Value =
-            serde_json::from_str(&state(1, &agent, &files)).expect("the state is JSON");
+        let value: serde_json::Value = serde_json::from_str(&state(
+            1,
+            &agent,
+            &files,
+            "spooky",
+            crate::ui::color_palette(crate::config::Appearance::Spooky),
+        ))
+        .expect("the state is JSON");
         assert_eq!(value["attachments"][0]["named"], "'/tmp/a b.png'");
         assert_eq!(
             value["attachments"][0]["preview"],
@@ -434,10 +490,17 @@ mod tests {
             }],
             ..Agent::default()
         };
-        let value: serde_json::Value =
-            serde_json::from_str(&state(7, &agent, &[])).expect("the state is JSON");
+        let value: serde_json::Value = serde_json::from_str(&state(
+            7,
+            &agent,
+            &[],
+            "nord",
+            crate::ui::color_palette(crate::config::Appearance::Nord),
+        ))
+        .expect("the state is JSON");
         assert_eq!(value["pane"], 7);
         assert_eq!(value["agent"]["messages"][0]["role"], "User");
+        assert_eq!(value["appearance"], "nord");
         assert_eq!(value["agent"]["dialogs"][0]["kind"], "Confirm");
         assert!(value["agent"]["messages"][0].get("tool").is_none());
     }

@@ -41,6 +41,16 @@ pub(crate) enum OnBlur {
     /// Stays above every other window.
     Top,
 }
+/// The application's built-in dark color palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Appearance {
+    /// The original Spooky palette.
+    #[default]
+    Spooky,
+    Nord,
+    Dracula,
+}
 
 /// Smallest window the application lays out well.
 pub(crate) const MIN_WINDOW: Size = Size::new(720.0, 440.0);
@@ -56,7 +66,7 @@ pub(crate) const WIDTH_PX: std::ops::RangeInclusive<f32> = 400.0..=4096.0;
 pub(crate) const HEIGHT_PX: std::ops::RangeInclusive<f32> = 200.0..=2160.0;
 pub(crate) const WIDTH_PERCENT: std::ops::RangeInclusive<f32> = 30.0..=100.0;
 pub(crate) const HEIGHT_PERCENT: std::ops::RangeInclusive<f32> = 20.0..=100.0;
-pub(crate) const BACKGROUND_OPACITY: std::ops::RangeInclusive<f32> = 50.0..=100.0;
+pub(crate) const BACKGROUND_OPACITY: std::ops::RangeInclusive<f32> = 20.0..=100.0;
 
 /// Everything `config.toml` can set. Unknown keys are an error, so a typo is never
 /// silently ignored.
@@ -88,12 +98,17 @@ pub(crate) struct Config {
     /// dropdown terminals, whenever the global shortcut is available to bring it back.
     pub dock_icon: bool,
     /// Whether a program's OSC 52 request may set the clipboard: `"write"` (the
-    /// default; the footer says when it happens) or `"off"`.
+    /// default; the header says when it happens) or `"off"`.
     pub osc52: Osc52,
     /// Whether a blinking cursor blinks. Off keeps every cursor solid.
     pub cursor_blink: bool,
     /// What the window does when it loses the keyboard focus.
     pub on_blur: OnBlur,
+    /// Built-in application palette; terminal ANSI colors are not changed.
+    pub appearance: Appearance,
+    /// Selected user theme id, when a matching file is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_theme: Option<String>,
 }
 
 impl Default for Config {
@@ -112,6 +127,8 @@ impl Default for Config {
             osc52: Osc52::Write,
             cursor_blink: true,
             on_blur: OnBlur::None,
+            appearance: Appearance::default(),
+            custom_theme: None,
         }
     }
 }
@@ -124,6 +141,11 @@ impl Config {
             .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))
             .ok_or_else(|| anyhow::anyhow!("Cannot determine configuration directory"))?;
         Ok(home.join("spooky/config.toml"))
+    }
+
+    /// `$XDG_CONFIG_HOME/spooky/themes`, or `~/.config/spooky/themes`.
+    pub(crate) fn themes_dir() -> anyhow::Result<PathBuf> {
+        Ok(crate::ui::themes_directory(&Self::path()?))
     }
 
     /// The configuration file, or the defaults when there is none.
@@ -175,7 +197,15 @@ impl Config {
             self.background_opacity,
             &BACKGROUND_OPACITY,
         )?;
-        check("height_percent", self.height_percent, &HEIGHT_PERCENT)
+        check("height_percent", self.height_percent, &HEIGHT_PERCENT)?;
+        if self
+            .custom_theme
+            .as_deref()
+            .is_some_and(|id| !crate::ui::valid_theme_id(id))
+        {
+            return Err("custom_theme must be a lowercase theme id".into());
+        }
+        Ok(())
     }
 
     /// Writes the file atomically: a reader sees the old or the new one, never half.
@@ -269,7 +299,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, OnBlur, SizeMode};
+    use super::{Appearance, Config, OnBlur, SizeMode};
     use iced::Size;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -286,6 +316,21 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("scratch directory");
         dir
+    }
+
+    #[test]
+    fn appearance_defaults_for_existing_files_and_roundtrips() {
+        assert_eq!(Config::default().appearance, Appearance::Spooky);
+        assert_eq!(
+            parse("").expect("existing config").appearance,
+            Appearance::Spooky
+        );
+        assert_eq!(
+            parse("appearance = \"nord\"")
+                .expect("selected theme")
+                .appearance,
+            Appearance::Nord
+        );
     }
 
     #[test]
@@ -319,12 +364,16 @@ mod tests {
     fn mistakes_in_the_file_are_errors_not_silent_defaults() {
         assert!(parse("shortcutt = \"F10\"").is_err(), "unknown key");
         assert!(parse("osc52 = \"read\"").is_err(), "unknown value");
+        assert!(
+            parse("appearance = \"light\"").is_err(),
+            "only built-in appearances are accepted"
+        );
         for bad in [
             "font_size = 4.0",
             "width = 100.0",
             "height_percent = 5.0",
             "width_percent = 140.0",
-            "background_opacity = 49.0",
+            "background_opacity = 19.0",
             "background_opacity = 101.0",
         ] {
             let config = parse(bad).expect("parses");
@@ -334,7 +383,7 @@ mod tests {
             let config = parse(bad).expect("parses");
             assert!(config.validate().is_err(), "{bad}");
         }
-        let transparent = parse("background_opacity = 50.0").expect("parses");
+        let transparent = parse("background_opacity = 20.0").expect("parses");
         assert!(transparent.validate().is_ok());
         let named = parse("font_family = \"JetBrains Mono\"").expect("parses");
         assert!(named.validate().is_ok());
@@ -351,6 +400,8 @@ mod tests {
             on_blur: OnBlur::Hide,
             cursor_blink: false,
             size: Some(SizeMode::Percent),
+            appearance: Appearance::Dracula,
+            custom_theme: Some("ember".into()),
             ..Config::default()
         };
         config.save_to(&path).expect("saved");

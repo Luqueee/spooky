@@ -83,11 +83,27 @@ export interface Attachment {
   preview: string | null;
 }
 
+export interface ThemeColors {
+  background: string;
+  sidebar: string;
+  hover: string;
+  selected: string;
+  border: string;
+  text: string;
+  muted: string;
+  accent: string;
+  success: string;
+  warning: string;
+  danger: string;
+}
+
 export interface View {
   pane: number | null;
   agent: Agent | null;
   attachments: Attachment[];
   platform: string;
+  appearance: string;
+  colors: ThemeColors;
 }
 
 export type Answer = { Confirm: boolean } | { Value: string } | "Cancel";

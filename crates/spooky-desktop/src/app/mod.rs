@@ -148,8 +148,6 @@ pub(crate) enum Message {
     /// Carry out a command, as its keyboard shortcut would.
     Run(AppCommand),
     Modifiers(keyboard::Modifiers),
-    /// The pointer entered (`true`) or left (`false`) this pane.
-    HoverPane(u64, bool),
     Copy,
     SelectAll,
     CopyAll,
@@ -183,6 +181,7 @@ pub(super) struct Selection {
 }
 pub(crate) struct App {
     config: Config,
+    themes: crate::ui::ThemeCatalog,
     link: Link,
     snapshot: Option<Snapshot>,
     activity: Activity,
@@ -241,8 +240,6 @@ pub(crate) struct App {
     focus_reported: Option<u64>,
     /// Keyboard modifiers as last reported by the window.
     modifiers: keyboard::Modifiers,
-    /// The pane under the pointer, which shows its quick actions.
-    hover_pane: Option<u64>,
     /// The global shortcut, when the session allows one.
     hotkeys: Option<Hotkeys>,
     /// Coalesces shortcut presses while the native minimized state is being checked.
@@ -302,12 +299,14 @@ impl App {
         config: Config,
         status: String,
         hotkeys: Option<Hotkeys>,
+        themes: crate::ui::ThemeCatalog,
     ) -> (Self, Task<Message>) {
         let size_pending = config.size_mode() == SizeMode::Percent;
         let font = terminal::TerminalFont::resolve(config.font_family.as_deref());
         (
             Self {
                 config,
+                themes,
                 link: Link::start(),
                 snapshot: None,
                 activity: Activity::default(),
@@ -351,7 +350,6 @@ impl App {
                 clipboard_seen: HashMap::new(),
                 focus_reported: None,
                 modifiers: keyboard::Modifiers::default(),
-                hover_pane: None,
                 hotkeys,
                 hotkey_pending: None,
                 hotkey_generation: 0,
@@ -539,6 +537,40 @@ impl App {
             self.reduce_transparency,
         )
     }
+    pub(crate) fn theme(&self) -> iced::Theme {
+        let selected = self
+            .config
+            .custom_theme
+            .as_deref()
+            .and_then(|id| self.themes.get(id));
+        selected.map_or_else(
+            || crate::ui::theme(self.config.appearance),
+            |definition| crate::ui::theme_with_palette(&definition.name, definition.colors),
+        )
+    }
+
+    pub(crate) fn appearance_colors(&self) -> crate::ui::ColorPalette {
+        self.config
+            .custom_theme
+            .as_deref()
+            .and_then(|id| self.themes.get(id))
+            .map_or_else(
+                || crate::ui::color_palette(self.config.appearance),
+                |definition| definition.colors,
+            )
+    }
+
+    pub(crate) fn theme_id(&self) -> &str {
+        self.config
+            .custom_theme
+            .as_deref()
+            .filter(|id| self.themes.get(id).is_some())
+            .unwrap_or(match self.config.appearance {
+                crate::config::Appearance::Spooky => "spooky",
+                crate::config::Appearance::Nord => "nord",
+                crate::config::Appearance::Dracula => "dracula",
+            })
+    }
 
     fn sync_background(&mut self) {
         #[cfg(target_os = "macos")]
@@ -619,7 +651,6 @@ impl App {
             | Message::ScrollPane(..)
             | Message::Paste(..)
             | Message::Modifiers(..)
-            | Message::HoverPane(..)
             | Message::Copy
             | Message::SelectAll
             | Message::CopyAll

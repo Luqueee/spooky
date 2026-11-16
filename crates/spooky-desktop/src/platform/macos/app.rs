@@ -1,11 +1,39 @@
 //! Process-level macOS integration.
 
 use iced::{Rectangle, Size};
-use objc2::MainThreadMarker;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSEvent, NSScreen, NSWindowAnimationBehavior,
+    NSApplication, NSApplicationActivationPolicy, NSEvent, NSImage, NSImageView, NSScreen,
+    NSWindowAnimationBehavior,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+/// Sets the running application's Dock artwork independently of the bundle icon cache.
+pub(crate) fn set_dock_artwork() -> bool {
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return false;
+    };
+    let Some(executable) = std::env::current_exe().ok() else {
+        return false;
+    };
+    let Some(contents) = executable.parent().and_then(std::path::Path::parent) else {
+        return false;
+    };
+    let icon_path = contents.join("Resources/SpookyLogo.png");
+    let Some(icon_path) = icon_path.to_str() else {
+        return false;
+    };
+    let icon_path = NSString::from_str(icon_path);
+    let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &icon_path) else {
+        return false;
+    };
+    let tile = NSApplication::sharedApplication(main_thread).dockTile();
+    let view = NSImageView::imageViewWithImage(&image, main_thread);
+    view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), tile.size()));
+    tile.setContentView(Some(&view));
+    tile.display();
+    true
+}
 
 /// Shows or hides the Dock icon (and menu bar). Spooky runs as an accessory
 /// application by default, as dropdown terminals usually do: no Dock icon, and

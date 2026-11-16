@@ -232,6 +232,9 @@ impl App {
                 {
                     self.glass_available = crate::platform::macos::glass::install();
                     self.sync_background();
+                    if !crate::platform::macos::app::set_dock_artwork() {
+                        self.status = "Dock icon unavailable".into();
+                    }
                     if !self.glass_available {
                         self.status = "Window blur unavailable; using a solid background".into();
                     }

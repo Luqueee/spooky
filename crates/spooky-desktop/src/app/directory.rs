@@ -1,4 +1,4 @@
-//! Selection and freshness of the directory shown in the footer.
+//! Selection and freshness of the directory shown in the header.
 
 use crate::link::DirectorySelection;
 use spooky_core::DirectoryKind;
@@ -185,7 +185,7 @@ async fn open_folder(path: String) -> Result<(), String> {
     .map_err(|error| format!("folder opener failed: {error}"))?
 }
 
-/// A filename is untrusted: do not let control or bidi characters alter the footer.
+/// A filename is untrusted: do not let control or bidi characters alter the UI.
 fn safe_path(path: &str) -> String {
     sanitize_path(path, 512)
 }
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn path_cannot_inject_footer_controls_or_grow_without_bound() {
+    fn path_cannot_inject_display_controls_or_grow_without_bound() {
         assert_eq!(safe_path("/a\n\u{202e}b"), "/a\\u{a}\\u{202e}b");
         assert_eq!(safe_path(&"x".repeat(513)).chars().count(), 513);
         let long = format!("/{}\nend", "x".repeat(600));

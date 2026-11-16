@@ -24,14 +24,14 @@ pub(crate) fn view(search: &Search) -> Option<Element<'_, Message>> {
     Some(
         container(
             row![
-                icon(Icon::Search, MUTED),
+                themed_icon(Icon::Search, TextTone::Muted),
                 text_input("Find in scrollback", &bar.query)
                     .id("search-input")
                     .size(11)
                     .padding([4, 6])
                     .on_input(|query| tell(super::Message::Input(query)))
                     .on_submit(tell(super::Message::Step(FindDirection::Next))),
-                text(result).size(10).color(MUTED),
+                text(result).size(10).style(text_tone(TextTone::Muted)),
                 action(
                     Icon::ChevronUp,
                     "Previous match",
@@ -47,8 +47,7 @@ pub(crate) fn view(search: &Search) -> Option<Element<'_, Message>> {
             .spacing(8)
             .align_y(Alignment::Center),
         )
-        .padding([4, 10])
-        .style(|_| surface(SIDEBAR))
+        .style(|theme| surface(color_palette_for(theme).sidebar))
         .into(),
     )
 }

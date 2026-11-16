@@ -25,9 +25,10 @@ case "$(uname -s)" in
 
     iconset="$(mktemp -d)/Spooky.iconset"
     mkdir "$iconset"
+    swift scripts/macos-icon.swift assets/logo.png "$app/Contents/Resources/SpookyLogo.png"
     for size in 16 32 128 256 512; do
-      sips -z "$size" "$size" assets/logo.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
-      sips -z "$((size * 2))" "$((size * 2))" assets/logo.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+      sips -z "$size" "$size" "$app/Contents/Resources/SpookyLogo.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+      sips -z "$((size * 2))" "$((size * 2))" "$app/Contents/Resources/SpookyLogo.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/Spooky.icns"
     rm -rf "$(dirname "$iconset")"

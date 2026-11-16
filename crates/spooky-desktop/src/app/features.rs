@@ -123,7 +123,7 @@ impl App {
                     .settings
                     .update(change, &mut self.config, &mut self.hotkeys);
                 self.sync_background();
-                self.apply_effects(effects)
+                Task::batch([self.apply_effects(effects), self.sync_web()])
             }
         }
     }

@@ -64,13 +64,6 @@ impl App {
             }
             Message::Paste(None) => {}
             Message::Modifiers(modifiers) => self.modifiers = modifiers,
-            Message::HoverPane(id, inside) => {
-                if inside {
-                    self.hover_pane = Some(id);
-                } else if self.hover_pane == Some(id) {
-                    self.hover_pane = None;
-                }
-            }
             Message::Copy => {
                 self.context_menu = None;
                 if self

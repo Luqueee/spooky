@@ -397,12 +397,6 @@ impl App {
             self.context_menu = None;
         }
         if self
-            .hover_pane
-            .is_some_and(|id| !s.panes.iter().any(|p| p.id == id))
-        {
-            self.hover_pane = None;
-        }
-        if self
             .rename_workspace
             .is_some_and(|id| !s.workspaces.iter().any(|w| w.id == id))
         {

@@ -3,7 +3,7 @@
 use super::{Change, DEFAULT_FONT, Settings};
 use crate::{
     Message,
-    config::{Config, OnBlur, Osc52, SizeMode},
+    config::{Appearance, Config, OnBlur, Osc52, SizeMode},
     ui::*,
 };
 use iced::{
@@ -31,8 +31,8 @@ fn option<'a>(
     container(
         row![
             column![
-                text(label).size(12).color(TEXT),
-                text(hint.into()).size(10).color(MUTED)
+                text(label).size(12).style(text_tone(TextTone::Text)),
+                text(hint.into()).size(10).style(text_tone(TextTone::Muted))
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -55,14 +55,17 @@ fn section<'a>(title: &'static str, options: Vec<Element<'a, Message>>) -> Eleme
         rows = rows.push(option);
     }
     column![
-        text(title).size(11).color(ACCENT),
-        container(rows).style(|_| container::Style {
-            border: Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..surface(SIDEBAR)
+        text(title).size(11).style(text_tone(TextTone::Accent)),
+        container(rows).style(|theme| {
+            let colors = color_palette_for(theme);
+            container::Style {
+                border: Border {
+                    color: colors.border,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..surface(colors.sidebar)
+            }
         }),
     ]
     .spacing(8)
@@ -97,7 +100,7 @@ fn stepper<'a>(value: String, lower: Message, raise: Message) -> Element<'a, Mes
         step_button("−", lower),
         text(value)
             .size(11)
-            .color(TEXT)
+            .style(text_tone(TextTone::Text))
             .width(64)
             .align_x(Alignment::Center),
         step_button("+", raise),
@@ -124,6 +127,7 @@ fn apply(change: Change) -> Message {
 pub(crate) fn view<'a>(
     settings: &'a Settings,
     config: &'a Config,
+    themes: &'a ThemeCatalog,
     shortcuts_available: bool,
     glass_available: bool,
     reduce_transparency: bool,
@@ -248,15 +252,18 @@ pub(crate) fn view<'a>(
             config.shortcut.clone()
         };
         row![
-            container(text(shown).size(11).color(TEXT))
+            container(text(shown).size(11).style(text_tone(TextTone::Text)))
                 .padding([4, 10])
-                .style(|_| container::Style {
-                    border: Border {
-                        color: BORDER,
-                        width: 1.0,
-                        radius: 5.0.into(),
-                    },
-                    ..surface(HOVER)
+                .style(|theme| {
+                    let colors = color_palette_for(theme);
+                    container::Style {
+                        border: Border {
+                            color: colors.border,
+                            width: 1.0,
+                            radius: 5.0.into(),
+                        },
+                        ..surface(colors.hover)
+                    }
                 }),
             if recording {
                 choice(vec![("Cancel", false, apply(Change::CancelRecording))])
@@ -271,7 +278,11 @@ pub(crate) fn view<'a>(
         .align_y(Alignment::Center)
         .into()
     } else {
-        Element::from(text("Not available").size(11).color(MUTED))
+        Element::from(
+            text("Not available")
+                .size(11)
+                .style(text_tone(TextTone::Muted)),
+        )
     };
     let shortcut = vec![option(
         "Global shortcut",
@@ -318,13 +329,23 @@ pub(crate) fn view<'a>(
     let file = Config::path()
         .map(|path| format!("Settings file: {}", path.display()))
         .unwrap_or_default();
+    let themes_path = Config::themes_dir()
+        .map(|path| format!("Theme files: {}/*.toml", path.display()))
+        .unwrap_or_default();
+    let theme_issues = themes.issues().join("\n");
+    let missing_theme = config
+        .custom_theme
+        .as_deref()
+        .filter(|id| themes.get(id).is_none())
+        .map(|id| format!("Selected theme '{id}' is missing; using the built-in theme."));
     let problem = settings.problem().unwrap_or_default().to_owned();
     // The bar stays put while the sections scroll, so a refused change is seen
     // wherever on the page it was made.
     let bar = container(
         row![
-            text("Settings").size(16).color(TEXT),
-            container(text(problem).size(11).color(DANGER)).width(Length::Fill),
+            text("Settings").size(16).style(text_tone(TextTone::Text)),
+            container(text(problem).size(11).style(text_tone(TextTone::Danger)))
+                .width(Length::Fill),
             button(text("Done").size(11))
                 .padding([5, 14])
                 .style(primary)
@@ -336,14 +357,93 @@ pub(crate) fn view<'a>(
     )
     .padding([10, 0])
     .center_x(Length::Fill);
-    let sections = column![
+    let mut sections = column![
         section("Window", window),
+        section(
+            "Appearance",
+            vec![option(
+                "Color theme",
+                format!(
+                    "Choose a palette or add .toml theme files in {}",
+                    Config::themes_dir().map_or_else(
+                        |_| "the Spooky config directory".to_owned(),
+                        |path| path.display().to_string(),
+                    )
+                ),
+                pick_list(
+                    themes.themes(),
+                    config
+                        .custom_theme
+                        .as_deref()
+                        .and_then(|id| themes.get(id))
+                        .or_else(|| {
+                            themes.get(match config.appearance {
+                                Appearance::Spooky => "spooky",
+                                Appearance::Nord => "nord",
+                                Appearance::Dracula => "dracula",
+                            })
+                        }),
+                    |theme: ThemeDefinition| { apply(Change::Appearance(theme.id)) },
+                )
+                .width(150)
+                .text_size(11)
+                .padding([5, 9])
+                .menu_height(240)
+                .style(|theme, status| {
+                    let colors = color_palette_for(theme);
+                    let mut style = iced::widget::pick_list::default(theme, status);
+                    style.background = colors.sidebar.into();
+                    style.text_color = colors.text;
+                    style.placeholder_color = colors.muted;
+                    style.handle_color = colors.muted;
+                    style.border = Border {
+                        color: if matches!(status, iced::widget::pick_list::Status::Active) {
+                            colors.border
+                        } else {
+                            colors.accent
+                        },
+                        width: 1.0,
+                        radius: 5.0.into(),
+                    };
+                    style
+                })
+                .menu_style(|theme| {
+                    let colors = color_palette_for(theme);
+                    let mut style = iced::overlay::menu::default(theme);
+                    style.background = colors.sidebar.into();
+                    style.text_color = colors.text;
+                    style.selected_text_color = colors.text;
+                    style.selected_background = colors.selected.into();
+                    style.border = Border {
+                        color: colors.border,
+                        width: 1.0,
+                        radius: 5.0.into(),
+                    };
+                    style
+                }),
+            )],
+        ),
         section("Shortcut", shortcut),
         section("Terminal", terminal),
-        text(file).size(10).color(MUTED),
+        text(file).size(10).style(text_tone(TextTone::Muted)),
+        text(themes_path).size(10).style(text_tone(TextTone::Muted)),
     ]
     .spacing(20)
     .width(640);
+    if let Some(missing_theme) = missing_theme {
+        sections = sections.push(
+            text(missing_theme)
+                .size(10)
+                .style(text_tone(TextTone::Warning)),
+        );
+    }
+    if !theme_issues.is_empty() {
+        sections = sections.push(
+            text(format!("Some theme files were skipped:\n{theme_issues}"))
+                .size(10)
+                .style(text_tone(TextTone::Danger)),
+        );
+    }
 
     container(column![
         bar,

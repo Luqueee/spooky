@@ -21,9 +21,13 @@ pub(crate) fn view(palette: &Palette) -> Option<Element<'_, Message>> {
         list = list.push(
             button(
                 row![
-                    text(command.title()).size(12).color(TEXT),
+                    text(command.title())
+                        .size(12)
+                        .style(text_tone(TextTone::Text)),
                     iced::widget::Space::new().width(Length::Fill),
-                    text(command.id()).size(10).color(MUTED),
+                    text(command.id())
+                        .size(10)
+                        .style(text_tone(TextTone::Muted)),
                 ]
                 .align_y(Alignment::Center),
             )
@@ -34,7 +38,11 @@ pub(crate) fn view(palette: &Palette) -> Option<Element<'_, Message>> {
         );
     }
     if open.results.is_empty() {
-        list = list.push(text("No command matches").size(11).color(MUTED));
+        list = list.push(
+            text("No command matches")
+                .size(11)
+                .style(text_tone(TextTone::Muted)),
+        );
     }
     Some(
         column![

@@ -1,6 +1,6 @@
 //! Vector icons and the small icon buttons built from them.
 
-use super::theme::{BORDER, HOVER, MUTED, quiet, surface};
+use super::theme::{ColorPalette, TextTone, color_palette_for, quiet, surface};
 use crate::Message;
 use iced::{
     Border, Color, Element, Point, Rectangle, Theme, mouse,
@@ -33,9 +33,15 @@ pub enum Icon {
     Send,
 }
 
+#[derive(Clone, Copy)]
+enum IconColor {
+    Fixed(Color),
+    Theme(TextTone),
+}
+
 struct Vector {
     icon: Icon,
-    color: Color,
+    color: IconColor,
 }
 impl canvas::Program<Message> for Vector {
     type State = ();
@@ -43,15 +49,27 @@ impl canvas::Program<Message> for Vector {
         &self,
         _: &(),
         renderer: &iced::Renderer,
-        _: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let color = match self.color {
+            IconColor::Fixed(color) => color,
+            IconColor::Theme(tone) => {
+                let colors: ColorPalette = color_palette_for(theme);
+                match tone {
+                    TextTone::Text => colors.text,
+                    TextTone::Muted => colors.muted,
+                    TextTone::Accent => colors.accent,
+                    TextTone::Success => colors.success,
+                    TextTone::Warning => colors.warning,
+                    TextTone::Danger => colors.danger,
+                }
+            }
+        };
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         frame.scale(bounds.width / 24.0);
-        let stroke = canvas::Stroke::default()
-            .with_color(self.color)
-            .with_width(1.6);
+        let stroke = canvas::Stroke::default().with_color(color).with_width(1.6);
         let path = canvas::Path::new(|p| {
             let mut line = |points: &[(f32, f32)]| {
                 if let Some(&(x, y)) = points.first() {
@@ -163,12 +181,12 @@ impl canvas::Program<Message> for Vector {
             Icon::Search => frame.stroke(&canvas::Path::circle(Point::new(11., 11.), 6.), stroke),
             Icon::More => {
                 for x in [5., 12., 19.] {
-                    frame.fill(&canvas::Path::circle(Point::new(x, 12.), 1.1), self.color);
+                    frame.fill(&canvas::Path::circle(Point::new(x, 12.), 1.1), color);
                 }
             }
             Icon::Settings => {
                 for (x, y) in [(9., 7.), (15., 12.), (9., 17.)] {
-                    frame.fill(&canvas::Path::circle(Point::new(x, y), 2.2), self.color);
+                    frame.fill(&canvas::Path::circle(Point::new(x, y), 2.2), color);
                 }
             }
             _ => {}
@@ -178,27 +196,43 @@ impl canvas::Program<Message> for Vector {
 }
 
 pub fn icon(kind: Icon, color: Color) -> Element<'static, Message> {
-    canvas(Vector { icon: kind, color })
-        .width(12)
-        .height(12)
-        .into()
+    canvas(Vector {
+        icon: kind,
+        color: IconColor::Fixed(color),
+    })
+    .width(12)
+    .height(12)
+    .into()
+}
+
+pub fn themed_icon(kind: Icon, tone: TextTone) -> Element<'static, Message> {
+    canvas(Vector {
+        icon: kind,
+        color: IconColor::Theme(tone),
+    })
+    .width(12)
+    .height(12)
+    .into()
 }
 
 pub fn action(kind: Icon, label: &'static str, message: Message) -> Element<'static, Message> {
     tooltip(
-        button(icon(kind, MUTED))
+        button(themed_icon(kind, TextTone::Muted))
             .padding(5)
             .style(quiet)
             .on_press(message),
         container(text(label).size(11))
             .padding([5, 8])
-            .style(|_| container::Style {
-                border: Border {
-                    color: BORDER,
-                    width: 1.0,
-                    radius: 5.0.into(),
-                },
-                ..surface(HOVER)
+            .style(|theme| {
+                let colors = super::theme::color_palette_for(theme);
+                container::Style {
+                    border: Border {
+                        color: colors.border,
+                        width: 1.0,
+                        radius: 5.0.into(),
+                    },
+                    ..surface(colors.hover)
+                }
             }),
         tooltip::Position::Bottom,
     )

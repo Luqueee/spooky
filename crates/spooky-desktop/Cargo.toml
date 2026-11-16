@@ -30,7 +30,7 @@ x11rb = "0.13"
 iced_winit = { version = "0.14", default-features = false }
 objc2 = "0.6"
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSAccessibility", "NSApplication", "NSButton", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSResponder", "NSScreen", "NSTextInputContext", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSAccessibility", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageView", "NSResponder", "NSScreen", "NSTextInputContext", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSGeometry"] }
 
 [lints]

@@ -2,7 +2,7 @@
 use super::{App, Confirm, ContextTarget, Message};
 use crate::commands::Command;
 
-/// Height of the strip at the window's bottom edge that drags its height.
+/// Height of the invisible strip at the window's bottom edge that drags its height.
 const RESIZE_GRIP: f32 = 5.0;
 use crate::{
     features::{
@@ -45,21 +45,17 @@ fn brand_logo() -> Element<'static, Message> {
 
 fn activity_marker(indicator: Option<Indicator>) -> Element<'static, Message> {
     let Some(indicator) = indicator else {
-        return Space::new().width(10).into();
+        return Space::new().width(16).into();
     };
-    let (symbol, color, label) = match indicator {
-        Indicator::Output => ("•", ACCENT, "New terminal output"),
-        Indicator::AgentDone => ("✓", SUCCESS, "Agent response finished"),
-        Indicator::Attention => (
-            "!",
-            Color::from_rgb8(218, 184, 126),
-            "Agent needs your answer",
-        ),
+    let (symbol, tone, label) = match indicator {
+        Indicator::Output => ("●", TextTone::Accent, "New terminal output"),
+        Indicator::AgentDone => ("✓", TextTone::Success, "Agent response finished"),
+        Indicator::Attention => ("!", TextTone::Warning, "Agent needs your answer"),
     };
     tooltip(
-        container(text(symbol).size(11).color(color))
-            .width(10)
-            .center_x(10),
+        container(text(symbol).size(16).style(text_tone(tone)))
+            .width(16)
+            .center_x(16),
         text(label).size(10),
         tooltip::Position::Bottom,
     )
@@ -121,14 +117,15 @@ impl<F: Fn(Point) -> Message> canvas::Program<Message> for RightClick<F> {
     }
 }
 
-fn menu_style(_: &iced::Theme) -> container::Style {
+fn menu_style(theme: &iced::Theme) -> container::Style {
+    let colors = color_palette_for(theme);
     container::Style {
         border: Border {
-            color: BORDER,
+            color: colors.border,
             width: 1.0,
             radius: 6.0.into(),
         },
-        ..surface(SIDEBAR)
+        ..surface(colors.sidebar)
     }
 }
 
@@ -138,7 +135,7 @@ fn menu_item(
     message: Message,
 ) -> button::Button<'static, Message> {
     button(
-        row![icon(kind, MUTED), text(label).size(11)]
+        row![themed_icon(kind, TextTone::Muted), text(label).size(11)]
             .spacing(8)
             .align_y(Alignment::Center),
     )
@@ -153,17 +150,17 @@ fn modal<'a>(
     content: Element<'a, Message>,
     dismiss: Option<Message>,
 ) -> Element<'a, Message> {
-    let panel = container(content)
-        .padding(20)
-        .width(380)
-        .style(|_| container::Style {
+    let panel = container(content).padding(20).width(380).style(|theme| {
+        let colors = color_palette_for(theme);
+        container::Style {
             border: Border {
-                color: BORDER,
+                color: colors.border,
                 width: 1.0,
                 radius: 7.0.into(),
             },
-            ..surface(SIDEBAR)
-        });
+            ..surface(colors.sidebar)
+        }
+    });
     let area = mouse_area(
         container(opaque(panel))
             .center(Length::Fill)
@@ -197,7 +194,7 @@ impl App {
         if self.sidebar_open {
             brand = brand
                 .push(brand_logo())
-                .push(text("Spooky").size(11).color(TEXT))
+                .push(text("Spooky").size(11).style(text_tone(TextTone::Text)))
                 .push(Space::new().width(Length::Fill));
         }
         brand = brand.push(action(
@@ -221,18 +218,22 @@ impl App {
                 let id = tab.id;
                 let label = button(
                     row![
-                        icon(
+                        themed_icon(
                             if self.tab_is_agent(tab) {
                                 Icon::Agent
                             } else {
                                 Icon::Terminal
                             },
-                            if selected { TEXT } else { MUTED }
+                            if selected {
+                                TextTone::Text
+                            } else {
+                                TextTone::Muted
+                            },
                         ),
                         text(self.tab_label(tab)).size(11),
                         activity_marker(self.activity.indicator(&tab.layout)),
                         if tab.locked || !tab.locked_panes.is_empty() {
-                            icon(Icon::Lock, MUTED)
+                            themed_icon(Icon::Lock, TextTone::Muted)
                         } else {
                             Space::new().width(0).into()
                         }
@@ -279,7 +280,14 @@ impl App {
             let selected = self.settings.is_shown();
             let label = button(
                 row![
-                    icon(Icon::Settings, if selected { TEXT } else { MUTED }),
+                    themed_icon(
+                        Icon::Settings,
+                        if selected {
+                            TextTone::Text
+                        } else {
+                            TextTone::Muted
+                        },
+                    ),
                     text("Settings").size(11)
                 ]
                 .spacing(6)
@@ -303,6 +311,22 @@ impl App {
             };
             tabs = tabs.push(mouse_area(entry).on_middle_press(close));
         }
+        let directory = tooltip(
+            button(themed_icon(Icon::Folder, TextTone::Muted))
+                .padding(5)
+                .style(quiet)
+                .on_press_maybe(
+                    self.directory
+                        .current()
+                        .map(|_| Message::ToggleDirectoryMenu),
+                ),
+            container(text(self.directory.text(self.connection.is_remote())).size(11))
+                .padding([5, 8])
+                .style(menu_style),
+            tooltip::Position::Bottom,
+        )
+        .delay(Duration::from_millis(450));
+        let status = self.header_status();
         let controls = row![
             action(
                 Icon::SplitColumns,
@@ -315,21 +339,25 @@ impl App {
                 Message::Run(Command::Split(Axis::Horizontal))
             ),
             action(Icon::Plus, NEW_TAB, Message::Run(Command::NewTab)),
+            directory,
             action(Icon::More, "Workspace actions", Message::ToggleMenu),
         ]
         .spacing(3)
         .align_y(Alignment::Center);
-        let chrome = SIDEBAR.scale_alpha(if self.background_opacity() < 1.0 {
-            0.55
-        } else {
-            1.0
-        });
+        let chrome =
+            self.appearance_colors()
+                .sidebar
+                .scale_alpha(if self.background_opacity() < 1.0 {
+                    0.55
+                } else {
+                    1.0
+                });
         let header = container(
             row![
                 brand,
                 container(Space::new().width(1))
                     .height(Length::Fill)
-                    .style(|_| surface(BORDER)),
+                    .style(|theme| surface(color_palette_for(theme).border)),
                 container(
                     scrollable(tabs)
                         .direction(scrollable::Direction::Horizontal(Default::default()))
@@ -337,6 +365,14 @@ impl App {
                 .padding([0, 7])
                 .width(Length::Fill)
                 .align_y(Alignment::Center),
+                container(
+                    text(status)
+                        .size(10)
+                        .style(text_tone(TextTone::Muted))
+                        .wrapping(text::Wrapping::None),
+                )
+                .max_width(220)
+                .clip(true),
                 controls,
                 Space::new().width(5),
             ]
@@ -353,13 +389,14 @@ impl App {
         } else {
             self.connection.connected_target()
         };
-        let section = container(text("Spaces").size(10).color(MUTED))
+        let palette = self.appearance_colors();
+        let section = container(text("Spaces").size(10).style(text_tone(TextTone::Muted)))
             .height(22)
             .align_y(Alignment::Center);
         let machine = row![
             button(
                 row![
-                    icon(Icon::Server, MUTED),
+                    themed_icon(Icon::Server, TextTone::Muted),
                     text(connection_name).size(10).width(Length::Fill),
                 ]
                 .spacing(6)
@@ -376,14 +413,18 @@ impl App {
             ),
             button(
                 row![
-                    dot(if self.online() { SUCCESS } else { MUTED }),
-                    icon(
+                    dot(if self.online() {
+                        palette.success
+                    } else {
+                        palette.muted
+                    }),
+                    themed_icon(
                         if self.workspaces_open {
                             Icon::Chevron
                         } else {
                             Icon::ChevronRight
                         },
-                        MUTED,
+                        TextTone::Muted,
                     ),
                 ]
                 .spacing(6)
@@ -399,9 +440,9 @@ impl App {
             && let Some(snapshot) = &self.snapshot
         {
             let colors = [
-                SUCCESS,
+                palette.success,
                 Color::from_rgb8(193, 148, 104),
-                ACCENT,
+                palette.accent,
                 Color::from_rgb8(166, 145, 190),
             ];
             for workspace in &snapshot.workspaces {
@@ -420,9 +461,11 @@ impl App {
                 let item = button(
                     row![
                         badge,
-                        text(&workspace.name)
-                            .size(11)
-                            .color(if selected { TEXT } else { MUTED })
+                        text(&workspace.name).size(11).style(text_tone(if selected {
+                            TextTone::Text
+                        } else {
+                            TextTone::Muted
+                        }))
                     ]
                     .spacing(7)
                     .align_y(Alignment::Center),
@@ -452,7 +495,11 @@ impl App {
         let mut connection = column![].spacing(7);
         if self.connection_open {
             connection = connection
-                .push(text("Connect via SSH").size(10).color(TEXT))
+                .push(
+                    text("Connect via SSH")
+                        .size(10)
+                        .style(text_tone(TextTone::Text)),
+                )
                 .push(
                     button(text("Browse Tailscale devices").size(10))
                         .padding([5, 8])
@@ -495,11 +542,14 @@ impl App {
                 Message::ToggleConnection,
             ));
         }
-        let chrome = SIDEBAR.scale_alpha(if self.background_opacity() < 1.0 {
-            0.55
-        } else {
-            1.0
-        });
+        let chrome =
+            self.appearance_colors()
+                .sidebar
+                .scale_alpha(if self.background_opacity() < 1.0 {
+                    0.55
+                } else {
+                    1.0
+                });
         container(column![
             container(column![section, machine].spacing(2)).padding([4, 6]),
             container(scrollable(spaces))
@@ -540,9 +590,13 @@ impl App {
                     .as_ref()
                     .and_then(|s| s.panes.iter().find(|p| p.id == *id))
                 else {
-                    return container(text("Pane unavailable").size(11).color(MUTED))
-                        .center(Length::Fill)
-                        .into();
+                    return container(
+                        text("Pane unavailable")
+                            .size(11)
+                            .style(text_tone(TextTone::Muted)),
+                    )
+                    .center(Length::Fill)
+                    .into();
                 };
                 if let Some(conversation) = &pane.agent {
                     let id = *id;
@@ -552,9 +606,15 @@ impl App {
                     let can_zoom = self
                         .active()
                         .is_some_and(|(_, tab)| matches!(tab.layout, Layout::Split { .. }));
-                    return mouse_area(agent::view(&self.agents, id, conversation, can_zoom))
-                        .on_press(Message::FocusPane(id, Vec::new()))
-                        .into();
+                    return mouse_area(agent::view(
+                        &self.agents,
+                        id,
+                        conversation,
+                        can_zoom,
+                        self.theme(),
+                    ))
+                    .on_press(Message::FocusPane(id, Vec::new()))
+                    .into();
                 }
                 let selected = self.pane == Some(*id);
                 let selection = self.selection.and_then(|s| {
@@ -567,26 +627,7 @@ impl App {
                         (s.anchor, s.head)
                     })
                 });
-                let quick: Element<'_, Message> =
-                    if self.hover_pane == Some(*id) && self.context_menu.is_none() {
-                        self.pane_actions(*id, pane.scrolled > 0)
-                    } else if self.pane_locked(*id) {
-                        container(icon(Icon::Lock, MUTED))
-                            .align_right(Length::Fill)
-                            .align_top(Length::Fill)
-                            .padding(Padding {
-                                top: if pane.scrolled > 0 { 30.0 } else { 9.0 },
-                                right: 15.0,
-                                bottom: 0.0,
-                                left: 0.0,
-                            })
-                            .into()
-                    } else {
-                        Space::new().into()
-                    };
-                // The overlay slot is always present so hovering never rebuilds the
-                // terminal canvas beneath it.
-                mouse_area(stack![
+                stack![
                     container(
                         canvas(terminal::Terminal {
                             pane,
@@ -602,10 +643,26 @@ impl App {
                     .padding([PANE_PADDING_Y, PANE_PADDING_X])
                     .width(Length::Fill)
                     .height(Length::Fill),
-                    quick
-                ])
-                .on_enter(Message::HoverPane(*id, true))
-                .on_exit(Message::HoverPane(*id, false))
+                    if pane.scrolled > 0 && pane.history > 0 {
+                        Element::from(
+                            container(
+                                tooltip(
+                                    canvas(terminal::ScrollIndicator { pane })
+                                        .width(4)
+                                        .height(Length::Fill),
+                                    text(format!("{} of {} lines", pane.scrolled, pane.history))
+                                        .size(10),
+                                    tooltip::Position::Left,
+                                )
+                                .delay(Duration::from_millis(450)),
+                            )
+                            .align_right(Length::Fill)
+                            .height(Length::Fill),
+                        )
+                    } else {
+                        Element::from(Space::new())
+                    }
+                ]
                 .into()
             }
             Layout::Split {
@@ -653,64 +710,6 @@ impl App {
         }
     }
 
-    /// The quick actions in the corner of the pane under the pointer, which act
-    /// on that pane. `scrolled` moves them under the scroll position label.
-    fn pane_actions(&self, id: u64, scrolled: bool) -> Element<'_, Message> {
-        let cluster = container(
-            row![
-                action(
-                    Icon::SplitColumns,
-                    SPLIT_COLUMNS,
-                    Message::SplitPane(id, Axis::Vertical)
-                ),
-                action(
-                    Icon::SplitRows,
-                    SPLIT_ROWS,
-                    Message::SplitPane(id, Axis::Horizontal)
-                ),
-                action(
-                    Icon::Zoom,
-                    if self.zoomed.is_some_and(|(_, pane)| pane == id) {
-                        "Restore pane"
-                    } else {
-                        "Zoom pane"
-                    },
-                    Message::TogglePaneZoom(id)
-                ),
-                action(
-                    Icon::Lock,
-                    if self.pane_locked(id) {
-                        "Unlock pane"
-                    } else {
-                        "Lock pane"
-                    },
-                    Message::TogglePaneLock(id)
-                ),
-                action(Icon::Close, "Close pane", Message::AskClosePaneOf(id)),
-            ]
-            .spacing(1),
-        )
-        .padding(2)
-        .style(|_| container::Style {
-            border: Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..surface(SIDEBAR.scale_alpha(0.94))
-        });
-        container(cluster)
-            .align_right(Length::Fill)
-            .align_top(Length::Fill)
-            .padding(Padding {
-                top: if scrolled { 30.0 } else { 6.0 },
-                right: 12.0,
-                bottom: 0.0,
-                left: 0.0,
-            })
-            .into()
-    }
-
     /// Shown when no workspace is selectable: before the first snapshot, or after
     /// the last workspace was closed.
     fn empty_state(&self) -> Element<'_, Message> {
@@ -724,7 +723,9 @@ impl App {
         {
             container(
                 column![
-                    text("No workspaces").size(12).color(MUTED),
+                    text("No workspaces")
+                        .size(12)
+                        .style(text_tone(TextTone::Muted)),
                     button(text("New workspace").size(11))
                         .padding([6, 10])
                         .style(primary)
@@ -741,7 +742,9 @@ impl App {
         {
             container(
                 column![
-                    text("No tabs in this workspace").size(12).color(MUTED),
+                    text("No tabs in this workspace")
+                        .size(12)
+                        .style(text_tone(TextTone::Muted)),
                     button(text("New tab").size(11))
                         .padding([6, 10])
                         .style(primary)
@@ -753,9 +756,13 @@ impl App {
             .center(Length::Fill)
             .into()
         } else {
-            container(text("Waiting for session…").size(12).color(MUTED))
-                .center(Length::Fill)
-                .into()
+            container(
+                text("Waiting for session…")
+                    .size(12)
+                    .style(text_tone(TextTone::Muted)),
+            )
+            .center(Length::Fill)
+            .into()
         }
     }
 
@@ -785,29 +792,43 @@ impl App {
         }
         let mut card = column![
             text(title).size(13),
-            text(reason.to_owned()).size(11).color(MUTED),
+            text(reason.to_owned())
+                .size(11)
+                .style(text_tone(TextTone::Muted)),
         ]
         .spacing(8)
         .max_width(520)
         .align_x(Alignment::Center);
         if retrying {
-            card = card.push(text("Retrying automatically…").size(10).color(MUTED));
+            card = card.push(
+                text("Retrying automatically…")
+                    .size(10)
+                    .style(text_tone(TextTone::Muted)),
+            );
         }
         container(card.push(actions).spacing(10))
             .center(Length::Fill)
             .into()
     }
 
-    /// What the footer says: the target of a link under the pointer, else the status.
-    fn footer_text(&self) -> String {
-        match self.hyperlinks.hover() {
-            Some(target) => format!("↗ {target}"),
-            None => self.status.clone(),
+    /// The link destination takes priority over the latest operational status.
+    fn header_status(&self) -> String {
+        if let Some(target) = self.hyperlinks.hover() {
+            format!("↗ {target}")
+        } else if self.current_pane().is_some_and(|pane| pane.exited) {
+            "Terminal exited".into()
+        } else if self.status == "Connected" {
+            String::new()
+        } else {
+            self.status.clone()
         }
     }
 
     pub(crate) fn view(&self) -> Element<'_, Message> {
-        let background = BACKGROUND.scale_alpha(self.background_opacity());
+        let background = self
+            .appearance_colors()
+            .background
+            .scale_alpha(self.background_opacity());
         let screen = container(self.screen())
             .width(Length::Fill)
             .height(Length::Fill)
@@ -826,6 +847,7 @@ impl App {
             crate::features::settings::view(
                 &self.settings,
                 &self.config,
+                &self.themes,
                 self.hotkeys.is_some(),
                 self.glass_available,
                 self.reduce_transparency,
@@ -840,78 +862,20 @@ impl App {
                 })
                 .unwrap_or_else(|| self.empty_state())
         };
-        let grid = self
-            .current_pane()
-            .map(|p| {
-                format!(
-                    "{} × {}{}",
-                    p.cols,
-                    p.rows,
-                    if p.exited { " · exited" } else { "" }
-                )
-            })
-            .unwrap_or_default();
-        let chrome = SIDEBAR.scale_alpha(if self.background_opacity() < 1.0 {
-            0.55
-        } else {
-            1.0
-        });
-        let footer = container(
-            row![
-                dot(if self.online() { SUCCESS } else { MUTED }),
-                container(
-                    text(self.footer_text())
-                        .size(9)
-                        .color(MUTED)
-                        .wrapping(text::Wrapping::None),
-                )
-                .width(Length::FillPortion(1))
-                .clip(true),
-                container(
-                    button(
-                        text(self.directory.text(self.connection.is_remote()))
-                            .size(9)
-                            .color(MUTED)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .padding(0)
-                    .width(Length::Fill)
-                    .style(quiet)
-                    .on_press_maybe(
-                        self.directory
-                            .current()
-                            .map(|_| Message::ToggleDirectoryMenu)
-                    ),
-                )
-                .width(Length::FillPortion(2))
-                .clip(true),
-                text(grid).size(9).color(MUTED),
-                Space::new().width(10),
-                text(&self.config.shortcut).size(9).color(MUTED),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        )
-        .padding([0, 10])
-        .height(20)
-        .align_y(Alignment::Center)
-        .style(move |_| surface(chrome));
+
         let mut main = column![].width(Length::Fill).height(Length::Fill);
         if !self.settings.is_shown()
             && let Some(bar) = crate::features::search::view(&self.search)
         {
             main = main.push(bar).push(separator());
         }
-        let main = main
-            .push(container(content).width(Length::Fill).height(Length::Fill))
-            .push(separator())
-            .push(footer);
+        let main = main.push(container(content).width(Length::Fill).height(Length::Fill));
         let body: Element<'_, Message> = if self.sidebar_open {
             row![
                 self.sidebar(),
                 container(Space::new().width(1))
                     .height(Length::Fill)
-                    .style(|_| surface(BORDER)),
+                    .style(|theme| surface(color_palette_for(theme).border)),
                 main
             ]
             .height(Length::Fill)
@@ -1030,13 +994,13 @@ impl App {
                 "This computer".into()
             };
             let mut items = column![
-                text(kind).size(12).color(TEXT),
-                text(location).size(10).color(MUTED),
+                text(kind).size(12).style(text_tone(TextTone::Text)),
+                text(location).size(10).style(text_tone(TextTone::Muted)),
                 container(
                     scrollable(
                         text(super::directory::full_path(path))
                             .size(11)
-                            .color(TEXT)
+                            .style(text_tone(TextTone::Text))
                             .wrapping(text::Wrapping::WordOrGlyph),
                     )
                     .height(Length::Shrink),
@@ -1069,12 +1033,12 @@ impl App {
                         .on_right_press(Message::ToggleDirectoryMenu)
                 ),
                 container(opaque(menu))
-                    .center_x(Length::Fill)
-                    .align_bottom(Length::Fill)
+                    .align_right(Length::Fill)
+                    .align_top(Length::Fill)
                     .padding(Padding {
-                        top: 0.0,
+                        top: HEADER_HEIGHT + 4.0,
                         right: 6.0,
-                        bottom: 25.0,
+                        bottom: 0.0,
                         left: 6.0
                     }),
             ]
@@ -1202,7 +1166,7 @@ impl App {
         if self.tailscale.is_open() {
             body = modal(
                 body,
-                crate::features::tailscale::view(&self.tailscale),
+                crate::features::tailscale::view(&self.tailscale, self.appearance_colors()),
                 Some(Message::Tailscale(
                     crate::features::tailscale::Message::Close,
                 )),
@@ -1225,7 +1189,7 @@ impl App {
                         "Rename workspace"
                     })
                     .size(14)
-                    .color(TEXT),
+                    .style(text_tone(TextTone::Text)),
                     text_input(
                         if self.rename_tab.is_some() {
                             "Tab name"
@@ -1264,14 +1228,16 @@ impl App {
             body = modal(
                 body,
                 column![
-                    text("Could not create from this pane").size(14).color(TEXT),
-                    text(detail).size(11).color(MUTED),
+                    text("Could not create from this pane")
+                        .size(14)
+                        .style(text_tone(TextTone::Text)),
+                    text(detail).size(11).style(text_tone(TextTone::Muted)),
                     text(format!(
                         "Try the starting directory of workspace \"{}\"?\n{}",
                         workspace.name, workspace.cwd
                     ))
                     .size(11)
-                    .color(MUTED),
+                    .style(text_tone(TextTone::Muted)),
                     row![
                         Space::new().width(Length::Fill),
                         button(text("Cancel").size(11))
@@ -1303,11 +1269,11 @@ impl App {
             body = modal(
                 body,
                 column![
-                    text(title).size(14).color(TEXT),
-                    text(detail).size(11).color(MUTED),
+                    text(title).size(14).style(text_tone(TextTone::Text)),
+                    text(detail).size(11).style(text_tone(TextTone::Muted)),
                     text("Closing the window instead keeps your sessions running.")
                         .size(10)
-                        .color(MUTED),
+                        .style(text_tone(TextTone::Muted)),
                     row![
                         Space::new().width(Length::Fill),
                         button(text("Cancel").size(11))

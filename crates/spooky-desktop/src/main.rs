@@ -21,6 +21,7 @@ use iced::window;
 
 fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
+    let themes = ui::ThemeCatalog::load(&Config::themes_dir()?);
     let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
     let (hotkeys, status) = if wayland && !platform::kde::active() {
         (
@@ -46,13 +47,20 @@ fn main() -> anyhow::Result<()> {
     // it over once.
     let hotkeys = std::cell::Cell::new(hotkeys);
     let result = iced::application(
-        move || App::new(config.clone(), status.clone(), hotkeys.take()),
+        move || {
+            App::new(
+                config.clone(),
+                status.clone(),
+                hotkeys.take(),
+                themes.clone(),
+            )
+        },
         App::update,
         App::view,
     )
     .title("Spooky")
     .subscription(subscription)
-    .theme(|_: &App| ui::theme())
+    .theme(App::theme)
     .style(App::style)
     .default_font(iced::Font::MONOSPACE)
     .window(window::Settings {

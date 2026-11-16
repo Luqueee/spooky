@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{Message, ui::*};
 use iced::{
-    Alignment, Background, Border, Element, Font, Length, font, keyboard,
+    Alignment, Background, Border, Element, Font, Length, Theme, font, keyboard,
     widget::{
         Space, button, column, container, image, markdown, mouse_area, opaque, row, scrollable,
         stack, text, text_editor, text_input,
@@ -58,7 +58,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
         let header = row![
             text(language.filter(|l| !l.is_empty()).unwrap_or("code"))
                 .size(11)
-                .color(MUTED),
+                .style(text_tone(TextTone::Muted)),
             Space::new().width(Length::Fill),
             action(
                 Icon::Copy,
@@ -76,19 +76,19 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
     }
 }
 
-/// The conversation of the agent pane `pane`, and its composer.
 pub(crate) fn view<'a>(
     agents: &'a Agents,
     pane: u64,
     agent: &'a Agent,
     can_zoom: bool,
+    theme: Theme,
 ) -> Element<'a, Message> {
     let mut conversation = column![].spacing(22).width(Length::Fill);
     if agent.dropped > 0 {
         conversation = conversation.push(
             text(format!("{} earlier entries not shown", agent.dropped))
                 .size(11)
-                .color(MUTED),
+                .style(text_tone(TextTone::Muted)),
         );
     }
     if agent.messages.is_empty() && agent.ended.is_none() {
@@ -97,7 +97,7 @@ pub(crate) fn view<'a>(
                 text("What can I help with?")
                     .size(16)
                     .font(FONT)
-                    .color(MUTED),
+                    .style(text_tone(TextTone::Muted)),
             )
             .padding([40, 0])
             .center_x(Length::Fill),
@@ -106,7 +106,7 @@ pub(crate) fn view<'a>(
     let last = agent.messages.len().saturating_sub(1);
     for (index, entry) in agent.messages.iter().enumerate() {
         let streaming = agent.busy && index == last;
-        conversation = conversation.push(entry_view(agents, pane, entry, streaming));
+        conversation = conversation.push(entry_view(agents, pane, entry, streaming, &theme));
     }
 
     let live = agent.ended.is_none();
@@ -118,7 +118,7 @@ pub(crate) fn view<'a>(
     ];
     let mut bottom = column![].spacing(8).padding([6, 18]);
     for dialog in &agent.dialogs {
-        bottom = bottom.push(dialog_view(agents, pane, dialog));
+        bottom = bottom.push(dialog_view(agents, pane, dialog, &theme));
     }
     bottom = bottom.push(composer(agents, pane, agent, live, can_zoom));
     bottom = bottom.push(footer(agents, pane, agent));
@@ -149,32 +149,38 @@ fn entry_view<'a>(
     pane: u64,
     entry: &'a AgentMessage,
     streaming: bool,
+    theme: &Theme,
 ) -> Element<'a, Message> {
     match (entry.role, &entry.tool) {
         (AgentRole::User, _) => row![
             Space::new().width(Length::Fill),
-            container(text(entry.text.as_str()).size(15).font(FONT).color(TEXT))
-                .padding([9, 16])
-                .max_width(BUBBLE_WIDTH)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(SELECTED)),
-                    border: Border {
-                        radius: 14.0.into(),
-                        ..Border::default()
-                    },
-                    text_color: Some(TEXT),
-                    ..container::Style::default()
-                }),
+            container(
+                text(entry.text.as_str())
+                    .size(15)
+                    .font(FONT)
+                    .style(text_tone(TextTone::Text))
+            )
+            .padding([9, 16])
+            .max_width(BUBBLE_WIDTH)
+            .style(|theme| container::Style {
+                background: Some(Background::Color(color_palette_for(theme).selected)),
+                border: Border {
+                    radius: 14.0.into(),
+                    ..Border::default()
+                },
+                text_color: Some(color_palette_for(theme).text),
+                ..container::Style::default()
+            }),
         ]
         .into(),
         (AgentRole::Assistant, _) => {
             let mut block = column![].spacing(8);
             block = block.push(match agents.markdown(pane, entry.id) {
-                Some(content) => markdown::view_with(content.items(), settings(), &Viewer),
+                Some(content) => markdown::view_with(content.items(), settings(theme), &Viewer),
                 None => text(entry.text.as_str())
                     .size(15)
                     .font(FONT)
-                    .color(TEXT)
+                    .style(text_tone(TextTone::Text))
                     .into(),
             });
             // Actions appear once the answer is complete.
@@ -188,16 +194,19 @@ fn entry_view<'a>(
             block.into()
         }
         (AgentRole::Thinking, _) => thinking_view(agents, pane, entry, streaming),
-        (AgentRole::Tool, Some(tool)) => tool_view(agents, pane, entry, tool),
-        (AgentRole::Tool | AgentRole::Notice, _) => {
-            Element::from(text(entry.text.as_str()).size(13).font(FONT).color(MUTED))
-        }
+        (AgentRole::Tool, Some(tool)) => tool_view(agents, pane, entry, tool, theme),
+        (AgentRole::Tool | AgentRole::Notice, _) => Element::from(
+            text(entry.text.as_str())
+                .size(13)
+                .font(FONT)
+                .style(text_tone(TextTone::Muted)),
+        ),
     }
 }
 
 /// How Markdown is sized and coloured.
-fn settings() -> markdown::Settings {
-    let mut style = markdown::Style::from_palette(theme().palette());
+fn settings(theme: &Theme) -> markdown::Settings {
+    let mut style = markdown::Style::from_palette(theme.palette());
     style.font = FONT;
     style.code_block_font = Font::MONOSPACE;
     style.inline_code_font = Font::MONOSPACE;
@@ -213,13 +222,13 @@ fn fold_header<'a>(
 ) -> Element<'a, Message> {
     button(
         row![
-            icon(
+            themed_icon(
                 if unfolded {
                     Icon::Chevron
                 } else {
                     Icon::ChevronRight
                 },
-                MUTED
+                TextTone::Muted,
             ),
             content,
         ]
@@ -245,12 +254,22 @@ fn thinking_view<'a>(
         pane,
         entry.id,
         unfolded,
-        text(label).size(12).font(FONT).color(MUTED).into()
+        text(label)
+            .size(12)
+            .font(FONT)
+            .style(text_tone(TextTone::Muted))
+            .into()
     )]
     .spacing(4);
     if unfolded {
         block = block.push(
-            container(text(entry.text.as_str()).size(13).font(FONT).color(MUTED)).padding([0, 22]),
+            container(
+                text(entry.text.as_str())
+                    .size(13)
+                    .font(FONT)
+                    .style(text_tone(TextTone::Muted)),
+            )
+            .padding([0, 22]),
         );
     }
     block.into()
@@ -262,28 +281,38 @@ fn tool_view<'a>(
     pane: u64,
     entry: &'a AgentMessage,
     tool: &'a AgentTool,
+    theme: &Theme,
 ) -> Element<'a, Message> {
     let unfolded = agents.is_unfolded(pane, entry.id);
+    let colors = color_palette_for(theme);
     let color = match tool.state {
-        ToolState::Running => ACCENT,
-        ToolState::Done => SUCCESS,
-        ToolState::Failed => DANGER,
+        ToolState::Running => colors.accent,
+        ToolState::Done => colors.success,
+        ToolState::Failed => colors.danger,
     };
     let mut title = row![
         dot(color),
-        text(tool.name.as_str()).size(12).font(FONT).color(TEXT)
+        text(tool.name.as_str())
+            .size(12)
+            .font(FONT)
+            .style(text_tone(TextTone::Text))
     ]
     .spacing(8)
     .align_y(Alignment::Center);
     if !entry.text.is_empty() {
-        title = title.push(text(entry.text.as_str()).size(12).font(FONT).color(MUTED));
+        title = title.push(
+            text(entry.text.as_str())
+                .size(12)
+                .font(FONT)
+                .style(text_tone(TextTone::Muted)),
+        );
     }
     if !tool.detail.is_empty() {
         title = title.push(
             text(tool.detail.as_str())
                 .size(11)
                 .font(Font::MONOSPACE)
-                .color(MUTED),
+                .style(text_tone(TextTone::Muted)),
         );
     }
     let mut card = column![fold_header(pane, entry.id, unfolded, title.into())].spacing(4);
@@ -292,8 +321,8 @@ fn tool_view<'a>(
             container(output(tool))
                 .padding(10)
                 .width(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(HOVER)),
+                .style(|theme| container::Style {
+                    background: Some(Background::Color(color_palette_for(theme).hover)),
                     border: Border {
                         radius: 8.0.into(),
                         ..Border::default()
@@ -305,9 +334,9 @@ fn tool_view<'a>(
     container(card)
         .padding(4)
         .width(Length::Fill)
-        .style(|_| container::Style {
+        .style(|theme| container::Style {
             border: Border {
-                color: BORDER,
+                color: color_palette_for(theme).border,
                 width: 1.0,
                 radius: 10.0.into(),
             },
@@ -331,19 +360,19 @@ fn output(tool: &AgentTool) -> Element<'_, Message> {
             "No output"
         })
         .size(12)
-        .color(MUTED)
+        .style(text_tone(TextTone::Muted))
         .into();
     }
     column(shown.lines().map(|line| {
-        let color = match line.chars().next() {
-            Some('+') if diff => SUCCESS,
-            Some('-') if diff => DANGER,
-            _ => TEXT,
+        let tone = match line.chars().next() {
+            Some('+') if diff => TextTone::Success,
+            Some('-') if diff => TextTone::Danger,
+            _ => TextTone::Text,
         };
         text(line)
             .size(12)
             .font(Font::MONOSPACE)
-            .color(color)
+            .style(text_tone(tone))
             .into()
     }))
     .into()
@@ -357,28 +386,46 @@ enum Look {
     Danger,
 }
 
+#[derive(Clone, Copy)]
+enum ChipFill {
+    Transparent,
+    ThemeBackground,
+}
+
 /// A question or approval the agent waits on. Only a click here answers it.
-fn dialog_view<'a>(agents: &'a Agents, pane: u64, dialog: &'a AgentDialog) -> Element<'a, Message> {
+fn dialog_view<'a>(
+    agents: &'a Agents,
+    pane: u64,
+    dialog: &'a AgentDialog,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    let colors = color_palette_for(theme);
     let answer =
         |what: DialogAnswer| tell(AgentMessageEvent::Answer(pane, dialog.id.clone(), what));
     let choice = |label: &'a str, what: DialogAnswer, look: Look| {
         let style = match look {
-            Look::Plain => chip(None, TEXT),
-            Look::Strong => chip(Some(TEXT), BACKGROUND),
-            Look::Danger => chip(None, DANGER),
+            Look::Plain => chip(ChipFill::Transparent, colors.text),
+            Look::Strong => chip(ChipFill::ThemeBackground, colors.text),
+            Look::Danger => chip(ChipFill::Transparent, colors.danger),
         };
         button(text(label).size(13).font(FONT))
             .padding([6, 14])
             .style(style)
             .on_press(answer(what))
     };
-    let mut card = column![text(dialog.title.as_str()).size(14).font(FONT).color(TEXT)].spacing(8);
+    let mut card = column![
+        text(dialog.title.as_str())
+            .size(14)
+            .font(FONT)
+            .style(text_tone(TextTone::Text))
+    ]
+    .spacing(8);
     if !dialog.message.is_empty() {
         card = card.push(
             text(dialog.message.as_str())
                 .size(12)
                 .font(FONT)
-                .color(MUTED),
+                .style(text_tone(TextTone::Muted)),
         );
     }
     let mut buttons = row![].spacing(8).align_y(Alignment::Center);
@@ -417,10 +464,10 @@ fn dialog_view<'a>(agents: &'a Agents, pane: u64, dialog: &'a AgentDialog) -> El
     container(card.push(buttons))
         .padding(14)
         .width(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(Background::Color(SELECTED)),
+        .style(|theme| container::Style {
+            background: Some(Background::Color(color_palette_for(theme).selected)),
             border: Border {
-                color: ACCENT,
+                color: color_palette_for(theme).accent,
                 width: 1.0,
                 radius: 14.0.into(),
             },
@@ -542,14 +589,21 @@ fn composer<'a>(
         // The arrow is lit only when there is something to send.
         let ready = !content.text().trim().is_empty() || !agents.attachments(pane).is_empty();
         let arrow = button(
-            container(icon(Icon::Send, if ready { BACKGROUND } else { MUTED }))
-                .center(Length::Fill),
+            container(icon(
+                Icon::Send,
+                if ready { iced::Color::BLACK } else { MUTED },
+            ))
+            .center(Length::Fill),
         )
         .width(32)
         .height(32)
         .padding(0)
-        .style(move |_, _| button::Style {
-            background: Some(Background::Color(if ready { TEXT } else { HOVER })),
+        .style(move |theme, _| button::Style {
+            background: Some(Background::Color(if ready {
+                TEXT
+            } else {
+                color_palette_for(theme).hover
+            })),
             border: Border {
                 radius: 16.0.into(),
                 ..Border::default()
@@ -565,8 +619,8 @@ fn composer<'a>(
     // Lighter than the page, as a raised field, with no outline.
     let field = container(controls)
         .padding([6, 10])
-        .style(|_| container::Style {
-            background: Some(Background::Color(SELECTED)),
+        .style(|theme| container::Style {
+            background: Some(Background::Color(color_palette_for(theme).selected)),
             border: Border {
                 radius: 22.0.into(),
                 ..Border::default()
@@ -614,14 +668,17 @@ fn attachments<'a>(pane: u64, files: &'a [Attachment]) -> Element<'a, Message> {
             .on_press(tell(AgentMessageEvent::Unattach(pane, file.named.clone())));
         container(row![shown, drop].spacing(6).align_y(Alignment::Start))
             .padding([6, 8])
-            .style(|_| container::Style {
-                background: Some(Background::Color(SELECTED)),
-                border: Border {
-                    radius: 10.0.into(),
-                    width: 1.0,
-                    color: BORDER,
-                },
-                ..container::Style::default()
+            .style(|theme| {
+                let colors = color_palette_for(theme);
+                container::Style {
+                    background: Some(Background::Color(colors.selected)),
+                    border: Border {
+                        radius: 10.0.into(),
+                        width: 1.0,
+                        color: colors.border,
+                    },
+                    ..container::Style::default()
+                }
             })
             .into()
     });
@@ -1054,7 +1111,7 @@ fn allowance_bar<'a>(left: u8) -> Element<'a, Message> {
 fn usage_panel<'a>(pane: u64, agent: &'a Agent) -> container::Container<'a, Message> {
     let refresh = button(text("Refresh").font(FONT).size(12))
         .padding([4, 12])
-        .style(chip(None, TEXT))
+        .style(chip(ChipFill::Transparent, TEXT))
         .on_press(tell(AgentMessageEvent::RefreshUsage(pane)));
     let mut body = column![
         row![
@@ -1164,8 +1221,8 @@ fn context_meter<'a>(percent: u8) -> Element<'a, Message> {
         )
         .width(36)
         .height(4)
-        .style(|_| container::Style {
-            background: Some(Background::Color(BORDER)),
+        .style(|theme| container::Style {
+            background: Some(Background::Color(color_palette_for(theme).border)),
             border: Border {
                 radius: 2.0.into(),
                 ..Border::default()
@@ -1249,23 +1306,23 @@ fn level_line<'a>(item: Element<'a, Message>) -> Element<'a, Message> {
 
 /// A bordered, rounded button: the look of a dialog's choices.
 fn chip(
-    fill: Option<iced::Color>,
+    fill: ChipFill,
     ink: iced::Color,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |_, status| {
+    move |theme, status| {
+        let colors = color_palette_for(theme);
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         button::Style {
             background: Some(Background::Color(match (fill, hovered) {
-                (Some(color), _) => color,
-                (None, true) => HOVER,
-                (None, false) => iced::Color::TRANSPARENT,
+                (ChipFill::ThemeBackground, _) => colors.background,
+                (ChipFill::Transparent, true) => colors.hover,
+                (ChipFill::Transparent, false) => iced::Color::TRANSPARENT,
             })),
             text_color: ink,
             border: Border {
-                color: if fill.is_some() {
-                    iced::Color::TRANSPARENT
-                } else {
-                    BORDER
+                color: match fill {
+                    ChipFill::Transparent => colors.border,
+                    ChipFill::ThemeBackground => iced::Color::TRANSPARENT,
                 },
                 width: 1.0,
                 radius: 8.0.into(),

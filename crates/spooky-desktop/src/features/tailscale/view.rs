@@ -12,7 +12,7 @@ fn tell(message: super::Message) -> Message {
     Message::Tailscale(message)
 }
 
-pub(crate) fn view(picker: &Picker) -> Element<'_, Message> {
+pub(crate) fn view(picker: &Picker, colors: ColorPalette) -> Element<'_, Message> {
     let query = picker.query.to_lowercase();
     let user = picker.user.trim();
     let user_valid = user_is_valid(user);
@@ -22,11 +22,11 @@ pub(crate) fn view(picker: &Picker) -> Element<'_, Message> {
             devices = devices.push(
                 text("Reading local Tailscale client…")
                     .size(11)
-                    .color(MUTED),
+                    .style(text_tone(TextTone::Muted)),
             );
         }
         Discovery::Failed(error) => {
-            devices = devices.push(text(error).size(11).color(TEXT));
+            devices = devices.push(text(error).size(11).style(text_tone(TextTone::Text)));
         }
         Discovery::Ready(network) => {
             let mut shown = 0;
@@ -37,11 +37,17 @@ pub(crate) fn view(picker: &Picker) -> Element<'_, Message> {
                 shown += 1;
                 let entry = button(
                     row![
-                        dot(if peer.online { SUCCESS } else { MUTED }),
+                        dot(if peer.online {
+                            colors.success
+                        } else {
+                            colors.muted
+                        }),
                         column![
-                            text(&peer.name)
-                                .size(11)
-                                .color(if peer.online { TEXT } else { MUTED }),
+                            text(&peer.name).size(11).style(text_tone(if peer.online {
+                                TextTone::Text
+                            } else {
+                                TextTone::Muted
+                            })),
                             text(format!(
                                 "{} · {} · {}",
                                 peer.host,
@@ -49,7 +55,7 @@ pub(crate) fn view(picker: &Picker) -> Element<'_, Message> {
                                 if peer.online { "online" } else { "offline" }
                             ))
                             .size(9)
-                            .color(MUTED),
+                            .style(text_tone(TextTone::Muted)),
                         ]
                         .spacing(3)
                         .width(Length::Fill),
@@ -74,7 +80,7 @@ pub(crate) fn view(picker: &Picker) -> Element<'_, Message> {
                         "No matching devices."
                     })
                     .size(11)
-                    .color(MUTED),
+                    .style(text_tone(TextTone::Muted)),
                 );
             }
         }
@@ -84,13 +90,13 @@ pub(crate) fn view(picker: &Picker) -> Element<'_, Message> {
         .style(quiet);
     column![
         row![
-            text("Tailscale devices").size(14).color(TEXT).width(Length::Fill),
+            text("Tailscale devices").size(14).style(text_tone(TextTone::Text)).width(Length::Fill),
             action(Icon::Close, "Close Tailscale devices", tell(super::Message::Close)),
         ].align_y(Alignment::Center),
-        text("Uses your installed Tailscale client. Selecting a device prepares SSH; Connect starts the session.").size(10).color(MUTED),
+        text("Uses your installed Tailscale client. Selecting a device prepares SSH; Connect starts the session.").size(10).style(text_tone(TextTone::Muted)),
         text_input("Search devices or IP", &picker.query).size(11).padding(7).on_input(|query| tell(super::Message::Query(query))),
         text_input("SSH user (optional)", &picker.user).size(11).padding(7).on_input(|user| tell(super::Message::User(user))),
-        text(if user_valid { "Remote device needs SSH and spooky-server." } else { "Invalid SSH user: use letters, digits, dot, underscore or hyphen." }).size(10).color(MUTED),
+        text(if user_valid { "Remote device needs SSH and spooky-server." } else { "Invalid SSH user: use letters, digits, dot, underscore or hyphen." }).size(10).style(text_tone(TextTone::Muted)),
         container(scrollable(devices)).height(240),
         if matches!(picker.discovery, Discovery::Loading) { refresh } else { refresh.on_press(tell(super::Message::Refresh)) },
     ].spacing(10).into()

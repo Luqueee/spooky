@@ -3,6 +3,8 @@
 
 mod icons;
 mod theme;
+mod themes;
+pub(crate) use themes::{ThemeCatalog, ThemeDefinition, themes_directory, valid_theme_id};
 
 pub(crate) use icons::*;
 pub(crate) use theme::*;
