@@ -107,6 +107,10 @@ pub(crate) struct Config {
     pub osc52: Osc52,
     /// Whether a blinking cursor blinks. Off keeps every cursor solid.
     pub cursor_blink: bool,
+    /// Whether selecting text in a terminal with the mouse copies it when the drag ends.
+    /// Select all is never copied by itself, and an application that asks for the mouse
+    /// keeps it (hold Shift to select there).
+    pub copy_on_select: bool,
     /// What the window does when it loses the keyboard focus.
     pub on_blur: OnBlur,
     /// Built-in application palette; terminal ANSI colors are not changed.
@@ -140,6 +144,7 @@ impl Default for Config {
             dock_icon: false,
             osc52: Osc52::Write,
             cursor_blink: true,
+            copy_on_select: true,
             on_blur: OnBlur::None,
             appearance: Appearance::default(),
             custom_theme: None,
@@ -425,6 +430,20 @@ mod tests {
     }
 
     #[test]
+    fn selecting_copies_unless_the_file_turns_it_off() {
+        assert!(parse("").expect("defaults").copy_on_select);
+        assert!(
+            !parse("copy_on_select = false")
+                .expect("explicit")
+                .copy_on_select
+        );
+        assert!(
+            parse("copy_on_select = \"yes\"").is_err(),
+            "a mistyped value is an error"
+        );
+    }
+
+    #[test]
     fn a_saved_file_loads_back_unchanged_and_names_only_what_was_set() {
         let dir = scratch();
         let path = dir.join("spooky/config.toml");
@@ -433,6 +452,7 @@ mod tests {
             shortcut: "F10".into(),
             on_blur: OnBlur::Hide,
             cursor_blink: false,
+            copy_on_select: false,
             size: Some(SizeMode::Percent),
             appearance: Appearance::Dracula,
             custom_theme: Some("ember".into()),

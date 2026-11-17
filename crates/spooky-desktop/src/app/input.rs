@@ -48,6 +48,17 @@ impl App {
                     all: false,
                 });
             }
+            Message::SelectionEnd(pane) => {
+                if self.config.copy_on_select
+                    && self
+                        .selection
+                        .is_some_and(|selection| selection.pane == pane && !selection.all)
+                    && let Some(text) = self.selected_text()
+                {
+                    self.copy_pending = None;
+                    return clipboard::write(text);
+                }
+            }
             Message::ScrollPane(p, lines) => {
                 if lines != 0 {
                     self.send(Request::Scroll { pane: p, lines });

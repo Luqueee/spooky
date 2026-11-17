@@ -403,6 +403,11 @@ pub(crate) fn view<'a>(
             switch(config.cursor_blink, Change::CursorBlink),
         ),
         option(
+            "Copy on select",
+            "Selecting text with the mouse copies it when you let go; Shift-drag selects in programs that use the mouse",
+            switch(config.copy_on_select, Change::CopyOnSelect),
+        ),
+        option(
             "Clipboard writes from programs",
             "OSC 52: how tmux and vim over SSH copy; reading is never allowed",
             switch(config.osc52 == Osc52::Write, Change::Osc52),

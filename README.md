@@ -159,6 +159,7 @@ shortcut = "Ctrl+Shift+Space"
 dock_icon = false
 osc52 = "write"
 cursor_blink = true
+copy_on_select = true       # copy the text you select when you release the mouse
 on_blur = "none"            # "none", "hide" or "top"
 appearance = "spooky"     # "spooky", "nord" or "dracula"
 update_channel = "stable"   # "stable" or "dev" (also takes pre-releases)
@@ -177,6 +178,8 @@ background that happens to equal the default color; update that server to preser
 `on_blur` is what happens when another app takes the keyboard focus: `"none"` leaves the window where it is, `"top"` keeps it above every other window, and `"hide"` hides it (the global shortcut brings it back, so `"hide"` is refused without one). A native file dialog opened by Spooky does not count as clicking away.
 
 `osc52` is `"write"` (programs may set the clipboard) or `"off"`. `cursor_blink = false` keeps every cursor solid.
+
+`copy_on_select` (default `true`) copies the text you select with the mouse to the system clipboard when you let go of the button, like most terminals. It copies what the drag selected and nothing else: Select all is never copied by itself, and an application that asks for the mouse (tmux, vim) keeps it unless you hold Shift. Set it to `false` to copy only with the Copy command.
 
 Settings offers Spooky, Nord, Dracula, Ember, Ocean and Midnight, plus user themes. Put a
 `.toml` file in `$XDG_CONFIG_HOME/spooky/themes/` (normally

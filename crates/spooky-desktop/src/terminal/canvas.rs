@@ -193,7 +193,8 @@ impl canvas::Program<Message> for Terminal<'_> {
                 }
                 if *released == mouse::Button::Left && state.dragging {
                     state.dragging = false;
-                    return Some(canvas::Action::capture());
+                    // The selection is final now: the application may copy it.
+                    return Some(canvas::Action::publish(Message::SelectionEnd(id)).and_capture());
                 }
                 None
             }
