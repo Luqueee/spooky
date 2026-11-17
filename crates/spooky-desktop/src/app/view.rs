@@ -849,6 +849,7 @@ impl App {
                 &self.config,
                 &self.themes,
                 self.hotkeys.is_some(),
+                self.dropdown(),
                 self.glass_available,
                 self.reduce_transparency,
             )

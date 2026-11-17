@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.spooky.terminal</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Spooky</name>
+  <summary>Persistent GPU terminal workspaces</summary>
+  <description>
+    <p>
+      A native dropdown terminal with persistent workspaces, tabs and split panes. Shells
+      run on a session server, so closing the window never ends them and reconnecting
+      shows the same state, locally or over SSH.
+    </p>
+    <ul>
+      <li>Workspaces, tabs and split panes that survive closing the window</li>
+      <li>A dropdown window shown and hidden with a global shortcut, where the desktop allows it</li>
+      <li>SSH workspaces with verified host keys and file attachments</li>
+      <li>A conversation view for coding agents</li>
+    </ul>
+  </description>
+  <developer id="dev.spooky">
+    <name>Spooky contributors</name>
+  </developer>
+  <launchable type="desktop-id">dev.spooky.terminal.desktop</launchable>
+  <url type="homepage">https://github.com/Luqueee/spooky</url>
+  <url type="bugtracker">https://github.com/Luqueee/spooky/issues</url>
+  <provides>
+    <binary>spooky</binary>
+    <binary>spooky-server</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-17"/>
+  </releases>
+</component>

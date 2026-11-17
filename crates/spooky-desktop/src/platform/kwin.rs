@@ -1,7 +1,6 @@
-//! KDE Plasma 6 on Wayland. Wayland lets a client neither register a global key nor place,
-//! hide or raise its own window, so both go through KDE: the shortcut through the
-//! `org.freedesktop.portal.GlobalShortcuts` portal, and the window through a one-shot
-//! KWin QML script loaded over D-Bus. A leaf module: it depends on no feature.
+//! KDE Plasma 6 on Wayland. Wayland lets a client neither place, hide nor raise its own
+//! window, so it goes through KWin: a one-shot QML script loaded over D-Bus. The shortcut
+//! is `portal`'s. A leaf module: it depends on no feature.
 
 use std::{
     io::Write,
@@ -12,28 +11,14 @@ use std::{
 };
 use zbus::block_on;
 
-/// The application id: the window class winit gives the window (which the KWin script
-/// matches), the portal's application id, and the name of the desktop entry.
-pub(crate) const APP_ID: &str = "dev.spooky.terminal";
-const SHORTCUT: &str = "toggle";
-/// The first bind can show a confirmation dialog; the wait covers the person answering.
+use super::APP_ID;
+
 /// How long the window takes to fade in or out; the application's slide lasts as long.
 const SLIDE_MS: u64 = 200;
 /// Where a hidden window waits: beyond any display.
 const PARK: u32 = 30000;
 /// Matches `window::slide::FIRST_DELAY`, which holds the application's own slide back.
 const FIRST_REVEAL_DELAY: Duration = Duration::from_millis(300);
-const BIND_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Whether this is a KDE Wayland session, where this module can do what Wayland forbids.
-pub(crate) fn active() -> bool {
-    static ACTIVE: OnceLock<bool> = OnceLock::new();
-    *ACTIVE.get_or_init(|| {
-        std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var("XDG_CURRENT_DESKTOP")
-                .is_ok_and(|desktop| desktop.split(':').any(|d| d.eq_ignore_ascii_case("KDE")))
-    })
-}
 
 /// One side of the window: Wayland does not tell a client its display until the window
 /// has been shown, so a share of the display is resolved by KWin, which knows it.
@@ -381,103 +366,9 @@ impl Loaded {
     }
 }
 
-/// Registers `text` as the preferred trigger of the application's one shortcut and calls
-/// `on_press` for each activation. Blocks until the portal answers. The trigger is a
-/// suggestion: KDE keeps whatever the person set in System Settings.
-pub(crate) fn bind_shortcut(
-    text: &str,
-    on_press: impl Fn() + Send + 'static,
-) -> Result<(), String> {
-    let trigger = portal_trigger(text);
-    let (ready, answer) = mpsc::sync_channel(1);
-    thread::Builder::new()
-        .name("spooky-portal".into())
-        .spawn(move || {
-            let error = |message: String| {
-                let _ = ready.try_send(Err(message));
-            };
-            if let Err(e) = block_on(listen(&trigger, &ready, on_press)) {
-                error(e.to_string());
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    answer
-        .recv_timeout(BIND_TIMEOUT)
-        .map_err(|_| "the desktop portal did not answer".to_owned())?
-}
-
-async fn listen(
-    trigger: &str,
-    ready: &mpsc::SyncSender<Result<(), String>>,
-    on_press: impl Fn(),
-) -> Result<(), ashpd::Error> {
-    use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
-    use iced::futures::StreamExt;
-    // A process outside a sandbox has no application id for the portal; an older portal
-    // lacks the registry, and the bind below then says what is missing.
-    if let Ok(id) = ashpd::AppID::try_from(APP_ID) {
-        let _ = ashpd::register_host_app(id).await;
-    }
-    let portal = GlobalShortcuts::new().await?;
-    // Listening starts before binding so no early press is lost.
-    let mut activated = portal.receive_activated().await?;
-    let session = portal.create_session().await?;
-    portal
-        .bind_shortcuts(
-            &session,
-            &[NewShortcut::new(SHORTCUT, "Show or hide Spooky").preferred_trigger(trigger)],
-            None,
-        )
-        .await?
-        .response()?;
-    let _ = ready.try_send(Ok(()));
-    while let Some(press) = activated.next().await {
-        if press.shortcut_id() == SHORTCUT {
-            on_press();
-        }
-    }
-    drop(session);
-    Ok(())
-}
-
-/// Spells a shortcut (`Ctrl+Shift+Space`) as the portal's XDG form (`CTRL+SHIFT+space`).
-fn portal_trigger(text: &str) -> String {
-    text.split('+')
-        .map(|part| {
-            let part = part.trim();
-            match part.to_ascii_lowercase().as_str() {
-                "ctrl" | "control" => "CTRL".to_owned(),
-                "shift" => "SHIFT".to_owned(),
-                "alt" | "option" => "ALT".to_owned(),
-                "cmd" | "command" | "super" | "win" | "meta" => "LOGO".to_owned(),
-                "space" => "space".to_owned(),
-                "enter" | "return" => "Return".to_owned(),
-                lower => match lower
-                    .strip_prefix("key")
-                    .or_else(|| lower.strip_prefix("digit"))
-                {
-                    Some(key) if key.len() == 1 => key.to_owned(),
-                    _ if part.len() == 1 => lower.to_owned(),
-                    _ => part.to_owned(),
-                },
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shortcuts_are_spelled_the_way_the_portal_expects() {
-        assert_eq!(portal_trigger("Ctrl+Shift+Space"), "CTRL+SHIFT+space");
-        assert_eq!(portal_trigger("Ctrl+Alt+Shift+F8"), "CTRL+ALT+SHIFT+F8");
-        assert_eq!(portal_trigger("Cmd+KeyK"), "LOGO+k");
-        assert_eq!(portal_trigger("Ctrl+Enter"), "CTRL+Return");
-        assert_eq!(portal_trigger("Alt+Up"), "ALT+Up");
-    }
 
     #[test]
     fn a_burst_of_requests_keeps_the_size_that_was_asked_for() {

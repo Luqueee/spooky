@@ -335,7 +335,9 @@ impl App {
                 pending: None,
                 directory_fallback: None,
                 window: None,
-                glass_available: false,
+                // Linux windows are created transparent, so the desktop can show through;
+                // macOS finds out once its blur view is installed.
+                glass_available: cfg!(target_os = "linux"),
                 reduce_transparency: false,
                 hidden: false,
                 focused: false,

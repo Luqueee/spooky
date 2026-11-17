@@ -71,6 +71,10 @@ case "$(uname -s)" in
     cp assets/logo-256.png "$out/share/icons/hicolor/256x256/apps/dev.spooky.terminal.png"
     tar -czf "$out.tar.gz" -C "$out" .
     printf 'Built archive: %s.tar.gz\n' "$out"
+    # A .deb as well, wherever the Debian tools are present.
+    if command -v dpkg-deb >/dev/null; then
+      ./scripts/package-deb.sh
+    fi
     ;;
   *) printf 'Packaging is currently supported on macOS and Linux only.\n' >&2; exit 1 ;;
 esac
