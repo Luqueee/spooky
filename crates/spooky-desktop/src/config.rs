@@ -2,7 +2,7 @@
 //! the settings page writes it back.
 
 #[cfg(target_os = "linux")]
-use crate::platform::kde::Dim;
+use crate::platform::kwin::Dim;
 use iced::Size;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -262,7 +262,7 @@ impl Config {
 
     #[cfg(target_os = "linux")]
     /// The configured window size as KWin resolves it against its own display.
-    pub(crate) fn kde_dims(&self) -> (Dim, Dim) {
+    pub(crate) fn kwin_dims(&self) -> (Dim, Dim) {
         match self.size_mode() {
             SizeMode::Pixels => (
                 Dim::Px(self.width_px().round() as u32),

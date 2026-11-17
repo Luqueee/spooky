@@ -2,9 +2,16 @@ use super::{App, Message};
 use crate::config::{OnBlur, SizeMode};
 use crate::features::settings::{Change, Effect};
 use crate::features::window::{FIRST_DELAY, Slide, dropdown_origin, hides_on_blur, usable_area};
-use crate::platform::{fade, kde};
+#[cfg(target_os = "linux")]
+use crate::platform::kwin;
+use crate::platform::{WindowControl, fade, window_control};
 use iced::{Point, Rectangle, Size, Task, window};
 use std::time::{Duration, Instant};
+
+/// Whether KWin places, hides and raises the window.
+fn kwin_controls_window() -> bool {
+    window_control() == WindowControl::Kwin
+}
 
 /// How long without a resize event ends a drag of the window's edge.
 const RESIZE_SETTLE: Duration = Duration::from_millis(400);
@@ -34,6 +41,11 @@ impl App {
                 if self.hotkeys.as_ref().is_some_and(|keys| keys.id() == key)
                     && let Some(id) = self.window
                 {
+                    if !self.dropdown() {
+                        // The desktop does not let the window be hidden, so the shortcut
+                        // only brings it forward.
+                        return Task::batch([window::minimize(id, false), window::gain_focus(id)]);
+                    }
                     if let Some(pending) = &mut self.hotkey_pending {
                         *pending = !*pending;
                         return Task::none();
@@ -71,7 +83,7 @@ impl App {
                         self.config.on_blur,
                         self.hidden,
                         self.attachments.dialog_open(),
-                        self.hotkeys.is_some(),
+                        self.dropdown(),
                     )
                 {
                     return self.hide();
@@ -126,7 +138,7 @@ impl App {
                     self.slide = None;
                     fade::set(1.0);
                 } else if slide.closed()
-                    && !kde::active()
+                    && !kwin_controls_window()
                     && let Some(id) = self.window
                 {
                     // Where the window can be hidden, it is once the content is out of sight.
@@ -141,8 +153,8 @@ impl App {
                 // KDE, which only knows it a moment after it is shown, after a delay); one
                 // already shown is only placed.
                 let first = !std::mem::replace(&mut self.presented, true);
-                if (self.hidden || first) && self.hotkeys.is_some() {
-                    let delay = if first && kde::active() {
+                if (self.hidden || first) && self.dropdown() {
+                    let delay = if first && kwin_controls_window() {
                         FIRST_DELAY
                     } else {
                         Duration::ZERO
@@ -152,7 +164,7 @@ impl App {
                 self.hidden = false;
                 self.resizing = false;
                 // Without waiting for the focus event, so a quick second press hides it.
-                if kde::active() {
+                if kwin_controls_window() {
                     self.focused = true;
                 }
                 if !self.settings.is_shown() {
@@ -169,7 +181,7 @@ impl App {
                     self.dropdown_display = Some(bounds);
                 }
                 #[cfg(target_os = "linux")]
-                let kde_size = kde::active() && std::mem::take(&mut self.size_pending);
+                let kwin_size = kwin_controls_window() && std::mem::take(&mut self.size_pending);
                 let needs_size = self.size_pending
                     || (display_changed && self.config.size_mode() == SizeMode::Percent);
                 let target = if needs_size {
@@ -209,13 +221,13 @@ impl App {
                 }
                 // Wayland ignores the placement above; KWin does it there.
                 #[cfg(target_os = "linux")]
-                if kde::active() {
-                    let (width, height) = if kde_size {
-                        self.config.kde_dims()
+                if kwin_controls_window() {
+                    let (width, height) = if kwin_size {
+                        self.config.kwin_dims()
                     } else {
-                        (kde::Dim::Keep, kde::Dim::Keep)
+                        (kwin::Dim::Keep, kwin::Dim::Keep)
                     };
-                    kde::send(kde::Action::Reveal {
+                    kwin::send(kwin::Action::Reveal {
                         width,
                         height,
                         above: self.config.on_blur == crate::config::OnBlur::Top,
@@ -239,7 +251,7 @@ impl App {
                         self.status = "Window blur unavailable; using a solid background".into();
                     }
                 }
-                if self.hotkeys.is_some() {
+                if self.dropdown() {
                     #[cfg(target_os = "macos")]
                     {
                         crate::platform::macos::app::show_windows_instantly();
@@ -256,7 +268,7 @@ impl App {
             // without one, hiding would strand the app, so closing quits. Sessions
             // run on the server either way.
             Message::Close(id) => {
-                return if self.hotkeys.is_some() {
+                return if self.dropdown() {
                     self.hide()
                 } else {
                     window::close(id)
@@ -315,6 +327,11 @@ impl App {
         effects.retain(|effect| *effect != Effect::Resize);
         self.apply_effects(effects)
     }
+    /// Whether the window works as a dropdown: a global shortcut shows and hides it, and
+    /// the desktop lets it be hidden and placed. Without that it is an ordinary window.
+    pub(super) fn dropdown(&self) -> bool {
+        self.hotkeys.is_some() && window_control() != WindowControl::Unavailable
+    }
     /// Where the content is now, or `idle` when no slide is in progress.
     fn slide_share(&self, idle: f32) -> f32 {
         self.slide.map_or(idle, |slide| slide.hidden_share())
@@ -333,8 +350,8 @@ impl App {
         // it is hidden when the slide ends.
         self.slide = Some(Slide::close(Instant::now(), self.slide_share(0.0)));
         #[cfg(target_os = "linux")]
-        if kde::active() {
-            kde::send(kde::Action::Hide);
+        if kwin_controls_window() {
+            kwin::send(kwin::Action::Hide);
         }
         Task::none()
     }

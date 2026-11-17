@@ -121,14 +121,15 @@ fn apply(change: Change) -> Message {
     Message::Settings(super::Message::Change(change))
 }
 
-/// The page that replaces the terminal while the settings tab is selected. `shortcuts_available` is
-/// whether the session has a global shortcut that can be recorded and can bring a
-/// hidden window back.
+/// The page that replaces the terminal while the settings tab is selected.
+/// `shortcuts_available` is whether the session has a global shortcut, and `can_hide`
+/// whether that shortcut can also hide the window and bring it back.
 pub(crate) fn view<'a>(
     settings: &'a Settings,
     config: &'a Config,
     themes: &'a ThemeCatalog,
     shortcuts_available: bool,
+    can_hide: bool,
     glass_available: bool,
     reduce_transparency: bool,
 ) -> Element<'a, Message> {
@@ -192,13 +193,12 @@ pub(crate) fn view<'a>(
             ),
         ),
     ];
-    let can_hide = shortcuts_available;
     window.push(option(
         "When another app is clicked",
         if can_hide {
             "Hiding brings the window back with the global shortcut"
         } else {
-            "Hiding needs the global shortcut, which is not available here"
+            "Hiding needs a global shortcut and a desktop that lets Spooky hide its window, which is not available here"
         },
         choice(vec![
             (
@@ -218,26 +218,28 @@ pub(crate) fn view<'a>(
             ),
         ]),
     ));
+    window.push(option(
+        "Background opacity",
+        if !glass_available {
+            "Transparency unavailable; the background stays solid"
+        } else if reduce_transparency {
+            "macOS Reduce Transparency is on; the background stays solid"
+        } else if cfg!(target_os = "macos") {
+            "Subtle background blur; 100% uses a solid background"
+        } else {
+            "Lets the desktop show through, blurred where the desktop offers it (KDE's Blur effect); 100% is solid"
+        },
+        stepper(
+            format!("{} %", config.background_opacity),
+            apply(Change::BackgroundOpacity(
+                config.background_opacity - PERCENT_STEP,
+            )),
+            apply(Change::BackgroundOpacity(
+                config.background_opacity + PERCENT_STEP,
+            )),
+        ),
+    ));
     if cfg!(target_os = "macos") {
-        window.push(option(
-            "Background opacity",
-            if !glass_available {
-                "Native blur unavailable; the background stays solid"
-            } else if reduce_transparency {
-                "macOS Reduce Transparency is on; the background stays solid"
-            } else {
-                "Subtle background blur; 100% uses a solid background"
-            },
-            stepper(
-                format!("{} %", config.background_opacity),
-                apply(Change::BackgroundOpacity(
-                    config.background_opacity - PERCENT_STEP,
-                )),
-                apply(Change::BackgroundOpacity(
-                    config.background_opacity + PERCENT_STEP,
-                )),
-            ),
-        ));
         window.push(option(
             "Dock icon",
             "Off runs without a Dock icon; the global shortcut is the way back",
@@ -288,8 +290,10 @@ pub(crate) fn view<'a>(
         "Global shortcut",
         if recording {
             "Hold Ctrl, Alt or Cmd with a key, or press a function key. Escape cancels"
-        } else {
+        } else if can_hide {
             "Shows and hides the window from any application"
+        } else {
+            "Brings the window forward from any application; this desktop does not let Spooky hide or place it"
         },
         shortcut,
     )];

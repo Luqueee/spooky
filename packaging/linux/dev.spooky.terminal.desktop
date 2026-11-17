@@ -1,9 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=Spooky
+GenericName=Terminal
 Comment=Persistent GPU terminal workspaces
 Exec=spooky
 Icon=dev.spooky.terminal
 Terminal=false
 Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;ssh;workspace;
 StartupWMClass=dev.spooky.terminal

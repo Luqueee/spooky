@@ -68,6 +68,9 @@ pub(crate) enum Effect {
 pub(crate) trait Shortcuts {
     /// Whether the session has a global shortcut at all.
     fn available(&self) -> bool;
+    /// Whether the window can be hidden and brought back by that shortcut: it needs one,
+    /// and a desktop that lets the application hide its own window.
+    fn can_hide(&self) -> bool;
     /// Binds the shortcut to `text`; on refusal the previous one keeps working.
     fn rebind(&mut self, text: &str) -> Result<(), String>;
 }
@@ -208,9 +211,10 @@ impl Settings {
                 next.height_percent = height;
             }
             Change::OnBlur(on_blur) => {
-                if on_blur == OnBlur::Hide && !shortcuts.available() {
+                if on_blur == OnBlur::Hide && !shortcuts.can_hide() {
                     self.report(Some(
-                        "Hiding needs the global shortcut, which is not available here".into(),
+                        "Hiding needs a global shortcut and a desktop that lets Spooky hide its window, which is not available here"
+                            .into(),
                     ));
                     return Vec::new();
                 }
@@ -253,7 +257,7 @@ impl Settings {
                 return self.rebind(Config::default().shortcut, config, shortcuts);
             }
         }
-        self.apply(next, config, shortcuts.available())
+        self.apply(next, config, shortcuts.can_hide())
     }
 
     /// Takes a key press as the new global shortcut while the page records one.
@@ -294,7 +298,7 @@ impl Settings {
             Ok(()) => {
                 let mut next = config.clone();
                 next.shortcut = text;
-                self.apply(next, config, shortcuts.available())
+                self.apply(next, config, shortcuts.can_hide())
             }
             Err(problem) => {
                 self.report(Some(problem));
@@ -371,6 +375,9 @@ mod tests {
 
     impl Shortcuts for Fake {
         fn available(&self) -> bool {
+            self.available
+        }
+        fn can_hide(&self) -> bool {
             self.available
         }
         fn rebind(&mut self, text: &str) -> Result<(), String> {

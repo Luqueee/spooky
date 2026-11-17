@@ -1,4 +1,5 @@
 use super::{App, Message};
+use crate::platform::{WindowControl, window_control};
 use crate::terminal;
 use crate::{
     features::{
@@ -218,6 +219,9 @@ impl App {
 impl settings::Shortcuts for Option<Hotkeys> {
     fn available(&self) -> bool {
         self.is_some()
+    }
+    fn can_hide(&self) -> bool {
+        self.is_some() && window_control() != WindowControl::Unavailable
     }
     fn rebind(&mut self, text: &str) -> Result<(), String> {
         self.as_mut()

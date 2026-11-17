@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 /// How long the content takes to slide in or out.
 pub(crate) const DURATION: Duration = Duration::from_millis(200);
 
-/// How long the first open waits for KWin to know the window (see `platform::kde`), so
+/// How long the first open waits for KWin to know the window (see `platform::kwin`), so
 /// the content does not slide before the window has been placed.
 pub(crate) const FIRST_DELAY: Duration = Duration::from_millis(300);
 

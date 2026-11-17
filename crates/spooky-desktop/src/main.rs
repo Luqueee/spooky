@@ -22,25 +22,18 @@ use iced::window;
 fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     let themes = ui::ThemeCatalog::load(&Config::themes_dir()?);
-    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let (hotkeys, status) = if wayland && !platform::kde::active() {
-        (
-            None,
-            "Wayland: global shortcuts and positioning are unavailable; use your compositor's shortcut"
-                .to_owned(),
-        )
-    } else {
-        match Hotkeys::start(&config.shortcut) {
-            Ok(hotkeys) => (Some(hotkeys), "Starting session…".to_owned()),
-            Err(StartError::Invalid(error)) => {
-                anyhow::bail!("Invalid global shortcut: {error}")
-            }
-            Err(StartError::Unavailable(error)) => {
-                (None, format!("Global shortcut unavailable: {error}"))
-            }
+    let (hotkeys, status) = match Hotkeys::start(&config.shortcut) {
+        Ok(hotkeys) => (Some(hotkeys), "Starting session…".to_owned()),
+        Err(StartError::Invalid(error)) => {
+            anyhow::bail!("Invalid global shortcut: {error}")
+        }
+        Err(StartError::Unavailable(error)) => {
+            (None, format!("Global shortcut unavailable: {error}"))
         }
     };
-    let dropdown = hotkeys.is_some();
+    // A dropdown needs the shortcut and a desktop that lets the window be hidden.
+    let dropdown =
+        hotkeys.is_some() && platform::window_control() != platform::WindowControl::Unavailable;
     let size = config.initial_size();
     let level = level_for(config.on_blur);
     // The application state owns the shortcut registration; the boot function hands
@@ -66,7 +59,11 @@ fn main() -> anyhow::Result<()> {
     .window(window::Settings {
         size,
         // The window is clear behind the content while it slides, so it can be see-through.
-        transparent: dropdown || cfg!(target_os = "macos"),
+        // Clear behind the content, for the slide and for the background opacity setting.
+        transparent: dropdown || cfg!(any(target_os = "macos", target_os = "linux")),
+        // Blur what shows through where the compositor offers it (KDE's Blur effect, on
+        // X11 and Wayland); others ignore the request. Fixed when the window is created.
+        blur: cfg!(target_os = "linux"),
         min_size: Some(config::MIN_WINDOW),
         level,
         #[cfg(target_os = "linux")]
@@ -79,7 +76,7 @@ fn main() -> anyhow::Result<()> {
         // The class KWin and the desktop entry know the window by.
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
-            application_id: platform::kde::APP_ID.to_owned(),
+            application_id: platform::APP_ID.to_owned(),
             ..Default::default()
         },
         #[cfg(target_os = "macos")]
@@ -94,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         position: window::Position::SpecificWith(initial_position),
         // On KDE the application's own header replaces KDE's title bar, which would
         // otherwise sit above it.
-        decorations: !platform::kde::active(),
+        decorations: platform::window_control() != platform::WindowControl::Kwin,
         exit_on_close_request: false,
         ..Default::default()
     })

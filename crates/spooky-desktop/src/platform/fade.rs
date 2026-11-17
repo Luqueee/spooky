@@ -1,7 +1,7 @@
 //! The window's overall opacity, for the fade that goes with the dropdown's slide.
 //!
 //! Wayland offers a client no way to do this, and on KDE the window manager fades the
-//! window instead (see `kde`), so here it does nothing. A leaf module: it depends on no
+//! window instead (see `kwin`), so here it does nothing. A leaf module: it depends on no
 //! feature.
 
 use iced::window::Window;

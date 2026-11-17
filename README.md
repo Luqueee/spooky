@@ -4,7 +4,29 @@ A native Rust dropdown terminal with persistent workspaces, tabs and split panes
 
 ## Platforms
 
-macOS is the initial runtime target. Linux is included in CI and packaging, but must be validated on real X11/Wayland desktops before claiming equivalent integration. Windows is deferred; future support must not require WSL.
+macOS is the initial runtime target. Linux is supported on Debian (13, "trixie", is the tested release) with a `.deb` package; Windows is deferred and must not require WSL.
+
+What works depends on the session, because a Wayland client can neither register a global key nor place, hide or raise its own window. Spooky detects the session once (`platform/desktop.rs`) and uses what it offers:
+
+| Session | Global shortcut | Window placement, hide, animation | Verified |
+|---|---|---|---|
+| X11, any desktop | Spooky grabs the key itself | Spooky, through the window manager; slide and fade | Debian 13 under XWayland |
+| KDE Plasma 6 on Wayland | Desktop portal; KDE owns the binding | KWin script; slide and fade | Debian 13, Plasma 6.3 |
+| GNOME and other Wayland | Desktop portal where it exists (GNOME 48 and later) | None: an ordinary window; the shortcut only brings it forward | Simulated on KDE by naming the desktop `GNOME`; never run on GNOME |
+| macOS | Spooky grabs the key itself | Spooky; slide and fade | CI compiles it; never run in this repository's Linux work |
+
+The **Background opacity** setting (Settings → Window) works on Linux as well as macOS: the window is created transparent and the interface backgrounds are drawn with that opacity, so text stays solid. On Linux the window also asks for blur behind it through winit (the KDE blur protocol on Wayland, the KDE blur property on X11), which KDE's Blur effect honours; compositors that ignore the request show plain transparency. It is requested when the window is created, and a compositor with no alpha support shows a solid background. Checked on KDE Plasma 6.3 Wayland: text behind a 50 % window was readable without blur and not with it.
+
+Where the shortcut or the window control is missing the settings page says so, closing the window quits instead of hiding it, and nothing is claimed that the desktop does not allow.
+
+### Install on Debian
+
+```sh
+./scripts/package.sh                 # builds dist/spooky_<version>_<arch>.deb
+sudo apt install ./dist/spooky_*.deb
+```
+
+The package installs `spooky` and `spooky-server` in `/usr/bin`, the desktop entry, the icon and AppStream metadata, and depends on the libraries the window system loads at run time (Vulkan, xkbcommon, Wayland and X11 client libraries) and on a monospace font. It requires glibc 2.39 or newer, the version of the machine it was built on (Debian 13 ships 2.41); build it on the oldest release it must run on.
 
 Mods (extensions for commands, status items, settings and panels) are designed in `docs/mods.md` and not implemented yet.
 
@@ -88,7 +110,7 @@ Shells run on the server, so they survive closing the GUI and dropped SSH connec
 
 For SSH workspaces, directory checkpoints are made by the server on the target machine; that server must also be updated to use this feature.
 
-On Wayland, compositor policies restrict global shortcuts and programmatic positioning. The application reports this rather than claiming support it cannot provide. Native window decorations remain enabled.
+On Wayland other than KDE, Spooky registers the shortcut through the desktop portal when the desktop offers one, but cannot hide or place its window, so the shortcut only brings it forward and the window keeps its native decorations.
 
 **KDE Plasma on Wayland** is supported through KDE itself, because a Wayland client can neither register a key nor place, hide or raise its own window. The shortcut is registered with the `org.freedesktop.portal.GlobalShortcuts` portal under the application id `dev.spooky.terminal` (install `packaging/linux/dev.spooky.terminal.desktop`, which `scripts/package.sh` ships, so KDE can name it); the configured `shortcut` is only the suggested trigger, and KDE keeps what you set in **System Settings → Keyboard → Shortcuts → Spooky**, so the Record button in Spooky's settings refuses to change it there. The window has no KDE title bar (Spooky draws its own header, which drags the window), and is revealed, sized (the configured share of the usable area of the display under the pointer, panels excluded), centred against its top, focused and, with `on_blur = "top"`, kept above other windows by a short KWin QML script loaded over D-Bus (Plasma 6); it slides in from the top edge fading in, and slides out and fades the same way, (where another display lies above the window the slide is only 80 px, since KWin cannot clip a window to its own display and a full one would show on that display), then waits off screen (it is not minimized: KWin's minimize effect flies a window to the task bar), outside the task bar, pager and switcher like Yakuake. Only this process's window is touched. If KWin refuses, the window simply stays where it is and one line goes to stderr. Verified on Plasma 6.3 (Wayland) with the real portal and KWin by triggering the shortcut through KGlobalAccel: bind, place and size, hide, reveal with focus. A physical key press and Plasma 5 were not exercised. Other Wayland compositors keep the behaviour above: no global shortcut, and closing quits.
 
@@ -197,7 +219,7 @@ cd web/agent && npm ci && npm run check && npm run build
 ./scripts/package.sh
 ```
 
-Produces `dist/Spooky.app` and `dist/Spooky-macos-<arch>.zip` on macOS, or a Linux archive containing both binaries, a desktop entry and its hicolor icon. `assets/logo.png` is the supplied artwork for the macOS app icon; packaging brightens its dark tones and rounds the corners before generating the icon resources. `assets/logo-256.png` remains the copy used in the window header and Linux icon. After changing the artwork, regenerate the latter on macOS with `sips -z 256 256 assets/logo.png --out assets/logo-256.png`. The macOS bundle has an ad-hoc signature: it runs on the machine that built it, and Gatekeeper refuses it elsewhere. Set `SPOOKY_SIGN_IDENTITY` to a Developer ID Application identity to sign with the hardened runtime, and `SPOOKY_NOTARY_PROFILE` (a `notarytool store-credentials` profile) to notarize and staple; both need an Apple developer account. CI builds both packages and keeps them as artifacts.
+Produces `dist/Spooky.app` and `dist/Spooky-macos-<arch>.zip` on macOS, or, on Linux, a tarball with both binaries, a desktop entry and its hicolor icon, plus a `.deb` where `dpkg-deb` is available (`scripts/package-deb.sh`). `assets/logo.png` is the supplied artwork for the macOS app icon; packaging brightens its dark tones and rounds the corners before generating the icon resources. `assets/logo-256.png` remains the copy used in the window header and Linux icon. After changing the artwork, regenerate the latter on macOS with `sips -z 256 256 assets/logo.png --out assets/logo-256.png`. The macOS bundle has an ad-hoc signature: it runs on the machine that built it, and Gatekeeper refuses it elsewhere. Set `SPOOKY_SIGN_IDENTITY` to a Developer ID Application identity to sign with the hardened runtime, and `SPOOKY_NOTARY_PROFILE` (a `notarytool store-credentials` profile) to notarize and staple; both need an Apple developer account. CI builds both packages and keeps them as artifacts.
 
 The running macOS Dock tile also uses the rounded artwork generated in the bundle; the standard bundle icon is available when Spooky is not running.
 

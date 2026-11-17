@@ -1,6 +1,11 @@
 //! The system-wide shortcut that shows and hides the window.
 
-use crate::{link, platform::kde};
+use crate::link;
+#[cfg(target_os = "linux")]
+use crate::platform::{
+    desktop::{Session, session},
+    portal,
+};
 use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
 
 /// Why the shortcut could not be set up at startup.
@@ -21,7 +26,7 @@ pub(crate) enum Hotkeys {
         manager: GlobalHotKeyManager,
         registered: HotKey,
     },
-    /// Registered through the desktop portal (KDE on Wayland); KDE owns the binding.
+    /// Registered through the desktop portal (Wayland); the desktop owns the binding.
     Portal,
 }
 
@@ -31,8 +36,9 @@ impl Hotkeys {
         let hotkey: HotKey = text
             .parse()
             .map_err(|error| StartError::Invalid(format!("{text}: {error}")))?;
-        if kde::active() {
-            kde::bind_shortcut(text, || {
+        #[cfg(target_os = "linux")]
+        if matches!(session(), Session::KdeWayland | Session::Wayland) {
+            portal::bind_shortcut(text, || {
                 let _ = link::hotkey_sender().send(PORTAL_ID);
             })
             .map_err(StartError::Unavailable)?;
@@ -67,7 +73,7 @@ impl Hotkeys {
             registered,
         } = self
         else {
-            return Err("KDE owns this shortcut: change it in System Settings → Keyboard → Shortcuts → Spooky".into());
+            return Err("The desktop owns this shortcut: change it in its keyboard shortcut settings (KDE: System Settings → Shortcuts → Spooky; GNOME: Settings → Keyboard)".into());
         };
         if *registered != hotkey {
             manager
