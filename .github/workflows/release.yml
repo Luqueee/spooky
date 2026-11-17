@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes the `spooky-server` archives that Spooky's "install on a remote machine"
+# downloads (crates/spooky-core/src/client/install.rs). Push a tag `v<version>` where
+# <version> is the workspace version in Cargo.toml.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    name: Server (${{ matrix.target }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: The tag names this version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Activate repository toolchain
+        run: rustup show active-toolchain
+      - name: Target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --locked --release -p spooky-server --target ${{ matrix.target }}
+      - name: Archive
+        run: |
+          name="spooky-server-${VERSION}-${{ matrix.target }}.tar.gz"
+          mkdir dist
+          tar -czf "dist/$name" -C "target/${{ matrix.target }}/release" spooky-server
+          if command -v sha256sum >/dev/null; then
+            hash="$(sha256sum "dist/$name" | cut -d' ' -f1)"
+          else
+            hash="$(shasum -a 256 "dist/$name" | cut -d' ' -f1)"
+          fi
+          printf '%s  %s\n' "$hash" "$name" > "dist/$name.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: server-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: server
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: server-*
+          merge-multiple: true
+          path: dist
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

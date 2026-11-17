@@ -7,6 +7,7 @@ mod features;
 mod layout;
 mod link;
 mod platform;
+mod probe;
 mod shortcuts;
 mod tabs;
 mod terminal;

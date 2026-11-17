@@ -30,7 +30,7 @@ The package installs `spooky` and `spooky-server` in `/usr/bin`, the desktop ent
 
 Mods (extensions for commands, status items, settings and panels) are designed in `docs/mods.md` and not implemented yet.
 
-A native interface for coding agents (a conversation view instead of their terminal UI, from the GUI, and on a remote machine's server) is designed in `docs/agent.md`. Phases 1 to 5 are implemented for oh-my-pi (`omp`) behind a backend trait meant for other agents: **New agent** (a tab's right-click menu or the command palette) opens a tab with a streamed Markdown conversation (code blocks with a copy button), folded tool cards and reasoning, question and approval dialogs, a model and thinking selector and a multiline composer, owned by the server like a shell. Typing `omp` in a pane (alone, or with `--model`, `--thinking`, `-c`, `--resume`, `--no-session`, `--auto-approve`, `--approval-mode` or one sentence as the first prompt) also shows the agent in that same pane, with the shell kept running underneath and shown again when the agent is closed (the shim; anything else, such as `omp commit`, runs the real `omp`). Agents are saved and resumed after a server restart. Other backends are not implemented.
+A native interface for coding agents (a conversation view instead of their terminal UI, from the GUI, and on a remote machine's server) is designed in `docs/agent.md`. Phases 1 to 5 are implemented for oh-my-pi (`omp`) behind a backend trait meant for other agents: **New agent** (a tab's right-click menu or the command palette) opens a tab with a streamed Markdown conversation (code blocks with a copy button), folded tool cards and reasoning, question and approval dialogs, a model and thinking selector and a multiline composer, owned by the server like a shell. With `agent_shim = true` in `server.toml` (off by default, so `omp` is the real program), typing `omp` in a pane (alone, or with `--model`, `--thinking`, `-c`, `--resume`, `--no-session`, `--auto-approve`, `--approval-mode` or one sentence as the first prompt) also shows the agent in that same pane, with the shell kept running underneath and shown again when the agent is closed (the shim; anything else, such as `omp commit`, runs the real `omp`). Agents are saved and resumed after a server restart. Other backends are not implemented.
 
 ## Run from source
 
@@ -128,6 +128,12 @@ The remote bridge starts/reconnects to the remote session server. Disconnecting 
 
 The remote module shares the session protocol with local transport. There is no general third-party plugin loader in this implementation.
 
+### Machines and installing the server
+
+The sidebar lists **This computer** and every SSH destination added with **Add machine** (saved as `machines` in the configuration). Adding one never leaves the machine in use: each other machine is watched by a light background probe that shows whether it answers and which workspaces it holds, so a remote that is down, unreachable or lacks the server never interrupts local work. Choosing a machine that answers switches to it; the one you left keeps being probed. Only the machine in use shows terminals; switching reconnects.
+
+When a machine reports that `spooky-server` is missing or of another protocol version, its row offers **Install…**. After you confirm, Spooky checks the remote OS with `uname -sm`, downloads the matching release asset on this computer (`spooky-server-<version>-<target>.tar.gz` plus `.sha256`, from the GitHub release of the same version; override the base URL with `SPOOKY_RELEASE_URL`), verifies the SHA-256, copies the binary over SSH to `~/.local/bin/spooky-server` and checks that it answers, with a progress panel throughout. SSH stays non-interactive and the host key must already be trusted. If an old server is still running there, a separate prompt asks before restarting it, because that ends its shells and agents. Releases are built by `.github/workflows/release.yml` on a `v*` tag.
+
 ## Captures and files
 
 **Capture** saves a real PNG of the focused terminal viewport through a native file dialog. It does not capture unrelated desktop windows.
@@ -198,10 +204,10 @@ The server reads its own file, `spooky/server.toml` in the same directory, on ea
 
 ```toml
 scrollback_lines = 10000
-agent_shim = true
+agent_shim = false
 ```
 
-`scrollback_lines` (0 to 1,000,000) is the history kept per pane; it applies to panes created after the server starts. `agent_shim` (default `true`) makes `omp` typed in a pane of this machine's server open the agent view (see `docs/agent.md`); `false` leaves `omp` alone, and it only takes effect for panes created after the server starts. An unreadable or invalid `server.toml` is reported in `server.log` and the defaults are used.
+`scrollback_lines` (0 to 1,000,000) is the history kept per pane; it applies to panes created after the server starts. `agent_shim` (default `false`) makes `omp` typed in a pane of this machine's server open the agent view (see `docs/agent.md`); by default `omp` is the real program. It is read when the server starts, so changing it needs a server restart, and it only affects panes created afterwards. An unreadable or invalid `server.toml` is reported in `server.log` and the defaults are used.
 
 Unknown fields and invalid values produce an explicit startup error. There is no silent fallback to a broken configuration.
 

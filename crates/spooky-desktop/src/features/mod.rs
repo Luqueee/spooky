@@ -7,6 +7,7 @@ pub(crate) mod agent;
 pub(crate) mod attachments;
 pub(crate) mod connection;
 pub(crate) mod hyperlinks;
+pub(crate) mod machines;
 pub(crate) mod palette;
 pub(crate) mod search;
 pub(crate) mod settings;
