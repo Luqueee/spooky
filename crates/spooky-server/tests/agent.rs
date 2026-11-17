@@ -593,6 +593,7 @@ fn omp_is_the_real_program_unless_the_shim_is_switched_on() {
         command
             .env("SHELL", "/bin/sh")
             .env("HOME", dir)
+            .env("XDG_CONFIG_HOME", dir.join(".config"))
             .env("PATH", format!("{}:{path}", decoy.display()));
     });
     let mut client = fixture.connect();
@@ -627,12 +628,17 @@ fn shim_wins_over_a_profile(profile: &Profile) {
             }
             fs::write(&file, text(&decoy)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
-        // The shim is off unless the server's settings ask for it.
-        let settings = dir.join(".config/spooky");
+        // The shim is off unless the server's settings ask for it. The settings are
+        // found through XDG_CONFIG_HOME when the host sets it, so name the directory.
+        let config = dir.join(".config");
+        let settings = config.join("spooky");
         fs::create_dir_all(&settings).unwrap_or_else(|e| panic!("settings directory: {e}"));
         fs::write(settings.join("server.toml"), "agent_shim = true\n")
             .unwrap_or_else(|e| panic!("server settings: {e}"));
-        command.env("SHELL", profile.shell).env("HOME", dir);
+        command
+            .env("SHELL", profile.shell)
+            .env("HOME", dir)
+            .env("XDG_CONFIG_HOME", &config);
     });
     let shell = profile.shell;
     let mut client = fixture.connect();
