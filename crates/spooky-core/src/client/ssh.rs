@@ -1,5 +1,5 @@
 use super::errors::{Cancelled, Problem, RemoteProblem, Unrecoverable};
-use super::framing::read_frame;
+use super::framing::{read_frame, reported_incompatibility};
 use super::{
     CANCEL_POLL, IO_TIMEOUT, MAX_SSH_DIAGNOSTIC_BYTES, SSH_CONNECT_TIMEOUT_SECS, THREAD_JOIN_GRACE,
 };
@@ -192,6 +192,9 @@ pub(super) fn ssh_failure(
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
+    if let Some(problem) = reported_incompatibility(&detail) {
+        return problem.into();
+    }
     let detail = if detail.is_empty() {
         format!("{error:#}")
     } else {

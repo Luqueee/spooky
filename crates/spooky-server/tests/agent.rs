@@ -585,6 +585,10 @@ fn omp_is_the_real_program_unless_the_shim_is_switched_on() {
             .unwrap_or_else(|e| panic!("real omp: {e}"));
         fs::set_permissions(&real, fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|e| panic!("permissions: {e}"));
+        // A macOS login shell rebuilds PATH (path_helper) and may find an `omp` installed
+        // on this machine first; the profile puts the decoy back in front, as real ones do.
+        fs::write(dir.join(".profile"), sh_prepend(&decoy))
+            .unwrap_or_else(|e| panic!("profile: {e}"));
         let path = std::env::var("PATH").unwrap_or_default();
         command
             .env("SHELL", "/bin/sh")

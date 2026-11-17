@@ -565,6 +565,14 @@ mod tests {
     /// `uname` as given) and a release directory holding a stand-in server whose
     /// handshake answers `protocol`. Returns the fixture and the release.
     fn fixture(uname: &str, protocol: u32) -> (Fixture, Release) {
+        fixture_serving(
+            uname,
+            &format!("read line\necho '{{\"Pong\":{{\"version\":{protocol}}}}}'"),
+        )
+    }
+
+    /// Like [`fixture`], with a stand-in server that runs the shell `server` script.
+    fn fixture_serving(uname: &str, server: &str) -> (Fixture, Release) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let turn = SCRIPTS
             .lock()
@@ -594,10 +602,7 @@ mod tests {
         fs::create_dir_all(&directory).expect("release directory");
         let staging = root.join("staging");
         fs::create_dir_all(&staging).expect("staging");
-        script(
-            &staging.join(REMOTE_NAME),
-            &format!("read line\necho '{{\"Pong\":{{\"version\":{protocol}}}}}'"),
-        );
+        script(&staging.join(REMOTE_NAME), server);
         let name = format!("spooky-server-{version}-{triple}.tar.gz");
         let status = Command::new("tar")
             .arg("-czf")
@@ -693,6 +698,28 @@ mod tests {
             outcome,
             Outcome::NeedsRestart {
                 running_protocol: PROTOCOL_VERSION + 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_bridge_refused_by_the_old_running_server_means_a_restart_is_needed() {
+        // The real bridge: it fails its own handshake with the server running on its
+        // machine and exits with anyhow's report, without answering the client.
+        let old = PROTOCOL_VERSION - 1;
+        let (fixture, release) = fixture_serving(
+            "Linux x86_64",
+            &format!(
+                "echo 'Error: server protocol version {old} is incompatible with client \
+                 version {PROTOCOL_VERSION}. Update both ends and restart the server, \
+                 which ends its shells.' >&2\nexit 1"
+            ),
+        );
+        let outcome = run(&fixture, &release, &mut Vec::new()).expect("installed");
+        assert_eq!(
+            outcome,
+            Outcome::NeedsRestart {
+                running_protocol: old
             }
         );
     }
