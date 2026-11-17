@@ -166,6 +166,8 @@ pub(crate) enum Message {
     FocusPane(u64, Vec<u8>),
     PaneInput(u64, Vec<u8>),
     Select(u64, (u16, u16), (u16, u16)),
+    /// The drag that selected text in a pane ended; with `copy_on_select` the text is copied.
+    SelectionEnd(u64),
     ScrollPane(u64, i32),
     Paste(Option<String>),
     Blink,
@@ -718,6 +720,7 @@ impl App {
             | Message::FocusPane(..)
             | Message::PaneInput(..)
             | Message::Select(..)
+            | Message::SelectionEnd(..)
             | Message::ScrollPane(..)
             | Message::Paste(..)
             | Message::Modifiers(..)
