@@ -151,6 +151,7 @@ impl App {
                     #[cfg(not(target_os = "macos"))]
                     let _ = show;
                 }
+                settings::Effect::Updates => self.updates_check(),
             }
         }
         Task::batch(tasks)

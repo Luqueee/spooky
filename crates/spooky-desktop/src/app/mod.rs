@@ -12,6 +12,7 @@ mod grid;
 mod input;
 mod machines;
 mod subscription;
+mod updates;
 mod view;
 mod web;
 mod workspaces;
@@ -34,6 +35,7 @@ use crate::{
         settings::{self, Settings},
         splits::{self, Splits},
         tailscale,
+        updates::Updates,
         window::{Hotkeys, Slide},
     },
     link::{Command, Event, Link},
@@ -148,6 +150,16 @@ pub(crate) enum Message {
     InstallCancel,
     RestartGo,
     InstallClose,
+    /// Something the update check or an update in progress reported.
+    Update(crate::features::updates::Event),
+    /// Looks for a newer release now.
+    UpdateCheck,
+    /// Opens the dialog that offers the release known.
+    UpdateAsk,
+    UpdateGo,
+    /// The person agreed to restart into the prepared update.
+    UpdateRestart,
+    UpdateClose,
     Tailscale(tailscale::Message),
     Attachments(attachments::Message),
     Bounds(u64, Rectangle),
@@ -306,6 +318,10 @@ pub(crate) struct App {
     probes: crate::probe::Probes,
     /// The installation of the server on a machine, while one runs.
     installation: Option<crate::probe::Installation>,
+    /// What is known about newer releases of the application, and the update dialog.
+    updates: Updates,
+    /// The background work of checking for and applying an update.
+    updater: crate::updater::Updater,
 }
 
 /// A missing material or the system accessibility choice requires a solid surface.
@@ -396,11 +412,16 @@ impl App {
             machines,
             probes: crate::probe::Probes::default(),
             installation: None,
+            updates: Updates::new(spooky_core::update::support()),
+            updater: crate::updater::Updater::default(),
             agents: Agents::default(),
             agent_focus: None,
             agents_seen: None,
         };
         app.sync_probes();
+        if app.config.check_updates {
+            app.updates_check();
+        }
         (
             app,
             window::latest().map(|id| id.map(Message::Opened).unwrap_or(Message::Tick)),
@@ -654,6 +675,12 @@ impl App {
             | Message::InstallCancel
             | Message::RestartGo
             | Message::InstallClose => return self.machines_message(message),
+            Message::Update(..)
+            | Message::UpdateCheck
+            | Message::UpdateAsk
+            | Message::UpdateGo
+            | Message::UpdateRestart
+            | Message::UpdateClose => return self.updates_message(message),
             Message::Link(..)
             | Message::TargetValue(..)
             | Message::Local

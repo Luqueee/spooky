@@ -161,6 +161,8 @@ osc52 = "write"
 cursor_blink = true
 on_blur = "none"            # "none", "hide" or "top"
 appearance = "spooky"     # "spooky", "nord" or "dracula"
+update_channel = "stable"   # "stable" or "dev" (also takes pre-releases)
+check_updates = true        # look for a newer release when Spooky starts
 ```
 
 A file that sets `width` or `height` and no `size` keeps meaning pixels, as before this key existed. A percent window is never smaller than 720 × 440 px. The size is applied when the window opens and when a size setting changes; a window you resized by hand keeps its size when the shortcut shows it again.
@@ -219,6 +221,21 @@ On macOS an agent pane that fills its tab is drawn by a React page in a `WKWebVi
 cd web/agent && npm ci && npm run check && npm run build
 ```
 
+## Releases and updates
+
+A release is a tag `v<version>`, where `<version>` is the workspace version in `Cargo.toml`, and the **Release** workflow (`.github/workflows/release.yml`) publishes it. There are two kinds:
+
+| Tag | Kind | Followed by |
+| --- | --- | --- |
+| `v0.2.0` | production release (GitHub's "latest"); the commit must be on `main` | the **Stable** channel |
+| `v0.2.0-dev.1` | development release (a GitHub pre-release); any branch | the **Development** channel, which takes the newest of either kind |
+
+Each release holds `spooky-server-<version>-<target>.tar.gz` (what installing on a remote machine downloads), `spooky-app-<version>-aarch64-apple-darwin.zip` (the `Spooky.app` bundle) and `spooky-app-<version>-x86_64-unknown-linux-gnu.tar.gz` (the Linux tarball layout of `scripts/package.sh`), the Debian package, and a `.sha256` for each. The `release` skill (`.claude/skills/release`) is the checklist for cutting one; it never tags or publishes without being told to.
+
+**Updating from the app.** **Settings → Updates** picks the channel, says whether a newer release exists (Spooky also looks once at startup unless `check_updates = false`; it asks GitHub's public release list and sends nothing else) and offers **Update…**, which also appears in the sidebar when one is known. After you confirm, Spooky downloads the archive for this platform, checks its SHA-256, unpacks it beside the installation, runs the new `spooky-server version`, and only after you press **Restart** replaces the installation (undoing it if it cannot finish) and starts the new one. Your shells live in the server, so they keep running; when the new server speaks another protocol version than the one running, the dialog says how many shells and agents stopping the old server ends, and does nothing without a second confirmation. A newer version is never offered to a build that is already newer, so a development build stays on its own line until a production release passes it.
+
+It replaces only what a release installed, and only where this account can write: the `Spooky.app` bundle on macOS, and on Linux the binaries of a tarball extracted into a prefix you own (`<prefix>/bin/spooky` beside `<prefix>/share/applications/dev.spooky.terminal.desktop`). A `.deb` install in `/usr/bin`, and a development build run from `target/`, are not touched; the dialog says why and links the release page. The SHA-256 is published beside the archive, so it detects a damaged download, not a tampered release; releases are not yet signed with a Developer ID, so the downloaded app is ad-hoc signed. `SPOOKY_RELEASE_URL` (the files) and `SPOOKY_RELEASE_INDEX` (the list, in GitHub's release-list JSON) point both the update and the remote installer at a mirror or, with `file://`, at a directory.
+
 ## Packages and checks
 
 ```sh
@@ -256,6 +273,7 @@ See [SPEC.md](SPEC.md) for the product contract, [architecture](docs/architectur
 Verified on macOS arm64:
 
 - Workspace build and release packaging; the ad-hoc signed `Spooky.app` verifies with `codesign --verify --strict` and carries its icon.
+- In-app update on macOS arm64, in isolated bundles against a local `file://` mirror (the release itself was not published): a development release is found at startup and offered in the sidebar; downloading unpacks beside the app without changing it; **Restart** replaces the bundle (ad-hoc signature verified, no scratch or backup directories left), relaunches it, and the same server and shell keep running. A release with another protocol version warned that it ends 1 running shell, **Not now** left the installation untouched, and confirming stopped the server, started the new one and restored the workspace with a new shell. Linux: the core update logic (channels, checksum, unpack, swap and rollback of a tarball installation) is tested in a Debian container; the Linux GUI update, a `.deb` install, and the Release workflow itself (checked with `actionlint`) have not been run.
 - Viewport clear, select-all, copy-all and alternate-screen refusal were exercised in an isolated native macOS window with a real PTY; retained history copied correctly before and after clearing. A second isolated frontend exercised copy and clear through a loopback SSH server with a pinned host key. Protocol regressions cover unsubmitted input, wrapped Unicode, concealed text and oversized exports.
 - `cargo fmt`, strict clippy, 247 automated Rust tests plus the agent view's own unit tests (`web/agent`), doc tests and warning-free first-party rustdoc.
 - The complete workspace checks with both pinned Rust 1.99.1 and MSRV 1.98.0.

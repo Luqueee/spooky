@@ -1,8 +1,14 @@
 name: Release
 
-# Publishes the `spooky-server` archives that Spooky's "install on a remote machine"
-# downloads (crates/spooky-core/src/client/install.rs). Push a tag `v<version>` where
-# <version> is the workspace version in Cargo.toml.
+# Publishes a release: the `spooky-server` archives that Spooky's "install on a remote
+# machine" downloads (crates/spooky-core/src/client/install.rs) and the application
+# archives that Spooky's "update" downloads (crates/spooky-core/src/update.rs).
+#
+# Push a tag `v<version>` where <version> is the workspace version in Cargo.toml.
+#   v0.2.0          a production release: GitHub's "latest", followed by the Stable channel
+#   v0.2.0-dev.1    a development release: a pre-release, followed only by the Development channel
+#
+# Use the `release` skill (.claude/skills/release) rather than tagging by hand.
 
 on:
   push:
@@ -16,8 +22,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check:
+    name: Tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The tag names this version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          fi
+      - name: A production release comes from main
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "pre-release $GITHUB_REF_NAME: any branch" ;;
+            *)
+              git fetch --no-tags origin main
+              if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+                echo "production release $GITHUB_REF_NAME must be a commit of main" >&2
+                exit 1
+              fi
+              ;;
+          esac
+
   server:
     name: Server (${{ matrix.target }})
+    needs: check
     strategy:
       fail-fast: true
       matrix:
@@ -39,10 +75,6 @@ jobs:
       - name: The tag names this version
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
-            exit 1
-          fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Musl tools
         if: contains(matrix.target, 'linux-musl')
@@ -70,9 +102,65 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The application itself, for the platforms the CI packages and tests: what
+  # `spooky_core::update` downloads is named `spooky-app-<version>-<target>.<zip|tar.gz>`.
+  app:
+    name: App (${{ matrix.target }})
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: The tag names this version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config desktop-file-utils appstream
+      - name: Activate repository toolchain
+        run: rustup show active-toolchain
+      - name: Package
+        run: ./scripts/package.sh
+      - name: Name the files
+        run: |
+          mkdir release
+          if [ "$RUNNER_OS" = macOS ]; then
+            cp "dist/Spooky-macos-$(uname -m).zip" "release/spooky-app-${VERSION}-${{ matrix.target }}.zip"
+          else
+            cp "dist/spooky-linux-$(uname -m).tar.gz" "release/spooky-app-${VERSION}-${{ matrix.target }}.tar.gz"
+            # A Debian version sorts a pre-release before its release with `~`, which a
+            # download name is better without.
+            cp dist/spooky_*.deb "release/spooky_${VERSION}_$(dpkg --print-architecture).deb"
+          fi
+          cd release
+          for file in *; do
+            if command -v sha256sum >/dev/null; then
+              hash="$(sha256sum "$file" | cut -d' ' -f1)"
+            else
+              hash="$(shasum -a 256 "$file" | cut -d' ' -f1)"
+            fi
+            printf '%s  %s\n' "$hash" "$file" > "$file.sha256"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-${{ matrix.target }}
+          path: release/*
+          if-no-files-found: error
+
   publish:
     name: Publish
-    needs: server
+    needs: [server, app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -80,10 +168,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: server-*
           merge-multiple: true
           path: dist
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) kind="--prerelease" ;;
+            *) kind="--latest" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes $kind

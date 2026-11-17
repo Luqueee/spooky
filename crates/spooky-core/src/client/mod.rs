@@ -16,6 +16,7 @@ use std::thread::{self};
 use std::time::{Duration, Instant};
 
 mod errors;
+pub(crate) mod fetch;
 mod framing;
 mod install;
 mod local;
@@ -28,6 +29,7 @@ pub use errors::{
     Cancelled, Problem, RemoteProblem, Unrecoverable, is_unrecoverable, remote_problem,
     was_cancelled,
 };
+pub(crate) use install::official_base;
 pub use install::{Outcome, Progress, Release, install, restart_server};
 pub use upload::upload;
 

@@ -136,6 +136,10 @@ pub fn main() -> Result<()> {
         "serve" => serve(),
         "bridge" => bridge(),
         "status" => status(),
+        "version" => {
+            println!("{}", spooky_core::update::version_line());
+            Ok(())
+        }
         "stop" => match args.next().as_deref() {
             None => stop(false),
             Some("--force") => stop(true),
@@ -148,7 +152,7 @@ pub fn main() -> Result<()> {
             agent_open(&backend, rest)
         }
         mode => bail!(
-            "unknown server mode: {mode} (expected serve, bridge, status, stop or agent-open)"
+            "unknown server mode: {mode} (expected serve, bridge, status, version, stop or agent-open)"
         ),
     }
 }

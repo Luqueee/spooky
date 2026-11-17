@@ -5,6 +5,7 @@
 use crate::platform::kwin::Dim;
 use iced::Size;
 use serde::{Deserialize, Serialize};
+use spooky_core::update::Channel;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -116,6 +117,12 @@ pub(crate) struct Config {
     /// SSH destinations (`user@host` or an alias) added as machines, besides this one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<String>,
+    /// Which releases the application follows: `"stable"` (the default) or `"dev"`, which
+    /// also takes the pre-releases.
+    pub update_channel: Channel,
+    /// Whether Spooky looks for a newer release when it starts. It asks GitHub's
+    /// public release list and sends nothing but that request.
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -137,6 +144,8 @@ impl Default for Config {
             appearance: Appearance::default(),
             custom_theme: None,
             machines: Vec::new(),
+            update_channel: Channel::default(),
+            check_updates: true,
         }
     }
 }

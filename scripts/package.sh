@@ -21,6 +21,11 @@ case "$(uname -s)" in
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp target/release/spooky target/release/spooky-server "$app/Contents/MacOS/"
     cp packaging/macos/Info.plist "$app/Contents/Info.plist"
+    # The version in the bundle is the workspace's: a pre-release (0.2.0-dev.1) shows its
+    # numbers as the short version and its full name as the build.
+    version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+    plutil -replace CFBundleShortVersionString -string "${version%%-*}" "$app/Contents/Info.plist"
+    plutil -replace CFBundleVersion -string "$version" "$app/Contents/Info.plist"
     plutil -lint "$app/Contents/Info.plist"
 
     iconset="$(mktemp -d)/Spooky.iconset"

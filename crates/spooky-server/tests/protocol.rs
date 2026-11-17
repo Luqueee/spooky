@@ -1978,3 +1978,19 @@ fn the_scrollback_limit_comes_from_the_server_settings() {
     assert_eq!(client.snapshot().panes[0].history, 50);
     fs::remove_dir_all(config).expect("cleanup");
 }
+
+#[test]
+fn the_version_command_reports_the_version_and_protocol_the_updater_checks() {
+    // The application runs this on a release it has downloaded, before replacing itself,
+    // so the line is the contract: no server, no socket, one line on stdout.
+    let output = Command::new(env!("CARGO_BIN_EXE_spooky-server"))
+        .arg("version")
+        .env_remove("SPOOKY_SOCKET")
+        .output()
+        .expect("run version");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", spooky_core::update::version_line())
+    );
+}
