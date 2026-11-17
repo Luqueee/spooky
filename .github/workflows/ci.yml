@@ -1,8 +1,14 @@
 name: CI
 
+# Built for a quick answer on a pull request: every check is its own job, so they run
+# side by side and the slowest one sets the time; builds are cached from main; a pull
+# request is built once (only main is built on push); and the packaging jobs, which are
+# the slowest, run on main and on pull requests that touch what packaging uses.
+
 on:
   pull_request:
   push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,10 +20,36 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Faster builds and smaller caches; the failures CI exists to find do not need either.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  quality:
-    name: Rust quality (${{ matrix.os }})
+  format:
+    name: Formatting and documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config
+      - name: Activate repository toolchain
+        run: rustup show active-toolchain
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --no-deps
+
+  clippy:
+    name: Clippy (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -33,20 +65,38 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config
       - name: Activate repository toolchain
         run: rustup show active-toolchain
-      - name: Formatting
-        run: cargo fmt --all -- --check
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config
+      - name: Activate repository toolchain
+        run: rustup show active-toolchain
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Unit and integration tests
         run: cargo test --locked --workspace --all-targets
       - name: Documentation tests
         run: cargo test --locked --workspace --doc
-      - name: Documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --workspace --no-deps
-      - name: Build application and server
-        run: cargo build --locked --workspace
 
   web:
     name: Agent view
@@ -85,12 +135,47 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config
       - name: Install declared minimum toolchain
         run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check minimum supported Rust version
         run: cargo +1.98.0 check --locked --workspace --all-targets
 
+  # Whether a pull request changes anything packaging uses. Packaging is the slowest
+  # job (a release build with LTO), so a pull request that does not touch it skips it;
+  # main always runs it.
+  changes:
+    name: Packaging changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      packaging: ${{ steps.files.outputs.packaging }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "packaging=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" --paginate --jq '.[].filename' > files.txt
+          if grep -qE '^(scripts/|packaging/|assets/|\.github/workflows/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$)' files.txt; then
+            echo "packaging=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "packaging=false" >> "$GITHUB_OUTPUT"
+          fi
+
   package:
     name: Package (${{ matrix.os }})
-    needs: quality
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -106,6 +191,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config desktop-file-utils appstream
       - name: Activate repository toolchain
         run: rustup show active-toolchain
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Package
         run: ./scripts/package.sh
       - name: Linux package metadata
