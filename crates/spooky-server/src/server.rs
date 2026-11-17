@@ -75,6 +75,10 @@ pub(crate) struct Server {
     /// Set by `Shutdown`; the connection that asked stops the server once it
     /// has been answered.
     pub(crate) stop_requested: AtomicBool,
+    /// Set by the first caller of [`Server::stop`]: from then on the saved workspaces are
+    /// final, so a late save, or a second stop, cannot overwrite them with the state that
+    /// stopping leaves behind (no shells, no agents).
+    closing: AtomicBool,
     /// The `omp` shim given to new shells, when enabled and installed.
     pub(crate) shim: Option<Shim>,
 }
@@ -106,6 +110,7 @@ impl Server {
             saver: Arc::new(Saver::default()),
             save_lock: Mutex::new(()),
             stop_requested: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
         }
     }
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>> {
@@ -339,8 +344,15 @@ impl Server {
                 .count() as u32,
         })
     }
-    /// Writes the workspaces so the next server can restore them.
+    /// Writes the workspaces so the next server can restore them. Once the server is
+    /// stopping, the final save has been made and this does nothing.
     pub(crate) fn save(&self) -> Result<()> {
+        if self.closing.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.write_saved()
+    }
+    fn write_saved(&self) -> Result<()> {
         let _serial = self
             .save_lock
             .lock()
@@ -457,7 +469,15 @@ impl Server {
     }
     /// Saves the workspaces, ends every shell and exits.
     pub(crate) fn stop(&self) -> ! {
-        if let Err(error) = self.save() {
+        // Every connection that finds the stop flag set comes here. Only the first may
+        // save and end the shells: a second one would save the emptied state over the
+        // good file. The others wait for the exit.
+        if self.closing.swap(true, Ordering::AcqRel) {
+            loop {
+                std::thread::park();
+            }
+        }
+        if let Err(error) = self.write_saved() {
             info!("final save failed: {error:#}");
         }
         let (panes, agents) = self
