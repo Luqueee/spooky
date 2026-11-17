@@ -70,6 +70,7 @@ pub(crate) fn window_control() -> WindowControl {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
             pairs

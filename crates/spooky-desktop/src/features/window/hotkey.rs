@@ -1,5 +1,6 @@
 //! The system-wide shortcut that shows and hides the window.
 
+#[cfg(target_os = "linux")]
 use crate::link;
 #[cfg(target_os = "linux")]
 use crate::platform::{
@@ -17,6 +18,7 @@ pub(crate) enum StartError {
 }
 
 /// The identity of the portal's one shortcut; the native backend is never active with it.
+#[cfg(target_os = "linux")]
 const PORTAL_ID: u32 = 1;
 
 /// The registered global shortcut.
@@ -27,6 +29,7 @@ pub(crate) enum Hotkeys {
         registered: HotKey,
     },
     /// Registered through the desktop portal (Wayland); the desktop owns the binding.
+    #[cfg(target_os = "linux")]
     Portal,
 }
 
@@ -60,6 +63,7 @@ impl Hotkeys {
     pub(crate) fn id(&self) -> u32 {
         match self {
             Self::Native { registered, .. } => registered.id(),
+            #[cfg(target_os = "linux")]
             Self::Portal => PORTAL_ID,
         }
     }
@@ -68,6 +72,12 @@ impl Hotkeys {
     /// released, so a refusal leaves the working shortcut in place.
     pub(crate) fn rebind(&mut self, text: &str) -> Result<(), String> {
         let hotkey: HotKey = text.parse().map_err(|error| format!("{text}: {error}"))?;
+        #[cfg(not(target_os = "linux"))]
+        let Self::Native {
+            manager,
+            registered,
+        } = self;
+        #[cfg(target_os = "linux")]
         let Self::Native {
             manager,
             registered,
