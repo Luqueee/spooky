@@ -382,6 +382,7 @@ pub(crate) fn view<'a>(
                         .and_then(|id| themes.get(id))
                         .or_else(|| {
                             themes.get(match config.appearance {
+                                Appearance::Midnight => "midnight",
                                 Appearance::Spooky => "spooky",
                                 Appearance::Nord => "nord",
                                 Appearance::Dracula => "dracula",

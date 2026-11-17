@@ -568,6 +568,7 @@ impl App {
             .as_deref()
             .filter(|id| self.themes.get(id).is_some())
             .unwrap_or(match self.config.appearance {
+                crate::config::Appearance::Midnight => "midnight",
                 crate::config::Appearance::Spooky => "spooky",
                 crate::config::Appearance::Nord => "nord",
                 crate::config::Appearance::Dracula => "dracula",

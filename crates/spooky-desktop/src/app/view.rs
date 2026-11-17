@@ -34,13 +34,11 @@ const TAB_CLOSE_SLOT: f32 = 23.0;
 
 fn brand_logo() -> Element<'static, Message> {
     static LOGO: LazyLock<image::Handle> = LazyLock::new(|| {
-        image::Handle::from_bytes(include_bytes!("../../../../assets/logo-256.png").as_slice())
+        image::Handle::from_bytes(
+            include_bytes!("../../../../assets/logo-transparent-256.png").as_slice(),
+        )
     });
-    image(LOGO.clone())
-        .width(18)
-        .height(18)
-        .border_radius(3)
-        .into()
+    image(LOGO.clone()).width(22).height(22).into()
 }
 
 fn activity_marker(indicator: Option<Indicator>) -> Element<'static, Message> {
