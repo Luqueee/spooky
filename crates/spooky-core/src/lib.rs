@@ -6,6 +6,7 @@
 pub mod client;
 /// Owner-only runtime directories and Unix socket selection.
 pub mod paths;
+pub mod update;
 use serde::{Deserialize, Serialize};
 
 /// Wire version checked before using a server.

@@ -565,7 +565,14 @@ impl App {
                 .padding([0, 6])
                 .height(Length::Fill),
             separator(),
-            container(connection).padding(8),
+            container({
+                let mut footer = column![].spacing(2);
+                if let Some(pill) = self.update_pill() {
+                    footer = footer.push(pill);
+                }
+                footer.push(connection)
+            })
+            .padding(8),
         ])
         .width(SIDEBAR_WIDTH)
         .height(Length::Fill)
@@ -824,6 +831,178 @@ impl App {
                 buttons(vec![
                     plain("Close", Message::InstallClose),
                     main("Try again", Message::InstallGo),
+                ]),
+            ]
+            .spacing(12)
+            .into(),
+        };
+        Some(content)
+    }
+
+    /// The sidebar entry that says a newer release is known and opens the update dialog.
+    fn update_pill(&self) -> Option<Element<'_, Message>> {
+        if self.updates.dialog().is_some() {
+            return None;
+        }
+        let available = self.updates.available()?;
+        Some(
+            button(
+                row![
+                    themed_icon(Icon::ChevronUp, TextTone::Accent),
+                    text(format!("Update to {}", available.version))
+                        .size(11)
+                        .style(text_tone(TextTone::Accent)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(quiet)
+            .on_press(Message::UpdateAsk)
+            .into(),
+        )
+    }
+
+    /// The dialog that offers an update, shows how it goes and asks before restarting.
+    fn update_dialog(&self) -> Option<Element<'_, Message>> {
+        use crate::features::updates::Stage as UpdateStage;
+        use spooky_core::update::Support;
+        let dialog = self.updates.dialog()?;
+        let version = dialog.available.version.clone();
+        let muted = |line: String| text(line).size(11).style(text_tone(TextTone::Muted));
+        let title = |line: String| text(line).size(14).style(text_tone(TextTone::Text));
+        let buttons = |items: Vec<Element<'static, Message>>| {
+            let mut buttons = row![Space::new().width(Length::Fill)].spacing(6);
+            for item in items {
+                buttons = buttons.push(item);
+            }
+            buttons
+        };
+        let plain = |label: &'static str, message: Message| -> Element<'static, Message> {
+            button(text(label).size(11))
+                .padding([6, 10])
+                .style(quiet)
+                .on_press(message)
+                .into()
+        };
+        let main = |label: &'static str, message: Message| -> Element<'static, Message> {
+            button(text(label).size(11))
+                .padding([6, 10])
+                .style(primary)
+                .on_press(message)
+                .into()
+        };
+        let content: Element<'_, Message> = match &dialog.stage {
+            UpdateStage::Ask => match self.updates.support() {
+                Support::Update(_) => column![
+                    title(format!("Update Spooky to {version}?")),
+                    muted(format!(
+                        "Spooky downloads {version}, checks its checksum, replaces this application and restarts. Your shells keep running; if the new version needs a new server, you are told before anything is stopped."
+                    )),
+                    buttons(vec![
+                        plain("Cancel", Message::UpdateClose),
+                        main("Download and update", Message::UpdateGo),
+                    ]),
+                ]
+                .spacing(12)
+                .into(),
+                Support::Manual(reason) => column![
+                    title(format!("Spooky {version} is available")),
+                    muted(reason.clone()),
+                    buttons(vec![
+                        plain("Close", Message::UpdateClose),
+                        main(
+                            "Open the release page",
+                            Message::OpenLink(spooky_core::update::RELEASES_PAGE.into()),
+                        ),
+                    ]),
+                ]
+                .spacing(12)
+                .into(),
+            },
+            UpdateStage::Running(run) => {
+                let mut steps = column![].spacing(3);
+                let last = run.steps.len().saturating_sub(1);
+                for (index, step) in run.steps.iter().enumerate() {
+                    let done = index < last;
+                    steps = steps.push(
+                        text(format!("{} {step}", if done { "✓" } else { "…" }))
+                            .size(11)
+                            .style(text_tone(if done {
+                                TextTone::Muted
+                            } else {
+                                TextTone::Text
+                            })),
+                    );
+                }
+                let progress: Element<'_, Message> = if run.downloaded > 0 {
+                    muted(format!("{} MB downloaded", megabytes(run.downloaded))).into()
+                } else {
+                    Space::new().height(0).into()
+                };
+                column![
+                    title(format!("Downloading Spooky {version}")),
+                    steps,
+                    progress,
+                    buttons(vec![plain("Cancel", Message::UpdateClose)]),
+                ]
+                .spacing(12)
+                .into()
+            }
+            UpdateStage::Ready(ready) => {
+                let (line, restart): (String, Element<'static, Message>) = if ready.restart_server
+                {
+                    (
+                        if ready.sessions == 0 {
+                            format!(
+                                "Spooky {version} is ready. Its terminal server is a newer version, so the one running now restarts; no shell or agent is running in it."
+                            )
+                        } else {
+                            format!(
+                                "Spooky {version} is ready. Its terminal server is a newer version, so the one running now must stop. That ends {} running shell(s) and agent(s); your workspaces come back with new shells.",
+                                ready.sessions
+                            )
+                        },
+                        button(text(if ready.sessions == 0 {
+                            "Restart"
+                        } else {
+                            "Restart and end its shells"
+                        })
+                        .size(11))
+                        .padding([6, 10])
+                        .style(if ready.sessions == 0 { primary } else { destructive })
+                        .on_press(Message::UpdateRestart)
+                        .into(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "Spooky {version} is ready. Spooky restarts to finish; your shells keep running."
+                        ),
+                        main("Restart", Message::UpdateRestart),
+                    )
+                };
+                column![
+                    title("Restart to finish updating".into()),
+                    muted(line),
+                    buttons(vec![plain("Not now", Message::UpdateClose), restart]),
+                ]
+                .spacing(12)
+                .into()
+            }
+            UpdateStage::Applying => column![
+                title(format!("Updating to {version}")),
+                muted("Replacing Spooky and restarting…".into()),
+            ]
+            .spacing(12)
+            .into(),
+            UpdateStage::Failed(message) => column![
+                title("Could not update".into()),
+                text(message.clone()).size(11).style(text_tone(TextTone::Danger)),
+                buttons(vec![
+                    plain("Close", Message::UpdateClose),
+                    main("Try again", Message::UpdateGo),
                 ]),
             ]
             .spacing(12)
@@ -1116,10 +1295,13 @@ impl App {
                 &self.settings,
                 &self.config,
                 &self.themes,
-                self.hotkeys.is_some(),
-                self.dropdown(),
-                self.glass_available,
-                self.reduce_transparency,
+                &self.updates,
+                crate::features::settings::Session {
+                    shortcuts_available: self.hotkeys.is_some(),
+                    can_hide: self.dropdown(),
+                    glass_available: self.glass_available,
+                    reduce_transparency: self.reduce_transparency,
+                },
             )
         } else {
             self.active()
@@ -1562,6 +1744,9 @@ impl App {
             );
         }
         if let Some(content) = self.install_dialog() {
+            body = modal(body, content, None);
+        }
+        if let Some(content) = self.update_dialog() {
             body = modal(body, content, None);
         }
         // The bottom edge drags the window's height, which a window without a title bar

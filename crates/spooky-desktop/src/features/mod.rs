@@ -13,4 +13,5 @@ pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod splits;
 pub(crate) mod tailscale;
+pub(crate) mod updates;
 pub(crate) mod window;

@@ -24,6 +24,7 @@ src/
     grid.rs          fitting panes to their area; divider geometry
     features.rs      adapters that apply a feature's messages and outcomes to App
     subscription.rs  the subscriptions: server events, keys, window events, blink
+    updates.rs       starting update checks and updates, and carrying out what they report
     view.rs          the interface
   features/          one folder per feature, each with its own state, message type, update logic and view
     agent/           mod.rs (drafts per agent pane, the composer's messages), view.rs (the conversation and composer)
@@ -36,12 +37,14 @@ src/
     attachments/     mod.rs (file dialog, dropped files, quoted path insertion, pane capture)
     palette/         mod.rs (the query, the highlight, the command to run), view.rs (the list)
     connection/      mod.rs (target, generation, channel state, why a target is unreachable; the link's threads stay in link.rs)
+    updates/         mod.rs (what is known about newer releases, the update dialog's stages; the threads are in updater.rs)
   terminal/          canvas.rs (draws a pane), pointer.rs, input.rs (keys, paste, focus reports), copy.rs (selection, OSC 52 writes), links.rs (finding links in output)
   ui/                theme.rs (colours, styles), icons.rs (vector icons and icon buttons)
   platform/          desktop.rs (which session this is, once, and so who controls the window), kwin.rs (KWin window control), portal.rs (the GlobalShortcuts portal), fade.rs (window opacity: X11 property, macOS alpha), macos/{app.rs, keyboard.rs}: code that exists because of one operating system
   config.rs          the typed config.toml model, shared by every feature
   commands.rs        the command registry: ids, titles, the palette's list and its matching
   link.rs            the server connection: its two threads and the events they report to App
+  probe.rs, updater.rs   background threads for other machines and for the application's own update, each reporting through one event channel
   shortcuts.rs, tabs.rs, layout.rs   pure helpers with their own tests; test_support.rs  test fixtures
 ```
 
@@ -50,7 +53,7 @@ src/
 ```
 spooky-server/src/
   main.rs      module list and the entry point (Unix only)
-  cli.rs       serve, bridge, status and stop: argument dispatch and the control commands
+  cli.rs       serve, bridge, status, version and stop: argument dispatch and the control commands
   daemon.rs    the socket: single-instance lock, accept loop, one request per line, the save thread
   server.rs    Server: the shared state, request execution, save and restore, shutdown
   state.rs     State (workspaces, panes, identities), layout edits, and the validation of names, sizes and directories
@@ -62,7 +65,9 @@ spooky-core/src/
   lib.rs       the wire protocol
   paths.rs     the own-user socket and state directories
   client/      mod.rs (Client and Target), local.rs (Unix socket), ssh.rs (SSH child and its helpers),
-               upload.rs (SFTP transfers), framing.rs (bounded JSON lines), errors.rs (Cancelled, Unrecoverable)
+               upload.rs (SFTP transfers), framing.rs (bounded JSON lines), errors.rs (Cancelled, Unrecoverable),
+               install.rs (the server on a remote machine), fetch.rs (curl downloads, checksums, scratch directories)
+  update.rs    the application's own update: release list and channels, check, prepare, apply, relaunch
 ```
 
 Rules: a feature is a folder; features do not import one another (they meet in `App`, which composes them, and talk through messages and small traits `App` implements, such as `settings::Shortcuts`); the shared leaf modules (`config`, `ui`, `platform`) depend on no feature; tests live beside the code they test. A feature reports what the rest of the application must do as data (`settings::Effect`) instead of reaching into it, which is also what lets its logic be tested without a display. The same rules will apply to mods.
@@ -170,6 +175,14 @@ Search keeps its state in the frontend (`Search`: query, the pane it ran in, the
 ## Machines
 
 `features/machines` owns the list of machines, each machine's state (connecting, ready with a workspace summary, failed with an optional `Problem`) and the installation dialog; it is pure state. `probe.rs` runs the threads: one probe per machine that is not in use (its own client connection, a snapshot every 3 s, backoff 2–30 s, no retry for errors only the person can fix) and the installation and remote restart, which report through one unbounded event channel. `App` keeps a single `Link` for the machine in use, so a failing remote never affects it; `sync_probes` stops the probe of the machine in use and starts the others. The installer lives in `spooky-core::client::install` and runs only after the in-app confirmation; it never changes the remote's SSH configuration, never disables host-key checks and never restarts a server without a second confirmation. Showing several machines' terminals at once would need per-machine session state in `App` and is not done.
+
+## Releases and updates
+
+`spooky-core::update` owns the logic and has no GUI: `check` reads a release list (GitHub's JSON, or `SPOOKY_RELEASE_INDEX`) and applies the channel (Stable skips pre-releases and drafts; Dev takes the newest of every release; semver ordering, never a downgrade), `support` decides whether this installation may replace itself, and `prepare` / `apply` / `relaunch` do the update in three steps so nothing changes before the person agrees. Downloading, checksum and scratch-directory helpers live in `client::fetch`, shared with the remote installer. `prepare` unpacks beside the installation (same filesystem, so the swap is a rename), verifies the macOS bundle with `codesign --verify --strict`, and runs the new `spooky-server version` (one line: `spooky-server <version> protocol <n>`, defined once by `update::version_line`), which must name the expected version and gives the protocol the new server speaks. `apply` renames the installed files into a backup directory and the new ones into place, moving everything back if a step fails; dropping a `Prepared` removes the unpacked files. Only an installation a release made is replaceable (a `.app` bundle, or `bin/spooky` beside the release's desktop file) and only where a file can be created now; a package-manager install or a development build gets an explanation and the release page. There is no atomic bundle exchange without unsafe code, so the swap is two renames with rollback.
+
+The desktop keeps `features/updates` as pure state (status, the dialog stages; the answer of a check for a channel that was left is ignored) and `updater.rs` runs the threads, reporting through one unbounded event channel like `probe.rs`; the prepared release waits in a slot until **Restart**. The update dialog is the only path that stops the local server, and only when the new protocol differs (`PROTOCOL_VERSION`): `prepare` then asks the running server how many shells and agents it holds (a failure to ask stops the update before anything changes), the dialog states that number, and `Updater::apply` replaces the installation first and stops the server second, so a server that does not stop leaves the old one running with a clear message rather than ending shells for an update that did not happen. The window exits after the new application is started detached with a one-second delay.
+
+The release workflow's tag guard requires the tag to equal the workspace version; a version with a pre-release part (`0.2.0-dev.1`) publishes a GitHub pre-release, any other must be a commit of `main`. Asset names are the contract between the workflow and `update.rs` / `install.rs`.
 
 ## Process and failure behavior
 

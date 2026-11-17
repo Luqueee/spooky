@@ -5,12 +5,12 @@
 //! account, so it needs no internet access and no toolchain. Every SSH call keeps the
 //! rules of the rest of the client: no prompts, host keys verified, nothing forwarded.
 
+use super::fetch::{Workspace, check_sha256, download, fetch_text, protocol_of};
 use super::ssh::{
     drain_stderr, run_ssh_command, ssh_command_with, terminate_child, validate_destination,
 };
-use super::{CANCEL_POLL, Cancelled, Client, Problem, SSH_COMMAND_TIMEOUT, remote_problem};
+use super::{Cancelled, Client, Problem, SSH_COMMAND_TIMEOUT, remote_problem};
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -28,7 +28,8 @@ const BASE_ENV: &str = "SPOOKY_RELEASE_URL";
 /// The server binary is the only thing in the archive that is wanted, and bounded.
 const MAX_SERVER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHA_FILE_BYTES: u64 = 1024;
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// A release archive holds one server binary; this bounds the download itself.
+const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const UPLOAD_CHUNK: usize = 64 * 1024;
 /// Where on the remote account the server goes, relative to `$HOME`.
@@ -42,15 +43,19 @@ pub struct Release {
     version: String,
 }
 
+/// Where releases are downloaded from: the official location, or `SPOOKY_RELEASE_URL`.
+pub(crate) fn official_base() -> String {
+    std::env::var(BASE_ENV)
+        .ok()
+        .filter(|base| !base.is_empty())
+        .unwrap_or_else(|| OFFICIAL_BASE.to_owned())
+}
+
 impl Release {
     /// The release that matches this program's version, from the official location or
     /// `SPOOKY_RELEASE_URL`.
     pub fn official() -> Self {
-        let base = std::env::var(BASE_ENV)
-            .ok()
-            .filter(|base| !base.is_empty())
-            .unwrap_or_else(|| OFFICIAL_BASE.to_owned());
-        Self::new(base, env!("CARGO_PKG_VERSION"))
+        Self::new(official_base(), env!("CARGO_PKG_VERSION"))
     }
 
     /// A release of `version` under `base` (an `https://` or `file://` location).
@@ -76,13 +81,7 @@ impl Release {
 
     /// The `curl` protocol restriction for this location: plain HTTP is never used.
     fn protocol(&self) -> Result<&'static str> {
-        if self.base.starts_with("https://") {
-            Ok("=https")
-        } else if self.base.starts_with("file://") {
-            Ok("=file")
-        } else {
-            bail!("the release location must start with https:// (or file:// for development)")
-        }
+        protocol_of(&self.base)
     }
 }
 
@@ -182,13 +181,15 @@ pub(super) fn install_with(
         protocol,
         &release.asset_url(triple),
         &archive,
-        progress,
+        MAX_ARCHIVE_BYTES,
+        &mut |bytes| progress(Progress::Downloaded(bytes)),
         cancelled,
     )?;
     let published = fetch_text(
         curl,
         protocol,
         &format!("{}.sha256", release.asset_url(triple)),
+        MAX_SHA_FILE_BYTES,
         cancelled,
     )?;
     progress(Progress::Step("Checking the download".into()));
@@ -233,197 +234,6 @@ pub(super) fn restart_server_with(
          done; echo 'the server did not stop' >&2; exit 1";
     run_ssh_command(ssh, destination, command, SSH_COMMAND_TIMEOUT, cancelled)
         .with_context(|| format!("stopping the server on {destination}"))?;
-    Ok(())
-}
-
-/// A private scratch directory, removed when dropped.
-struct Workspace(PathBuf);
-
-impl Workspace {
-    fn create() -> Result<Self> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let path =
-            std::env::temp_dir().join(format!("spooky-install-{}-{nanos}", std::process::id()));
-        fs::create_dir(&path).context("creating a scratch directory")?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-                .context("restricting the scratch directory")?;
-        }
-        Ok(Self(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Workspace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn curl_command(curl: &OsStr, protocol: &str, url: &str) -> Command {
-    let mut command = Command::new(curl);
-    command
-        .arg("--fail")
-        .arg("--location")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--proto")
-        .arg(protocol)
-        .arg("--proto-redir")
-        .arg(protocol)
-        .arg("--connect-timeout")
-        .arg("15")
-        .arg(url);
-    command
-}
-
-/// Downloads `url` to `target`, reporting the bytes received.
-fn download(
-    curl: &OsStr,
-    protocol: &str,
-    url: &str,
-    target: &Path,
-    progress: &mut dyn FnMut(Progress),
-    cancelled: &dyn Fn() -> bool,
-) -> Result<()> {
-    let mut command = curl_command(curl, protocol, url);
-    command
-        .arg("--output")
-        .arg(target)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .context("starting curl; it is needed to download the release")?;
-    let diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let reader = drain_stderr(
-        child.stderr.take().context("opening curl diagnostics")?,
-        Arc::clone(&diagnostics),
-    )?;
-    let deadline = Instant::now() + DOWNLOAD_TIMEOUT;
-    let mut last = 0;
-    let status = loop {
-        if cancelled() {
-            terminate_child(&mut child);
-            let _ = reader.join();
-            return Err(Cancelled.into());
-        }
-        if let Some(status) = child.try_wait().context("waiting for curl")? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            terminate_child(&mut child);
-            let _ = reader.join();
-            bail!("the download took longer than {DOWNLOAD_TIMEOUT:?}");
-        }
-        let size = fs::metadata(target).map_or(0, |metadata| metadata.len());
-        if size != last {
-            last = size;
-            progress(Progress::Downloaded(size));
-        }
-        std::thread::sleep(CANCEL_POLL);
-    };
-    let _ = reader.join();
-    if !status.success() {
-        let message = diagnostics
-            .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
-            .unwrap_or_default();
-        bail!("downloading {url} failed: {message}");
-    }
-    progress(Progress::Downloaded(
-        fs::metadata(target).map_or(0, |metadata| metadata.len()),
-    ));
-    Ok(())
-}
-
-/// Fetches a small text file.
-fn fetch_text(
-    curl: &OsStr,
-    protocol: &str,
-    url: &str,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<String> {
-    let mut command = curl_command(curl, protocol, url);
-    command
-        .arg("--max-filesize")
-        .arg(MAX_SHA_FILE_BYTES.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().context("starting curl")?;
-    let diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let reader = drain_stderr(
-        child.stderr.take().context("opening curl diagnostics")?,
-        Arc::clone(&diagnostics),
-    )?;
-    let mut output = String::new();
-    let mut stdout = child.stdout.take().context("opening curl output")?;
-    let body = std::thread::spawn(move || {
-        let _ = stdout.read_to_string(&mut output);
-        output
-    });
-    let deadline = Instant::now() + SSH_COMMAND_TIMEOUT;
-    let status = loop {
-        if cancelled() {
-            terminate_child(&mut child);
-            return Err(Cancelled.into());
-        }
-        if let Some(status) = child.try_wait().context("waiting for curl")? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            terminate_child(&mut child);
-            bail!("fetching {url} timed out");
-        }
-        std::thread::sleep(CANCEL_POLL);
-    };
-    let _ = reader.join();
-    let output = body.join().unwrap_or_default();
-    if !status.success() {
-        let message = diagnostics
-            .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
-            .unwrap_or_default();
-        bail!("fetching {url} failed: {message}");
-    }
-    Ok(output)
-}
-
-/// Compares the archive's SHA-256 with the published line (`<hex>  <name>`).
-fn check_sha256(archive: &Path, published: &str, name: &str) -> Result<()> {
-    let expected = published
-        .split_whitespace()
-        .next()
-        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .with_context(|| format!("the published checksum for {name} is not a SHA-256"))?
-        .to_ascii_lowercase();
-    let mut file = File::open(archive).context("opening the download")?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).context("reading the download")?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual: String = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    if actual != expected {
-        bail!("the download of {name} does not match its published checksum; it was not used");
-    }
     Ok(())
 }
 

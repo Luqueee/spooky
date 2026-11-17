@@ -14,6 +14,7 @@ mod terminal;
 #[cfg(test)]
 mod test_support;
 mod ui;
+mod updater;
 
 use app::{App, ContextTarget, Message, subscription};
 use config::Config;

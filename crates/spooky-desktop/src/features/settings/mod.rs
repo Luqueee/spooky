@@ -5,13 +5,14 @@
 
 mod page;
 
-pub(crate) use page::view;
+pub(crate) use page::{Session, view};
 
 use crate::{
     config::{self, Appearance, Config, OnBlur, Osc52, SizeMode},
     shortcuts,
 };
 use iced::keyboard;
+use spooky_core::update::Channel;
 
 /// What the rest of the application is told by this feature.
 #[derive(Clone, Debug)]
@@ -45,6 +46,8 @@ pub(crate) enum Change {
     DockIcon(bool),
     CursorBlink(bool),
     Osc52(bool),
+    UpdateChannel(Channel),
+    CheckUpdates(bool),
     RecordShortcut,
     CancelRecording,
     ResetShortcut,
@@ -62,6 +65,9 @@ pub(crate) enum Effect {
     OnBlur(OnBlur),
     /// Show (`true`) or hide the Dock icon.
     DockIcon(bool),
+    /// The release channel changed, or checking for updates was switched on: look for a
+    /// newer release now.
+    Updates,
 }
 
 /// The global shortcut, as the settings page needs it.
@@ -242,6 +248,8 @@ impl Settings {
             },
             Change::CursorBlink(on) => next.cursor_blink = on,
             Change::Osc52(on) => next.osc52 = if on { Osc52::Write } else { Osc52::Off },
+            Change::UpdateChannel(channel) => next.update_channel = channel,
+            Change::CheckUpdates(on) => next.check_updates = on,
             Change::RecordShortcut => {
                 if shortcuts.available() {
                     self.set_recording(true);
@@ -349,6 +357,11 @@ fn effects(previous: &Config, next: &Config, has_shortcut: bool) -> Vec<Effect> 
         // Without a global shortcut nothing could bring a buried window back.
         effects.push(Effect::DockIcon(next.dock_icon || !has_shortcut));
     }
+    if previous.update_channel != next.update_channel
+        || (!previous.check_updates && next.check_updates)
+    {
+        effects.push(Effect::Updates);
+    }
     effects
 }
 
@@ -426,6 +439,26 @@ mod tests {
             [Effect::OnBlur(OnBlur::Top)]
         );
         assert_eq!(with(&|c| c.cursor_blink = false), [], "read at draw time");
+        assert_eq!(
+            with(&|c| c.update_channel = Channel::Dev),
+            [Effect::Updates],
+            "another channel has another newest release"
+        );
+        let off = Config {
+            check_updates: false,
+            ..Config::default()
+        };
+        let mut on = off.clone();
+        on.check_updates = true;
+        assert_eq!(
+            effects(&off, &on, true),
+            [Effect::Updates],
+            "switching it on checks now"
+        );
+        assert!(
+            effects(&on, &off, true).is_empty(),
+            "switching it off asks nothing"
+        );
         assert_eq!(
             with(&|c| c.appearance = Appearance::Nord),
             [],

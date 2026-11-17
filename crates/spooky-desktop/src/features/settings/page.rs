@@ -4,12 +4,14 @@ use super::{Change, DEFAULT_FONT, Settings};
 use crate::{
     Message,
     config::{Appearance, Config, OnBlur, Osc52, SizeMode},
+    features::updates::{Status, Updates},
     ui::*,
 };
 use iced::{
     Alignment, Border, Element, Length,
     widget::{button, column, container, pick_list, row, scrollable, text, toggler},
 };
+use spooky_core::update::{CURRENT, Channel};
 
 /// Percent points one press of a size stepper moves.
 const PERCENT_STEP: f32 = 5.0;
@@ -121,18 +123,95 @@ fn apply(change: Change) -> Message {
     Message::Settings(super::Message::Change(change))
 }
 
+/// The release channel, the check at startup, and what is known about newer releases.
+fn updates_section<'a>(config: &'a Config, updates: &'a Updates) -> Element<'a, Message> {
+    let channel = |channel: Channel| {
+        (
+            channel.label(),
+            config.update_channel == channel,
+            apply(Change::UpdateChannel(channel)),
+        )
+    };
+    let status = match updates.status() {
+        Status::Idle => "Not checked yet.".to_owned(),
+        Status::Checking => "Checking…".to_owned(),
+        Status::UpToDate => format!(
+            "This is the newest {} release.",
+            config.update_channel.label().to_lowercase()
+        ),
+        Status::Available(available) => format!(
+            "Version {} is available{}.",
+            available.version,
+            if available.prerelease {
+                " (pre-release)"
+            } else {
+                ""
+            }
+        ),
+        Status::Failed(reason) => format!("Could not check: {reason}"),
+    };
+    let mut buttons = row![
+        button(text("Check now").size(11))
+            .padding([4, 10])
+            .style(quiet)
+            .on_press_maybe(
+                (*updates.status() != Status::Checking).then_some(Message::UpdateCheck)
+            ),
+    ]
+    .spacing(6);
+    if updates.available().is_some() {
+        buttons = buttons.push(
+            button(text("Update…").size(11))
+                .padding([4, 10])
+                .style(primary)
+                .on_press(Message::UpdateAsk),
+        );
+    }
+    section(
+        "Updates",
+        vec![
+            option(
+                "Release channel",
+                "Stable follows production releases. Development also takes pre-releases such as 0.2.0-dev.1.",
+                choice(vec![channel(Channel::Stable), channel(Channel::Dev)]),
+            ),
+            option(
+                "Check when Spooky starts",
+                "Asks GitHub's public release list for a newer version and sends nothing else.",
+                switch(config.check_updates, Change::CheckUpdates),
+            ),
+            option("Spooky", format!("Version {CURRENT}. {status}"), buttons),
+        ],
+    )
+}
+
+/// What this session offers the page, which shapes the options it shows.
+#[derive(Clone, Copy)]
+pub(crate) struct Session {
+    /// Whether the session has a global shortcut.
+    pub shortcuts_available: bool,
+    /// Whether that shortcut can also hide the window and bring it back.
+    pub can_hide: bool,
+    /// Whether the window's background can be translucent here.
+    pub glass_available: bool,
+    /// Whether the system asks for solid backgrounds.
+    pub reduce_transparency: bool,
+}
+
 /// The page that replaces the terminal while the settings tab is selected.
-/// `shortcuts_available` is whether the session has a global shortcut, and `can_hide`
-/// whether that shortcut can also hide the window and bring it back.
 pub(crate) fn view<'a>(
     settings: &'a Settings,
     config: &'a Config,
     themes: &'a ThemeCatalog,
-    shortcuts_available: bool,
-    can_hide: bool,
-    glass_available: bool,
-    reduce_transparency: bool,
+    updates: &'a Updates,
+    session: Session,
 ) -> Element<'a, Message> {
+    let Session {
+        shortcuts_available,
+        can_hide,
+        glass_available,
+        reduce_transparency,
+    } = session;
     let recording = settings.recording();
 
     let percent = config.size_mode() == SizeMode::Percent;
@@ -430,6 +509,7 @@ pub(crate) fn view<'a>(
         ),
         section("Shortcut", shortcut),
         section("Terminal", terminal),
+        updates_section(config, updates),
         text(file).size(10).style(text_tone(TextTone::Muted)),
         text(themes_path).size(10).style(text_tone(TextTone::Muted)),
     ]

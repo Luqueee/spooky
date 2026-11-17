@@ -12,6 +12,9 @@ for tool in dpkg dpkg-deb objdump; do
 done
 
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+# `0.2.0-dev.1` is a pre-release of 0.2.0: Debian sorts it before it only with a `~`
+# (a `-` would start the package revision, which sorts after).
+debversion="$(printf '%s' "$version" | sed 's/-/~/')"
 arch="$(dpkg --print-architecture)"
 maintainer="${SPOOKY_DEB_MAINTAINER:-Spooky contributors <spooky@invalid>}"
 # The oldest glibc the binaries can run on is the newest symbol version they use.
@@ -19,7 +22,7 @@ glibc="$(objdump -T target/release/spooky target/release/spooky-server \
   | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -V -u | tail -n 1)"
 [ -n "$glibc" ] || { printf 'Could not read the glibc version the binaries need.\n' >&2; exit 1; }
 
-root="dist/deb/spooky_${version}_${arch}"
+root="dist/deb/spooky_${debversion}_${arch}"
 rm -rf dist/deb
 mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/applications" \
   "$root/usr/share/icons/hicolor/256x256/apps" "$root/usr/share/metainfo" \
@@ -50,7 +53,7 @@ chmod 0644 "$root/usr/share/doc/spooky/copyright"
 # for the window, but the X11 ones are needed to fall back to X11.
 cat >"$root/DEBIAN/control" <<EOF
 Package: spooky
-Version: ${version}
+Version: ${debversion}
 Architecture: ${arch}
 Section: x11
 Priority: optional
@@ -67,6 +70,6 @@ Description: Persistent GPU terminal workspaces
  under Wayland; on other Wayland desktops it only brings the window forward.
 EOF
 
-package="dist/spooky_${version}_${arch}.deb"
+package="dist/spooky_${debversion}_${arch}.deb"
 dpkg-deb --root-owner-group --build "$root" "$package"
 printf 'Built package: %s\n' "$package"
