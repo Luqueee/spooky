@@ -110,6 +110,16 @@ pub(crate) fn color_palette(appearance: Appearance) -> ColorPalette {
         warning,
         danger,
     ) = match appearance {
+        Appearance::Midnight => {
+            return ColorPalette::from_base(
+                Color::from_rgb8(15, 16, 20),
+                Color::from_rgb8(226, 229, 235),
+                Color::from_rgb8(156, 176, 212),
+                Color::from_rgb8(126, 190, 156),
+                Color::from_rgb8(224, 189, 123),
+                Color::from_rgb8(222, 125, 133),
+            );
+        }
         Appearance::Spooky => (
             BACKGROUND,
             SIDEBAR,
@@ -165,9 +175,17 @@ pub(crate) fn color_palette(appearance: Appearance) -> ColorPalette {
     }
 }
 
+/// Every built-in palette, the default first.
+pub(crate) const APPEARANCES: [Appearance; 4] = [
+    Appearance::Midnight,
+    Appearance::Spooky,
+    Appearance::Nord,
+    Appearance::Dracula,
+];
+
 pub(crate) fn color_palette_for(theme: &Theme) -> ColorPalette {
     let palette = theme.palette();
-    for appearance in [Appearance::Spooky, Appearance::Nord, Appearance::Dracula] {
+    for appearance in APPEARANCES {
         let builtin = color_palette(appearance);
         if palette.background == builtin.background
             && palette.text == builtin.text
@@ -191,6 +209,7 @@ pub(crate) fn color_palette_for(theme: &Theme) -> ColorPalette {
 
 pub fn theme(appearance: Appearance) -> Theme {
     let name = match appearance {
+        Appearance::Midnight => "Midnight",
         Appearance::Spooky => "Spooky",
         Appearance::Nord => "Nord",
         Appearance::Dracula => "Dracula",
@@ -296,12 +315,12 @@ pub fn dot(color: Color) -> Element<'static, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{color_palette, color_palette_for, theme};
+    use super::{APPEARANCES, color_palette, color_palette_for, theme};
     use crate::config::Appearance;
 
     #[test]
     fn each_builtin_theme_selects_its_matching_surfaces() {
-        for appearance in [Appearance::Spooky, Appearance::Nord, Appearance::Dracula] {
+        for appearance in APPEARANCES {
             let colors = color_palette(appearance);
             assert_eq!(color_palette_for(&theme(appearance)), colors);
         }

@@ -45,8 +45,10 @@ pub(crate) enum OnBlur {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Appearance {
-    /// The original Spooky palette.
+    /// The default: near-black surfaces with soft blue accents.
     #[default]
+    Midnight,
+    /// The original Spooky palette.
     Spooky,
     Nord,
     Dracula,
@@ -320,10 +322,18 @@ mod tests {
 
     #[test]
     fn appearance_defaults_for_existing_files_and_roundtrips() {
-        assert_eq!(Config::default().appearance, Appearance::Spooky);
+        assert_eq!(Config::default().appearance, Appearance::Midnight);
         assert_eq!(
             parse("").expect("existing config").appearance,
-            Appearance::Spooky
+            Appearance::Midnight,
+            "a file that does not choose a palette gets the default one"
+        );
+        assert_eq!(
+            parse("appearance = \"spooky\"")
+                .expect("selected theme")
+                .appearance,
+            Appearance::Spooky,
+            "an explicit choice of the earlier default is kept"
         );
         assert_eq!(
             parse("appearance = \"nord\"")

@@ -222,6 +222,10 @@ impl Settings {
             }
             Change::DockIcon(show) => next.dock_icon = show,
             Change::Appearance(id) => match id.as_str() {
+                "midnight" => {
+                    next.appearance = Appearance::Midnight;
+                    next.custom_theme = None;
+                }
                 "spooky" => {
                     next.appearance = Appearance::Spooky;
                     next.custom_theme = None;

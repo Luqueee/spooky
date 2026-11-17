@@ -51,14 +51,27 @@ async fn listen(
     // Listening starts before binding so no early press is lost.
     let mut activated = portal.receive_activated().await?;
     let session = portal.create_session().await?;
-    portal
-        .bind_shortcuts(
-            &session,
-            &[NewShortcut::new(SHORTCUT, "Show or hide Spooky").preferred_trigger(trigger)],
-            None,
-        )
+    // Binding asks the desktop to show its shortcut-configuration window, which KDE 6.3
+    // does at every start. A shortcut the desktop already knows from an earlier run (it
+    // keeps them per application id) needs no binding, so it is only bound the first
+    // time; the person's choice in System Settings is kept either way.
+    let known = portal
+        .list_shortcuts(&session)
         .await?
-        .response()?;
+        .response()?
+        .shortcuts()
+        .iter()
+        .any(|shortcut| shortcut.id() == SHORTCUT);
+    if !known {
+        portal
+            .bind_shortcuts(
+                &session,
+                &[NewShortcut::new(SHORTCUT, "Show or hide Spooky").preferred_trigger(trigger)],
+                None,
+            )
+            .await?
+            .response()?;
+    }
     let _ = ready.try_send(Ok(()));
     while let Some(press) = activated.next().await {
         if press.shortcut_id() == SHORTCUT {

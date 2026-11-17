@@ -105,6 +105,7 @@ impl ThemeCatalog {
 
     fn builtins() -> Self {
         let mut themes: Vec<_> = [
+            ("midnight", "Midnight", Appearance::Midnight),
             ("spooky", "Spooky", Appearance::Spooky),
             ("nord", "Nord", Appearance::Nord),
             ("dracula", "Dracula", Appearance::Dracula),
@@ -139,18 +140,6 @@ impl ThemeCatalog {
                     (128, 201, 162),
                     (232, 190, 115),
                     (233, 130, 130),
-                ],
-            ),
-            (
-                "midnight",
-                "Midnight",
-                [
-                    (15, 16, 20),
-                    (226, 229, 235),
-                    (156, 176, 212),
-                    (126, 190, 156),
-                    (224, 189, 123),
-                    (222, 125, 133),
                 ],
             ),
         ] {
