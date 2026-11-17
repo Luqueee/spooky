@@ -1609,7 +1609,9 @@ fn clear_removes_history_and_preserves_unsubmitted_input() {
     let pane = client.snapshot().panes[0].id;
     ok(client.request(Request::Resize {
         pane,
-        cols: 80,
+        // Wide enough that the unfinished command never wraps, however long the shell's
+        // prompt is (a CI runner's host name alone is 60 characters).
+        cols: 200,
         rows: 5,
     }));
     ok(client.request(Request::Input {
