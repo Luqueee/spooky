@@ -1,11 +1,13 @@
 //! Installing `spooky-server` on a remote machine, with progress.
 //!
 //! The release archive is downloaded on this machine, checked against its published
-//! SHA-256 and sent over SSH to `~/.local/bin`. Nothing is fetched or built by the remote
+//! SHA-256 and its minisign signature (see [`super::signature`]) and sent over SSH to
+//! `~/.local/bin`. Nothing is fetched or built by the remote
 //! account, so it needs no internet access and no toolchain. Every SSH call keeps the
 //! rules of the rest of the client: no prompts, host keys verified, nothing forwarded.
 
 use super::fetch::{Workspace, check_sha256, download, fetch_text, protocol_of};
+use super::signature::{self, MAX_SIGNATURE_BYTES, TrustedKeys};
 use super::ssh::{
     drain_stderr, run_ssh_command, ssh_command_with, terminate_child, validate_destination,
 };
@@ -41,6 +43,8 @@ const REMOTE_NAME: &str = "spooky-server";
 pub struct Release {
     base: String,
     version: String,
+    /// The keys the archive must be signed with.
+    keys: TrustedKeys,
 }
 
 /// Where releases are downloaded from: the official location, or `SPOOKY_RELEASE_URL`.
@@ -63,6 +67,7 @@ impl Release {
         Self {
             base: base.into().trim_end_matches('/').to_owned(),
             version: version.into(),
+            keys: TrustedKeys::release(),
         }
     }
 
@@ -194,6 +199,22 @@ pub(super) fn install_with(
     )?;
     progress(Progress::Step("Checking the download".into()));
     check_sha256(&archive, &published, &release.asset_name(triple))?;
+    let signature = fetch_text(
+        curl,
+        protocol,
+        &format!("{}.minisig", release.asset_url(triple)),
+        MAX_SIGNATURE_BYTES,
+        cancelled,
+    )
+    .context(
+        "the release has no signature to check; a release that is not signed is not installed",
+    )?;
+    signature::verify(
+        &release.keys,
+        &archive,
+        &signature,
+        &release.asset_name(triple),
+    )?;
     let binary = extract(&archive, work.path())?;
 
     progress(Progress::Step(format!("Sending it to {destination}")));
@@ -346,6 +367,7 @@ fn upload(
 mod tests {
     use super::*;
     use crate::PROTOCOL_VERSION;
+    use crate::client::signature::tests::TestKey;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -438,7 +460,14 @@ mod tests {
             format!("{hash}  {name}\n"),
         )
         .expect("checksum");
-        let release = Release::new(format!("file://{}", releases.display()), version);
+        let key = TestKey::new();
+        fs::write(
+            directory.join(format!("{name}.minisig")),
+            key.sign(&fs::read(directory.join(&name)).expect("archive"), &name),
+        )
+        .expect("signature");
+        let mut release = Release::new(format!("file://{}", releases.display()), version);
+        release.keys = key.trusted();
         (
             Fixture {
                 _turn: turn,
@@ -543,6 +572,46 @@ mod tests {
         fs::write(&sum, format!("{}  x\n", "0".repeat(64))).expect("tamper");
         let error = run(&fixture, &release, &mut Vec::new()).expect_err("refused");
         assert!(format!("{error:#}").contains("checksum"), "{error:#}");
+        assert!(
+            !fixture.home.join(".local").exists(),
+            "nothing reached the remote account"
+        );
+    }
+
+    #[test]
+    fn a_download_nobody_trusted_signed_is_never_sent() {
+        let (fixture, release) = fixture("Linux x86_64", PROTOCOL_VERSION);
+        let directory = fixture.root.join("releases/v9.9.9");
+        let name = "spooky-server-9.9.9-x86_64-unknown-linux-musl.tar.gz";
+        // The checksum matches the archive; the signature is a stranger's.
+        let stranger = TestKey::new();
+        fs::write(
+            directory.join(format!("{name}.minisig")),
+            stranger.sign(&fs::read(directory.join(name)).expect("archive"), name),
+        )
+        .expect("replace the signature");
+        let error = run(&fixture, &release, &mut Vec::new()).expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("not signed by a release key"),
+            "{error:#}"
+        );
+        assert!(
+            !fixture.home.join(".local").exists(),
+            "nothing reached the remote account"
+        );
+    }
+
+    #[test]
+    fn a_download_without_a_signature_is_never_sent() {
+        let (fixture, release) = fixture("Linux x86_64", PROTOCOL_VERSION);
+        fs::remove_file(
+            fixture.root.join(
+                "releases/v9.9.9/spooky-server-9.9.9-x86_64-unknown-linux-musl.tar.gz.minisig",
+            ),
+        )
+        .expect("remove the signature");
+        let error = run(&fixture, &release, &mut Vec::new()).expect_err("refused");
+        assert!(format!("{error:#}").contains("not signed"), "{error:#}");
         assert!(
             !fixture.home.join(".local").exists(),
             "nothing reached the remote account"

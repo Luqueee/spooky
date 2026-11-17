@@ -42,7 +42,7 @@ The tag, the workspace `version` in `Cargo.toml` and the commit must agree: the 
    git status -sb
    gh run list --commit "$(git rev-parse HEAD)" --json name,status,conclusion
    ```
-   A production release comes from an up-to-date `main` (`git merge-base --is-ancestor HEAD origin/main`).
+   A production release comes from an up-to-date `main` (`git merge-base --is-ancestor HEAD origin/main`). The signing secret must exist (see *The signing key*).
 4. **Version commit.** Set `[workspace.package] version` in `Cargo.toml`, refresh `Cargo.lock` (`cargo check --workspace`), and add a `CHANGELOG`/README note only if the repo keeps one. Commit it with the repo's commit flow; on `main` that goes through the PR flow the owner uses. Do not push yet.
 5. **Gates** (the commands in `README.md` → Packages and checks): `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace --all-targets`, `cargo test --locked --workspace --doc`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`, `cargo +1.98.0 check --locked --workspace --all-targets`.
 6. **Package smoke test** on this machine: `./scripts/package.sh`, then
@@ -63,7 +63,7 @@ The tag, the workspace `version` in `Cargo.toml` and the commit must agree: the 
     ```sh
     gh release view vX.Y.Z --json isPrerelease,assets --jq '{pre: .isPrerelease, assets: [.assets[].name]}'
     ```
-    Expect: `spooky-server-<v>-{x86_64,aarch64}-unknown-linux-musl`, `…-{aarch64,x86_64}-apple-darwin` tarballs; `spooky-app-<v>-aarch64-apple-darwin.zip`; `spooky-app-<v>-x86_64-unknown-linux-gnu.tar.gz`; `spooky_<v>_amd64.deb`; and a `.sha256` for each. `isPrerelease` is true exactly for a development tag. Download one asset to a temp directory, check `shasum -a 256 -c`, and run its `spooky-server version`.
+    Expect: `spooky-server-<v>-{x86_64,aarch64}-unknown-linux-musl`, `…-{aarch64,x86_64}-apple-darwin` tarballs; `spooky-app-<v>-aarch64-apple-darwin.zip`; `spooky-app-<v>-x86_64-unknown-linux-gnu.tar.gz`; `spooky_<v>_amd64.deb`; and a `.sha256` and a `.minisig` for each. `isPrerelease` is true exactly for a development tag. Download one asset and its `.minisig` to a temp directory, check `shasum -a 256 -c` and `minisign -Vm <asset> -P <the key in crates/spooky-core/release-keys.pub>`, and run its `spooky-server version`.
 12. **Report** the release URL, what was verified, and what was not (for instance, a Linux install by tarball or a real remote install).
 
 ## Local mirror (rehearsal without publishing)
@@ -74,6 +74,7 @@ The tag, the workspace `version` in `Cargo.toml` and the commit must agree: the 
 mirror/index.json                                       [{"tag_name":"v0.2.0-dev.1","draft":false,"prerelease":true}]
 mirror/download/v0.2.0-dev.1/spooky-app-0.2.0-dev.1-aarch64-apple-darwin.zip
 mirror/download/v0.2.0-dev.1/spooky-app-0.2.0-dev.1-aarch64-apple-darwin.zip.sha256   "<sha256>  <file name>"
+mirror/download/v0.2.0-dev.1/spooky-app-0.2.0-dev.1-aarch64-apple-darwin.zip.minisig  `minisign -S -s <throwaway key> -m <zip>`
 ```
 
 Build the zip with `ditto -c -k --keepParent dist/Spooky.app <zip>` from a build whose `Cargo.toml` version is the one in the file names. Install the previous build somewhere you own (not `/Applications` when testing), isolate it with its own `SPOOKY_SOCKET` and `XDG_CONFIG_HOME` (set `update_channel = "dev"` and a different `shortcut` in its `config.toml` so it does not take the real shortcut), and give those variables, plus the two mirror variables, to the app: `open` does not pass your shell's environment, so put them in the test bundle's `Info.plist` as `LSEnvironment` and re-sign it, or the relaunch after an update starts without them. Never point a rehearsal at the owner's real socket or config.
@@ -81,3 +82,11 @@ Build the zip with `ditto -c -k --keepParent dist/Spooky.app <zip>` from a build
 ## Withdrawing a bad release
 
 Stable users only see releases whose GitHub `prerelease` flag is false, so `gh release edit vX.Y.Z --prerelease` takes a bad production release out of the Stable channel without deleting anything. Do it, or delete a release and its tag (`gh release delete vX.Y.Z --cleanup-tag`), only when the user says so, then publish the fix as the next version.
+
+## The signing key
+
+Every release file is signed in the workflow with the `SPOOKY_SIGNING_KEY` repository secret (the contents of a passwordless minisign secret key), and the program trusts the public keys in `crates/spooky-core/release-keys.pub`. The workflow refuses to publish without the secret, or with a key none of the listed public keys accepts.
+
+- Before tagging: `gh secret list | grep SPOOKY_SIGNING_KEY` must show it. If not, stop and tell the user; never print, log or commit the private key, and never put it in the repository.
+- The owner keeps the original key file outside the repository (it was generated in `~/.spooky-release/`); losing it without a second trusted key strands every installed copy, which then has to be reinstalled by hand.
+- Rotation: first release a version whose `release-keys.pub` lists the old and the new public key, wait until people have updated to it, then change the secret to the new private key. Removing the old key from the list is a later release.

@@ -166,10 +166,41 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
           path: dist
+      - name: Sign the release files
+        env:
+          SIGNING_KEY: ${{ secrets.SPOOKY_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::The SPOOKY_SIGNING_KEY secret is not set. Every installed Spooky refuses a release that is not signed, so publishing one would strand them."
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          # The keys the program trusts: a signature none of them accepts is no use.
+          trusted=$(grep -vE '^[[:space:]]*(#|$)' crates/spooky-core/release-keys.pub)
+          for file in dist/*.tar.gz dist/*.zip dist/*.deb; do
+            minisign -S -s "$key" -m "$file" -x "$file.minisig" < /dev/null
+            accepted=no
+            for public in $trusted; do
+              if minisign -V -q -P "$public" -m "$file" -x "$file.minisig"; then accepted=yes; fi
+            done
+            if [ "$accepted" != yes ]; then
+              echo "::error::$file.minisig is not accepted by any key in crates/spooky-core/release-keys.pub; the signing key does not match the one compiled into Spooky."
+              exit 1
+            fi
+          done
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}

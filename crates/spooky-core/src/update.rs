@@ -19,13 +19,15 @@
 //! write ([`support`]): the `.app` bundle on macOS, and a tarball installation on Linux.
 //! A package-manager install or a development build is left alone.
 //!
-//! The SHA-256 is published beside the archive, so it detects a damaged or truncated
-//! download, not a tampered release. It is not a signature.
+//! Every release file is signed with minisign, and the signature is checked against the
+//! keys compiled into the program before anything is unpacked (the `client::signature`
+//! module); the SHA-256 beside it only tells a damaged download from a good one.
 
 use crate::PROTOCOL_VERSION;
 use crate::client::fetch::{
     Workspace, check_sha256, download, fetch_text, protocol_of, run_with_timeout,
 };
+use crate::client::signature::{self, MAX_SIGNATURE_BYTES, TrustedKeys};
 use crate::client::{Client, Progress, official_base};
 use crate::{Request, Response};
 use anyhow::{Context, Result, bail};
@@ -84,6 +86,8 @@ impl Channel {
 pub struct Source {
     index: String,
     base: String,
+    /// The keys a release must be signed with.
+    keys: TrustedKeys,
 }
 
 impl Source {
@@ -104,6 +108,7 @@ impl Source {
         Self {
             index: index.into(),
             base: base.into().trim_end_matches('/').to_owned(),
+            keys: TrustedKeys::release(),
         }
     }
 
@@ -372,6 +377,17 @@ fn prepare_asset(
     )?;
     progress(Progress::Step("Checking the download".into()));
     check_sha256(&archive, &published, asset)?;
+    let signature = fetch_text(
+        curl,
+        protocol,
+        &format!("{url}.minisig"),
+        MAX_SIGNATURE_BYTES,
+        cancelled,
+    )
+    .with_context(|| {
+        format!("{asset} has no signature to check; a release that is not signed is not installed")
+    })?;
+    signature::verify(&source.keys, &archive, &signature, asset)?;
 
     progress(Progress::Step("Unpacking it".into()));
     let unpacked = stage.path().join("unpacked");
@@ -584,6 +600,7 @@ pub fn stop_local_server() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::signature::tests::TestKey;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
@@ -635,17 +652,21 @@ mod tests {
     struct Published {
         root: Workspace,
         source: Source,
+        /// The key the releases are signed with, and the source trusts.
+        key: TestKey,
     }
 
     impl Published {
         fn new(entries: &str) -> Self {
             let root = Workspace::create().expect("scratch directory");
             fs::write(root.path().join("index.json"), entries).expect("write index");
-            let source = Source::new(
+            let key = TestKey::new();
+            let mut source = Source::new(
                 format!("file://{}/index.json", root.path().display()),
                 format!("file://{}/download", root.path().display()),
             );
-            Self { root, source }
+            source.keys = key.trusted();
+            Self { root, source, key }
         }
 
         /// Publishes `asset` for `version`: a tarball holding the stand-in programs.
@@ -674,6 +695,19 @@ mod tests {
                 .expect("tar");
             assert!(status.success());
             self.checksum(version, asset, None);
+            self.sign_with(&self.key, version, asset);
+        }
+
+        /// Writes the published signature of `asset` as `key` makes it.
+        fn sign_with(&self, key: &TestKey, version: &str, asset: &str) {
+            let directory = self
+                .root
+                .path()
+                .join("download")
+                .join(format!("v{version}"));
+            let signature = key.sign(&fs::read(directory.join(asset)).expect("read"), asset);
+            fs::write(directory.join(format!("{asset}.minisig")), signature)
+                .expect("write signature");
         }
 
         /// Writes the published checksum of `asset`, or `wrong` instead of the real one.
@@ -907,6 +941,44 @@ mod tests {
     }
 
     #[test]
+    fn a_release_nobody_trusted_signed_is_never_unpacked() {
+        let published = Published::new("[]");
+        published.tarball("0.2.0", ASSET, &server_printing("0.2.0", PROTOCOL_VERSION));
+        // The archive and its checksum are consistent; the signature is a stranger's.
+        published.sign_with(&TestKey::new(), "0.2.0", ASSET);
+        let target = Workspace::create().expect("scratch directory");
+        let (install, bin) = installed(target.path());
+        let error = prepare_test(&published, &install, &mut Vec::new())
+            .err()
+            .expect("refused");
+        assert!(
+            format!("{error:#}").contains("not signed by a release key"),
+            "{error:#}"
+        );
+        assert_eq!(names(&bin), ["spooky", "spooky-server"]);
+    }
+
+    #[test]
+    fn a_release_without_a_signature_is_never_unpacked() {
+        let published = Published::new("[]");
+        published.tarball("0.2.0", ASSET, &server_printing("0.2.0", PROTOCOL_VERSION));
+        fs::remove_file(
+            published
+                .root
+                .path()
+                .join(format!("download/v0.2.0/{ASSET}.minisig")),
+        )
+        .expect("remove the signature");
+        let target = Workspace::create().expect("scratch directory");
+        let (install, bin) = installed(target.path());
+        let error = prepare_test(&published, &install, &mut Vec::new())
+            .err()
+            .expect("refused");
+        assert!(format!("{error:#}").contains("not signed"), "{error:#}");
+        assert_eq!(names(&bin), ["spooky", "spooky-server"]);
+    }
+
+    #[test]
     fn an_archive_that_holds_another_version_is_refused() {
         let published = Published::new("[]");
         published.tarball("0.2.0", ASSET, &server_printing("0.1.9", PROTOCOL_VERSION));
@@ -966,6 +1038,7 @@ mod tests {
 #[cfg(target_os = "macos")]
 mod bundle_tests {
     use super::*;
+    use crate::client::signature::tests::TestKey;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
@@ -1031,10 +1104,21 @@ mod bundle_tests {
             format!("{hash}  spooky-app-0.2.0-test.zip\n"),
         )
         .expect("checksum");
-        Source::new(
+        let key = TestKey::new();
+        fs::write(
+            directory.join("spooky-app-0.2.0-test.zip.minisig"),
+            key.sign(
+                &fs::read(&archive).expect("archive"),
+                "spooky-app-0.2.0-test.zip",
+            ),
+        )
+        .expect("signature");
+        let mut source = Source::new(
             "file:///unused",
             format!("file://{}/download", root.display()),
-        )
+        );
+        source.keys = key.trusted();
+        source
     }
 
     fn applications(root: &Path) -> PathBuf {
