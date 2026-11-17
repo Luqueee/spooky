@@ -20,6 +20,7 @@ pub(crate) mod fetch;
 mod framing;
 mod install;
 mod local;
+pub(crate) mod signature;
 mod ssh;
 #[cfg(test)]
 mod tests;

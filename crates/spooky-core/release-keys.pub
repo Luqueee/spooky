@@ -1,0 +1,4 @@
+# Public keys whose signatures Spooky trusts on a downloaded release, one minisign key
+# (the base64 line of its .pub file) per line. A release is signed with any one of them;
+# to rotate, ship a version that lists both keys, then sign with the new one.
+RWQouq84PJMh9pqKTyUD3u10/xQ8zYQ0/hBp18ad+uIugRhTYhTb8gI1
