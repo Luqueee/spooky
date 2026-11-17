@@ -574,6 +574,37 @@ fn omp_typed_in_a_pane_shows_the_agent_there_and_anything_unsupported_runs_the_r
     assert!(checked > 0, "no shell to check the shim with");
 }
 
+#[test]
+fn omp_is_the_real_program_unless_the_shim_is_switched_on() {
+    // No `server.toml`: the default. A bare `omp` must run the program on PATH.
+    let fixture = Fixture::start_with(|command, dir| {
+        let decoy = dir.join("decoy");
+        fs::create_dir(&decoy).unwrap_or_else(|e| panic!("decoy directory: {e}"));
+        let real = decoy.join("omp");
+        fs::write(&real, "#!/bin/sh\necho \"REAL-OMP $#\"\n")
+            .unwrap_or_else(|e| panic!("real omp: {e}"));
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("permissions: {e}"));
+        let path = std::env::var("PATH").unwrap_or_default();
+        command
+            .env("SHELL", "/bin/sh")
+            .env("HOME", dir)
+            .env("PATH", format!("{}:{path}", decoy.display()));
+    });
+    let mut client = fixture.connect();
+    start_workspace(&mut client, &fixture.dir);
+    let pane = client.snapshot().panes[0].id;
+    ok(client.request(Request::Input {
+        pane,
+        bytes: b"omp\n".to_vec(),
+    }));
+    wait_for(|| screen_has(&mut client, "REAL-OMP 0"));
+    assert!(
+        client.agent_pane().is_none(),
+        "no agent view without the shim"
+    );
+}
+
 fn shim_wins_over_a_profile(profile: &Profile) {
     // A profile that puts a directory with its own `omp` first on PATH, as real ones do:
     // the shim must still win, and must hand over to that `omp` when it is not wanted.
@@ -592,6 +623,11 @@ fn shim_wins_over_a_profile(profile: &Profile) {
             }
             fs::write(&file, text(&decoy)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
+        // The shim is off unless the server's settings ask for it.
+        let settings = dir.join(".config/spooky");
+        fs::create_dir_all(&settings).unwrap_or_else(|e| panic!("settings directory: {e}"));
+        fs::write(settings.join("server.toml"), "agent_shim = true\n")
+            .unwrap_or_else(|e| panic!("server settings: {e}"));
         command.env("SHELL", profile.shell).env("HOME", dir);
     });
     let shell = profile.shell;

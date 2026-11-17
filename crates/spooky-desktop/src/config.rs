@@ -61,6 +61,8 @@ const PLACEHOLDER_WINDOW: Size = Size::new(1100.0, 600.0);
 const DEFAULT_WIDTH_PX: f32 = 1440.0;
 const DEFAULT_HEIGHT_PX: f32 = 900.0;
 
+/// Most machines the configuration may list.
+const MAX_MACHINES: usize = 32;
 /// Longest font family name accepted.
 const MAX_FONT_FAMILY: usize = 100;
 pub(crate) const FONT_SIZE: std::ops::RangeInclusive<f32> = 8.0..=48.0;
@@ -111,6 +113,9 @@ pub(crate) struct Config {
     /// Selected user theme id, when a matching file is available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_theme: Option<String>,
+    /// SSH destinations (`user@host` or an alias) added as machines, besides this one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<String>,
 }
 
 impl Default for Config {
@@ -131,6 +136,7 @@ impl Default for Config {
             on_blur: OnBlur::None,
             appearance: Appearance::default(),
             custom_theme: None,
+            machines: Vec::new(),
         }
     }
 }
@@ -206,6 +212,15 @@ impl Config {
             .is_some_and(|id| !crate::ui::valid_theme_id(id))
         {
             return Err("custom_theme must be a lowercase theme id".into());
+        }
+        if self.machines.len() > MAX_MACHINES {
+            return Err(format!(
+                "machines may list at most {MAX_MACHINES} destinations"
+            ));
+        }
+        for destination in &self.machines {
+            spooky_core::client::check_destination(destination)
+                .map_err(|error| format!("machines: {destination}: {error}"))?;
         }
         Ok(())
     }

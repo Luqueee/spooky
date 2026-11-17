@@ -17,6 +17,16 @@ fn hotkey_events() -> impl iced::futures::Stream<Item = Message> {
         }
     })
 }
+fn machine_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(8, async |mut output| {
+        while let Some(event) = crate::probe::next_event().await {
+            if output.send(Message::Machine(event)).await.is_err() {
+                return;
+            }
+        }
+    })
+}
 fn web_events() -> impl iced::futures::Stream<Item = Message> {
     use iced::futures::StreamExt;
     crate::platform::webview::messages().map(Message::WebEvent)
@@ -50,6 +60,7 @@ pub(crate) fn subscription(app: &App) -> Subscription<Message> {
     Subscription::batch([
         Subscription::run(background_events),
         Subscription::run(hotkey_events),
+        Subscription::run(machine_events),
         Subscription::run(web_events),
         blink,
         if cfg!(target_os = "macos") {

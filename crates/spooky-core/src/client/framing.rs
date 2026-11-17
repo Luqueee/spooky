@@ -1,4 +1,4 @@
-use super::errors::Unrecoverable;
+use super::errors::{Problem, RemoteProblem};
 use crate::{MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, Response};
 use anyhow::{Context, Result, bail};
 use std::io::BufRead;
@@ -40,10 +40,16 @@ pub(super) fn decode_response(frame: &[u8]) -> Result<Response> {
 pub(super) fn check_pong(response: Response) -> Result<()> {
     match response {
         Response::Pong { version } if version == PROTOCOL_VERSION => Ok(()),
-        Response::Pong { version } => Err(Unrecoverable(format!(
-            "server protocol version {version} is incompatible with client version \
-             {PROTOCOL_VERSION}. Update both ends and restart the server, which ends its shells."
-        ))
+        Response::Pong { version } => Err(RemoteProblem {
+            problem: Problem::Incompatible {
+                server: version,
+                client: PROTOCOL_VERSION,
+            },
+            message: format!(
+                "server protocol version {version} is incompatible with client version \
+                 {PROTOCOL_VERSION}. Update both ends and restart the server, which ends its shells."
+            ),
+        }
         .into()),
         Response::Error(message) => bail!("server rejected protocol handshake: {message}"),
         _ => bail!("server returned an unexpected response to protocol handshake"),

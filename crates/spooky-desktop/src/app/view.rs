@@ -8,6 +8,7 @@ use crate::{
     features::{
         activity::Indicator,
         agent,
+        machines::{Machine, Stage, State},
         splits::{Divider, THICKNESS},
     },
     terminal,
@@ -16,11 +17,11 @@ use crate::{
 use iced::{
     Alignment, Border, Color, Element, Length, Padding, Point, Rectangle, Vector, mouse,
     widget::{
-        Space, button, canvas, column, container, float, image, mouse_area, opaque, row,
-        scrollable, stack, text, text_input, tooltip,
+        Space, button, canvas, column, container, float, image, mouse_area, opaque, progress_bar,
+        row, scrollable, stack, text, text_input, tooltip,
     },
 };
-use spooky_core::{Axis, Layout};
+use spooky_core::{Axis, Layout, client::Problem};
 use std::{sync::LazyLock, time::Duration};
 
 /// Padding around each terminal pane. The divider geometry accounts for it.
@@ -141,6 +142,11 @@ fn menu_item(
     .width(Length::Fill)
     .style(quiet)
     .on_press(message)
+}
+
+/// Megabytes, one decimal, for a progress line.
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1}", bytes as f64 / 1_048_576.0)
 }
 
 fn modal<'a>(
@@ -490,11 +496,20 @@ impl App {
                 );
             }
         }
+        let active = self.connection.connected_target();
+        let mut in_use = Some(column![machine, spaces].spacing(2));
+        let mut machines = column![].spacing(8);
+        for known in self.machines.list() {
+            machines = match in_use.take_if(|_| known.destination == active) {
+                Some(section) => machines.push(section),
+                None => machines.push(self.other_machine(known)),
+            };
+        }
         let mut connection = column![].spacing(7);
         if self.connection_open {
             connection = connection
                 .push(
-                    text("Connect via SSH")
+                    text("Add a machine via SSH")
                         .size(10)
                         .style(text_tone(TextTone::Text)),
                 )
@@ -511,18 +526,14 @@ impl App {
                         .size(11)
                         .padding(6)
                         .on_input(Message::TargetValue)
-                        .on_submit(Message::Connect),
+                        .on_submit(Message::AddMachine),
                 )
                 .push(
                     row![
-                        button(text("Connect").size(10))
+                        button(text("Add").size(10))
                             .padding([5, 8])
                             .style(primary)
-                            .on_press(Message::Connect),
-                        button(text("Local").size(10))
-                            .padding([5, 8])
-                            .style(quiet)
-                            .on_press(Message::Local),
+                            .on_press(Message::AddMachine),
                         Space::new().width(Length::Fill),
                         action(
                             Icon::Close,
@@ -536,7 +547,7 @@ impl App {
         } else {
             connection = connection.push(menu_item(
                 Icon::Plus,
-                "Connect machine",
+                "Add machine",
                 Message::ToggleConnection,
             ));
         }
@@ -549,8 +560,8 @@ impl App {
                     1.0
                 });
         container(column![
-            container(column![section, machine].spacing(2)).padding([4, 6]),
-            container(scrollable(spaces))
+            container(section).padding([4, 6]),
+            container(scrollable(machines))
                 .padding([0, 6])
                 .height(Length::Fill),
             separator(),
@@ -560,6 +571,265 @@ impl App {
         .height(Length::Fill)
         .style(move |_| surface(chrome))
         .into()
+    }
+
+    /// A machine that is not the one in use: its state, its workspaces as the probe last
+    /// saw them, and what can be done when it fails.
+    fn other_machine<'a>(&'a self, known: &'a Machine) -> Element<'a, Message> {
+        let palette = self.appearance_colors();
+        let id = known.id;
+        let color = match &known.state {
+            State::Ready(_) => palette.success,
+            State::Connecting => palette.warning,
+            State::Failed(_) => palette.danger,
+        };
+        let mut header = row![
+            button(
+                row![
+                    themed_icon(Icon::Server, TextTone::Muted),
+                    text(known.label()).size(10).width(Length::Fill),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([5, 6])
+            .style(quiet)
+            .on_press(Message::ActivateMachine(id)),
+        ]
+        .align_y(Alignment::Center);
+        if !known.is_local() {
+            header = header.push(action(
+                Icon::Close,
+                "Remove machine",
+                Message::RemoveMachine(id),
+            ));
+        }
+        header = header.push(
+            button(
+                row![
+                    dot(color),
+                    themed_icon(
+                        if known.open {
+                            Icon::Chevron
+                        } else {
+                            Icon::ChevronRight
+                        },
+                        TextTone::Muted,
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding([5, 6])
+            .style(quiet)
+            .on_press(Message::ToggleMachine(id)),
+        );
+        let mut body = column![header].spacing(2);
+        if !known.open {
+            return body.into();
+        }
+        match &known.state {
+            State::Connecting => {
+                body = body.push(
+                    container(
+                        text("Connecting…")
+                            .size(10)
+                            .style(text_tone(TextTone::Muted)),
+                    )
+                    .padding([2, 8]),
+                );
+            }
+            State::Ready(summary) => {
+                for workspace in &summary.workspaces {
+                    body = body.push(
+                        button(
+                            row![
+                                themed_icon(Icon::Folder, TextTone::Muted),
+                                text(&workspace.name)
+                                    .size(11)
+                                    .style(text_tone(TextTone::Muted)),
+                            ]
+                            .spacing(7)
+                            .align_y(Alignment::Center),
+                        )
+                        .width(Length::Fill)
+                        .padding([5, 6])
+                        .style(quiet)
+                        .on_press(Message::ActivateMachine(id)),
+                    );
+                }
+            }
+            State::Failed(failure) => {
+                let line = match failure.problem {
+                    Some(Problem::ServerMissing) => {
+                        "Spooky is not installed on this machine.".to_owned()
+                    }
+                    Some(Problem::Incompatible { server, client }) => format!(
+                        "Its Spooky server is out of date (protocol {server}; this app speaks {client})."
+                    ),
+                    None => failure.reason.clone(),
+                };
+                let mut actions = row![
+                    button(text("Retry").size(10))
+                        .padding([4, 8])
+                        .style(quiet)
+                        .on_press(Message::RetryMachine(id)),
+                ]
+                .spacing(4);
+                if failure.problem.is_some() {
+                    actions = actions.push(
+                        button(text("Install…").size(10))
+                            .padding([4, 8])
+                            .style(primary)
+                            .on_press(Message::InstallAsk(id)),
+                    );
+                }
+                body = body.push(
+                    container(
+                        column![
+                            text(line).size(10).style(text_tone(TextTone::Danger)),
+                            actions
+                        ]
+                        .spacing(6),
+                    )
+                    .padding([2, 8]),
+                );
+            }
+        }
+        body.into()
+    }
+
+    /// The dialog that offers to install the server on a machine and shows how it goes.
+    fn install_dialog(&self) -> Option<Element<'_, Message>> {
+        let dialog = self.machines.dialog()?;
+        let label = self.machines.get(dialog.machine)?.label().to_owned();
+        let muted = |line: String| text(line).size(11).style(text_tone(TextTone::Muted));
+        let title = |line: String| text(line).size(14).style(text_tone(TextTone::Text));
+        let buttons = |items: Vec<Element<'static, Message>>| {
+            let mut buttons = row![Space::new().width(Length::Fill)].spacing(6);
+            for item in items {
+                buttons = buttons.push(item);
+            }
+            buttons
+        };
+        let plain = |label: &'static str, message: Message| -> Element<'static, Message> {
+            button(text(label).size(11))
+                .padding([6, 10])
+                .style(quiet)
+                .on_press(message)
+                .into()
+        };
+        let main = |label: &'static str, message: Message| -> Element<'static, Message> {
+            button(text(label).size(11))
+                .padding([6, 10])
+                .style(primary)
+                .on_press(message)
+                .into()
+        };
+        let content: Element<'_, Message> = match &dialog.stage {
+            Stage::Ask(problem) => {
+                let why = match problem {
+                    Problem::ServerMissing => {
+                        format!("{label} has no Spooky server, so there is nothing to connect to.")
+                    }
+                    Problem::Incompatible { server, client } => format!(
+                        "The Spooky server on {label} is out of date (protocol {server}; this app speaks {client})."
+                    ),
+                };
+                column![
+                    title(format!("Install Spooky on {label}?")),
+                    muted(why),
+                    muted(format!(
+                        "Spooky downloads the server release on this computer, checks its checksum and copies it to ~/.local/bin on {label} over SSH. Nothing else is changed there."
+                    )),
+                    buttons(vec![
+                        plain("Cancel", Message::InstallClose),
+                        main("Install", Message::InstallGo),
+                    ]),
+                ]
+                .spacing(12)
+                .into()
+            }
+            Stage::Running(run) => {
+                let mut steps = column![].spacing(3);
+                let last = run.steps.len().saturating_sub(1);
+                for (index, step) in run.steps.iter().enumerate() {
+                    let done = index < last;
+                    steps = steps.push(
+                        text(format!("{} {step}", if done { "✓" } else { "…" }))
+                            .size(11)
+                            .style(text_tone(if done {
+                                TextTone::Muted
+                            } else {
+                                TextTone::Text
+                            })),
+                    );
+                }
+                let progress: Element<'_, Message> = match run.sent {
+                    Some((sent, total)) => column![
+                        progress_bar(0.0..=total.max(1) as f32, sent as f32).length(Length::Fill),
+                        muted(format!("{} of {} MB sent", megabytes(sent), megabytes(total))),
+                    ]
+                    .spacing(4)
+                    .into(),
+                    None if run.downloaded > 0 => {
+                        muted(format!("{} MB downloaded", megabytes(run.downloaded))).into()
+                    }
+                    None => Space::new().height(0).into(),
+                };
+                column![
+                    title(format!("Installing on {label}")),
+                    steps,
+                    progress,
+                    buttons(vec![plain("Cancel", Message::InstallCancel)]),
+                ]
+                .spacing(12)
+                .into()
+            }
+            Stage::Restart { running_protocol } => column![
+                title(format!("Restart the server on {label}?")),
+                muted(format!(
+                    "The new server is installed, but {label} is still running the old one (protocol {running_protocol}). Restarting it ends every shell and agent running there."
+                )),
+                buttons(vec![
+                    plain("Later", Message::InstallClose),
+                    button(text("Restart and end its shells").size(11))
+                        .padding([6, 10])
+                        .style(destructive)
+                        .on_press(Message::RestartGo)
+                        .into(),
+                ]),
+            ]
+            .spacing(12)
+            .into(),
+            Stage::Restarting => column![
+                title(format!("Restarting the server on {label}")),
+                muted("Stopping the old server…".into()),
+            ]
+            .spacing(12)
+            .into(),
+            Stage::Done => column![
+                title(format!("Spooky is ready on {label}")),
+                buttons(vec![
+                    plain("Close", Message::InstallClose),
+                    main("Open", Message::ActivateMachine(dialog.machine)),
+                ]),
+            ]
+            .spacing(12)
+            .into(),
+            Stage::Failed(message) => column![
+                title(format!("Could not install on {label}")),
+                text(message.clone()).size(11).style(text_tone(TextTone::Danger)),
+                buttons(vec![
+                    plain("Close", Message::InstallClose),
+                    main("Try again", Message::InstallGo),
+                ]),
+            ]
+            .spacing(12)
+            .into(),
+        };
+        Some(content)
     }
 
     fn pane_locked(&self, pane: u64) -> bool {
@@ -1290,6 +1560,9 @@ impl App {
                 .into(),
                 None,
             );
+        }
+        if let Some(content) = self.install_dialog() {
+            body = modal(body, content, None);
         }
         // The bottom edge drags the window's height, which a window without a title bar
         // has no other way to change.

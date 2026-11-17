@@ -10,6 +10,7 @@ mod dropdown;
 mod features;
 mod grid;
 mod input;
+mod machines;
 mod subscription;
 mod view;
 mod web;
@@ -27,6 +28,7 @@ use crate::{
         attachments::{self, Attachments},
         connection::Connection,
         hyperlinks::Hyperlinks,
+        machines::Machines,
         palette::{self, Palette},
         search::{self, Search},
         settings::{self, Settings},
@@ -131,6 +133,21 @@ pub(crate) enum Message {
     Connect,
     Local,
     Retry,
+    /// Something a machine's background probe or an installation reported.
+    Machine(crate::features::machines::Event),
+    /// Adds the machine typed in the connection editor, without leaving the one in use.
+    AddMachine,
+    /// A machine's row was chosen: use it, or ask about installing the server there.
+    ActivateMachine(u64),
+    ToggleMachine(u64),
+    RemoveMachine(u64),
+    RetryMachine(u64),
+    /// Offers to install or update the server on a machine that lacks it.
+    InstallAsk(u64),
+    InstallGo,
+    InstallCancel,
+    RestartGo,
+    InstallClose,
     Tailscale(tailscale::Message),
     Attachments(attachments::Message),
     Bounds(u64, Rectangle),
@@ -283,6 +300,12 @@ pub(crate) struct App {
     web: web::WebHost,
     /// The local file each pane is uploading, so its preview comes from this machine.
     attaching: HashMap<u64, std::path::PathBuf>,
+    /// The machines known: this one and the SSH destinations added.
+    machines: Machines,
+    /// Background connections to the machines that are not in use.
+    probes: crate::probe::Probes,
+    /// The installation of the server on a machine, while one runs.
+    installation: Option<crate::probe::Installation>,
 }
 
 /// A missing material or the system accessibility choice requires a solid surface.
@@ -303,77 +326,83 @@ impl App {
     ) -> (Self, Task<Message>) {
         let size_pending = config.size_mode() == SizeMode::Percent;
         let font = terminal::TerminalFont::resolve(config.font_family.as_deref());
+        let machines = Machines::new(&config.machines);
+        let mut app = Self {
+            config,
+            themes,
+            link: Link::start(),
+            snapshot: None,
+            activity: Activity::default(),
+            workspace: None,
+            tab: None,
+            pane: None,
+            zoomed: None,
+            terminal_focused: true,
+            selection: None,
+            copy_epoch: 0,
+            copy_pending: None,
+            bounds: HashMap::new(),
+            grids: HashMap::new(),
+            sidebar_open: true,
+            workspaces_open: true,
+            connection_open: false,
+            menu_open: false,
+            context_menu: None,
+            rename_workspace: None,
+            rename_tab: None,
+            tailscale: tailscale::Picker::default(),
+            rename: String::new(),
+            renaming: false,
+            status,
+            confirm: None,
+            pending: None,
+            directory_fallback: None,
+            window: None,
+            // Linux windows are created transparent, so the desktop can show through;
+            // macOS finds out once its blur view is installed.
+            glass_available: cfg!(target_os = "linux"),
+            reduce_transparency: false,
+            hidden: false,
+            focused: false,
+            connection: Connection::default(),
+            directory: directory::Directory::default(),
+            directory_menu: None,
+            directory_opening: false,
+            blink_on: true,
+            hyperlinks: Hyperlinks::default(),
+            splits: Splits::default(),
+            search: Search::default(),
+            clipboard_seen: HashMap::new(),
+            focus_reported: None,
+            modifiers: keyboard::Modifiers::default(),
+            hotkeys,
+            hotkey_pending: None,
+            hotkey_generation: 0,
+            font,
+            window_size: None,
+            dropdown_display: None,
+            reveal_generation: 0,
+            resizing: false,
+            resize_from: 0.0,
+            resize_gen: 0,
+            slide: None,
+            presented: false,
+            settings: Settings::default(),
+            size_pending,
+            attachments: Attachments::default(),
+            palette: Palette::default(),
+            web: web::WebHost::default(),
+            attaching: HashMap::new(),
+            machines,
+            probes: crate::probe::Probes::default(),
+            installation: None,
+            agents: Agents::default(),
+            agent_focus: None,
+            agents_seen: None,
+        };
+        app.sync_probes();
         (
-            Self {
-                config,
-                themes,
-                link: Link::start(),
-                snapshot: None,
-                activity: Activity::default(),
-                workspace: None,
-                tab: None,
-                pane: None,
-                zoomed: None,
-                terminal_focused: true,
-                selection: None,
-                copy_epoch: 0,
-                copy_pending: None,
-                bounds: HashMap::new(),
-                grids: HashMap::new(),
-                sidebar_open: true,
-                workspaces_open: true,
-                connection_open: false,
-                menu_open: false,
-                context_menu: None,
-                rename_workspace: None,
-                rename_tab: None,
-                tailscale: tailscale::Picker::default(),
-                rename: String::new(),
-                renaming: false,
-                status,
-                confirm: None,
-                pending: None,
-                directory_fallback: None,
-                window: None,
-                // Linux windows are created transparent, so the desktop can show through;
-                // macOS finds out once its blur view is installed.
-                glass_available: cfg!(target_os = "linux"),
-                reduce_transparency: false,
-                hidden: false,
-                focused: false,
-                connection: Connection::default(),
-                directory: directory::Directory::default(),
-                directory_menu: None,
-                directory_opening: false,
-                blink_on: true,
-                hyperlinks: Hyperlinks::default(),
-                splits: Splits::default(),
-                search: Search::default(),
-                clipboard_seen: HashMap::new(),
-                focus_reported: None,
-                modifiers: keyboard::Modifiers::default(),
-                hotkeys,
-                hotkey_pending: None,
-                hotkey_generation: 0,
-                font,
-                window_size: None,
-                dropdown_display: None,
-                reveal_generation: 0,
-                resizing: false,
-                resize_from: 0.0,
-                resize_gen: 0,
-                slide: None,
-                presented: false,
-                settings: Settings::default(),
-                size_pending,
-                attachments: Attachments::default(),
-                palette: Palette::default(),
-                web: web::WebHost::default(),
-                attaching: HashMap::new(),
-                agents: Agents::default(),
-                agent_focus: None,
-                agents_seen: None,
-            },
+            app,
             window::latest().map(|id| id.map(Message::Opened).unwrap_or(Message::Tick)),
         )
     }
@@ -614,6 +643,17 @@ impl App {
             | Message::Opened(..)
             | Message::Close(..)
             | Message::DragWindow => return self.window_message(message),
+            Message::Machine(..)
+            | Message::AddMachine
+            | Message::ActivateMachine(..)
+            | Message::ToggleMachine(..)
+            | Message::RemoveMachine(..)
+            | Message::RetryMachine(..)
+            | Message::InstallAsk(..)
+            | Message::InstallGo
+            | Message::InstallCancel
+            | Message::RestartGo
+            | Message::InstallClose => return self.machines_message(message),
             Message::Link(..)
             | Message::TargetValue(..)
             | Message::Local

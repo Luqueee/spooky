@@ -167,6 +167,9 @@ impl App {
                 } else {
                     self.status = "Connection queue full".into();
                 }
+                // The machine now in use has the real connection; the one that was in use
+                // is watched from here on.
+                self.sync_probes();
             }
             _ => {}
         }

@@ -17,15 +17,29 @@ use std::time::{Duration, Instant};
 
 mod errors;
 mod framing;
+mod install;
 mod local;
 mod ssh;
 #[cfg(test)]
 mod tests;
 mod upload;
 
-pub use errors::{Cancelled, Unrecoverable, is_unrecoverable, was_cancelled};
+pub use errors::{
+    Cancelled, Problem, RemoteProblem, Unrecoverable, is_unrecoverable, remote_problem,
+    was_cancelled,
+};
+pub use install::{Outcome, Progress, Release, install, restart_server};
 pub use upload::upload;
 
+/// Whether `destination` is acceptable as an SSH destination (`host` or `user@host`).
+pub fn check_destination(destination: &str) -> Result<()> {
+    validate_destination(destination)
+}
+
+/// What runs on the remote end: the bridge to its session server. `~/.local/bin`, where
+/// the installer puts the server, is on the path even when the account's non-interactive
+/// shell does not add it.
+const BRIDGE_COMMAND: &str = "PATH=\"$HOME/.local/bin:$PATH\" exec spooky-server bridge";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
@@ -211,7 +225,7 @@ impl Client {
         validate_destination(destination)?;
         let mut command = ssh_command_with(program, destination);
         command
-            .arg("spooky-server bridge")
+            .arg(BRIDGE_COMMAND)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
