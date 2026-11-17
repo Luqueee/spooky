@@ -14,8 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Scripts that stand in for `ssh` are written and run one test at a time, so
-/// no other test's `fork` can hold a script's file open while it executes.
-static FAKE_SSH: Mutex<()> = Mutex::new(());
+/// no other test's `fork` can hold a script's file open while it executes. Every
+/// test in this module tree that writes and then runs a script takes this turn.
+pub(super) static FAKE_SSH: Mutex<()> = Mutex::new(());
 
 /// Writes an executable `ssh` replacement running `body`; returns its directory and path.
 fn fake_ssh(body: &str) -> (PathBuf, PathBuf) {

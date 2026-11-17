@@ -540,8 +540,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Executing a script while another test's fork still holds its write handle fails
-    /// with "Text file busy", so the tests that write and run scripts take turns.
-    static SCRIPTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// with "Text file busy", so the tests that write and run scripts take turns, with
+    /// the other client tests that do so.
+    use crate::client::tests::FAKE_SSH as SCRIPTS;
 
     struct Fixture {
         _turn: std::sync::MutexGuard<'static, ()>,
