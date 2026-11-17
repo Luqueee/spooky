@@ -3,7 +3,7 @@ members = ["crates/spooky-core", "crates/spooky-server", "crates/spooky-desktop"
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-dev.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
