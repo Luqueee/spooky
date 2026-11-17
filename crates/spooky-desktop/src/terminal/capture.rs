@@ -3,6 +3,7 @@
 //! cursor or a selection.
 
 use super::{TerminalFont, font::face_data, metrics};
+use crate::ui::TerminalColors;
 use spooky_core::{DEFAULT_BACKGROUND, Pane};
 use std::collections::HashMap;
 
@@ -105,7 +106,13 @@ impl Faces<'_> {
 }
 
 /// The pane as a picture, or `None` when the font cannot be read or the grid is too large.
-pub(crate) fn render(pane: &Pane, font: &TerminalFont, size: f32) -> Option<Picture> {
+/// Its colours are drawn with `colors`, as the window draws them.
+pub(crate) fn render(
+    pane: &Pane,
+    font: &TerminalFont,
+    size: f32,
+    colors: &TerminalColors,
+) -> Option<Picture> {
     let scaled = size * SCALE;
     let (cell_width, cell_height) = metrics(scaled, font.advance);
     let (width, height) = picture_size(pane.cols, pane.rows, (cell_width, cell_height))?;
@@ -135,6 +142,7 @@ pub(crate) fn render(pane: &Pane, font: &TerminalFont, size: f32) -> Option<Pict
         let top = f32::from(line.row) * cell_height;
         for run in &line.runs {
             let left = f32::from(run.col) * cell_width;
+            let (fg, bg) = (colors.resolve(run.fg), colors.resolve(run.bg));
             if run.explicit_bg || run.bg != DEFAULT_BACKGROUND {
                 fill(
                     &mut rgba,
@@ -142,7 +150,7 @@ pub(crate) fn render(pane: &Pane, font: &TerminalFont, size: f32) -> Option<Pict
                     height,
                     (left, top),
                     (f32::from(run.columns()) * cell_width, cell_height),
-                    run.bg,
+                    bg,
                 );
             }
             for (column, text, _) in run.cells() {
@@ -154,7 +162,7 @@ pub(crate) fn render(pane: &Pane, font: &TerminalFont, size: f32) -> Option<Pict
                 };
                 let x = f32::from(column) * cell_width + glyph.xmin as f32;
                 let y = top + baseline - glyph.height as f32 - glyph.ymin as f32;
-                draw(&mut rgba, width, height, (x, y), glyph, coverage, run.fg);
+                draw(&mut rgba, width, height, (x, y), glyph, coverage, fg);
             }
             let (x, run_width) = (left, f32::from(run.columns()) * cell_width);
             if run.underline {
@@ -164,7 +172,7 @@ pub(crate) fn render(pane: &Pane, font: &TerminalFont, size: f32) -> Option<Pict
                     height,
                     (x, top + cell_height - SCALE * 2.0),
                     (run_width, SCALE),
-                    run.fg,
+                    fg,
                 );
             }
             if run.strikethrough {
@@ -174,7 +182,7 @@ pub(crate) fn render(pane: &Pane, font: &TerminalFont, size: f32) -> Option<Pict
                     height,
                     (x, top + cell_height * 0.5),
                     (run_width, SCALE),
-                    run.fg,
+                    fg,
                 );
             }
         }

@@ -59,7 +59,7 @@ impl ColorPalette {
     }
 }
 
-fn blend(from: Color, to: Color, amount: f32) -> Color {
+pub(super) fn blend(from: Color, to: Color, amount: f32) -> Color {
     let inverse = 1.0 - amount;
     Color {
         r: from.r * inverse + to.r * amount,

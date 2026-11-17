@@ -115,24 +115,7 @@ pub(crate) fn push_cell(
 }
 
 pub(crate) fn palette(index: usize) -> [u8; 3] {
-    const BASE: [[u8; 3]; 16] = [
-        [0, 0, 0],
-        [205, 49, 49],
-        [13, 188, 121],
-        [229, 229, 16],
-        [36, 114, 200],
-        [188, 63, 188],
-        [17, 168, 205],
-        [229, 229, 229],
-        [102, 102, 102],
-        [241, 76, 76],
-        [35, 209, 139],
-        [245, 245, 67],
-        [59, 142, 234],
-        [214, 112, 214],
-        [41, 184, 219],
-        [255, 255, 255],
-    ];
+    use spooky_core::ANSI_PALETTE as BASE;
     match index {
         0..=15 => BASE[index],
         16..=231 => {
@@ -145,7 +128,7 @@ pub(crate) fn palette(index: usize) -> [u8; 3] {
             [c, c, c]
         }
         257 => spooky_core::DEFAULT_BACKGROUND,
-        _ => [220, 220, 220],
+        _ => spooky_core::DEFAULT_FOREGROUND,
     }
 }
 pub(crate) fn color(value: Color, colors: &alacritty_terminal::term::color::Colors) -> [u8; 3] {

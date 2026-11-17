@@ -202,8 +202,20 @@ danger = "#F06C75"
 All colors are required `#RRGGBB` strings. Surface and muted colors are derived
 from them. IDs must be unique lowercase letters, digits or hyphens, starting
 with a letter; built-in IDs are reserved. Invalid files are skipped and reported
-in Settings. The selected theme is local to this desktop; explicit ANSI colors
-from terminal programs are unchanged.
+in Settings. The selected theme is local to this desktop.
+
+A theme also colors what programs print with the 16 ANSI colors (your shell prompt,
+`ls`, `git`) and their default text. Nord and Dracula use their schemes' own colors;
+Midnight and Spooky keep the terminal's standard ones; any other theme derives
+them from its palette (red, green and yellow from `danger`, `success` and `warning`,
+blue from `accent`, the rest mixed). To choose them yourself add a `[terminal]`
+table to the file with any of `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
+`white`, `bright_black`, `bright_red`, `bright_green`, `bright_yellow`, `bright_blue`,
+`bright_magenta`, `bright_cyan` and `foreground` (the default text), each a `#RRGGBB`
+string. Black and bright white are never replaced, because programs also use them as
+24-bit `#000000` and `#ffffff`, which the server sends identically. Colors given
+as 24-bit values or from the 256-color cube are unchanged, except a 24-bit value
+identical to one of the replaced ANSI colors.
 
 The server reads its own file, `spooky/server.toml` in the same directory, on each machine it runs on (including a remote one):
 

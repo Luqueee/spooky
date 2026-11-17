@@ -1020,6 +1020,7 @@ impl App {
                     selection,
                     cursor_on: !(selected && self.blink_wanted()) || self.blink_on,
                     colors: v.p,
+                    ansi: self.terminal_colors(),
                     pointer: v.ui.pointer(*id),
                     send: v.ui.sender(),
                     composing: if typing.is_some() {

@@ -7,7 +7,7 @@ use crate::{
     geometry::{Point as AppPoint, Rectangle as AppRectangle, Size as AppSize},
     keys::Modifiers,
     terminal::{Action, Button, Link, TerminalFont, link_at, metrics, report, wheel_arrows},
-    ui::{Color, ColorPalette},
+    ui::{Color, ColorPalette, TerminalColors},
 };
 use gpui::{
     App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
@@ -61,6 +61,8 @@ pub(crate) struct TerminalView {
     /// Whether a blinking cursor is in its visible phase.
     pub cursor_on: bool,
     pub colors: ColorPalette,
+    /// How the theme draws the colours programs ask for.
+    pub ansi: TerminalColors,
     pub pointer: SharedPointer,
     pub send: Sender,
     /// Text the input method is composing, shown at the cursor.
@@ -167,7 +169,7 @@ impl TerminalView {
                         y,
                         f32::from(run.columns()) * cw,
                         ch,
-                        paint_color(run.bg),
+                        paint_color(self.ansi.resolve(run.bg)),
                     );
                 }
             }
@@ -200,7 +202,7 @@ impl TerminalView {
                 );
             }
             for run in &line.runs {
-                let fg = paint_color(run.fg);
+                let fg = paint_color(self.ansi.resolve(run.fg));
                 if !run.text.chars().all(|character| character == ' ') {
                     let text_run = TextRun {
                         len: run.text.len(),

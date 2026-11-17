@@ -43,6 +43,12 @@ impl Color {
             byte(self.b)
         )
     }
+
+    /// The colour as bytes, ignoring alpha.
+    pub(crate) fn rgb8(self) -> [u8; 3] {
+        let byte = |value: f32| (value * 255.0).round().clamp(0.0, 255.0) as u8;
+        [byte(self.r), byte(self.g), byte(self.b)]
+    }
 }
 
 #[cfg(test)]

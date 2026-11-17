@@ -34,7 +34,12 @@ impl App {
     /// The selected terminal pane as a picture, for the capture control.
     fn pane_image(&self) -> Option<attachments::Image> {
         let pane = self.current_pane().filter(|pane| pane.agent.is_none())?;
-        let picture = terminal::capture(pane, &self.font, self.config.font_size)?;
+        let picture = terminal::capture(
+            pane,
+            &self.font,
+            self.config.font_size,
+            &self.terminal_colors(),
+        )?;
         Some(attachments::Image {
             width: picture.width,
             height: picture.height,

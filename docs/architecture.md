@@ -173,8 +173,9 @@ preserves the original built-in choice, while `custom_theme` stores the selected
 additional theme's ID. If its file disappears, the built-in choice is used until
 the file returns. The `ColorPalette` drives native surfaces and is forwarded to the
 bundled agent page; terminal cells inherit its background only when the server
-reports the default background. Explicit terminal colors remain server-owned,
-with no protocol or CLI change.
+reports the default background.
+
+Terminal text colours follow the theme on the client. The server resolves every colour a program asks for to RGB from a fixed palette (`spooky_core::ANSI_PALETTE`, `DEFAULT_FOREGROUND`) and the wire carries only those values, so `ui::TerminalColors` recognises the exact values at paint time and substitutes the theme's (`gui::terminal` and `terminal::capture` both call `resolve`). A theme file may set them in a `[terminal]` table; otherwise they are derived from its palette, Nord and Dracula carry their schemes' own, and Midnight and Spooky keep the server's. No protocol change was needed, at the cost of a stated limit: black and bright white are never substituted, since 24-bit `#000000`/`#ffffff` arrive as the same bytes, and dimmed text keeps the server's hue because the server scales it first. The other fourteen collide only if a program sends the very same 24-bit RGB. The exact fix, carrying the palette index in each run, needs a protocol version bump.
 
 Terminal panes and the draggable divider (`features/splits/divider.rs`) share the window's background. The divider leaves its six-pixel hit area transparent and paints a single line, highlighted while hovered or dragged. A passive scrollback indicator occupies the outer edge of a scrolled pane, outside the terminal's text padding; its tooltip reports the scroll position.
 

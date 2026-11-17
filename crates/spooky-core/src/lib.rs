@@ -15,6 +15,29 @@ pub const PROTOCOL_VERSION: u32 = 18;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Default terminal background, shared with the native window chrome.
 pub const DEFAULT_BACKGROUND: [u8; 3] = [34, 37, 46];
+/// Default terminal text colour, used by the server for text with no colour of its own.
+pub const DEFAULT_FOREGROUND: [u8; 3] = [220, 220, 220];
+/// The sixteen ANSI colours (normal then bright) as the server resolves them. A pane's
+/// runs carry resolved RGB values, so a client that draws with its own palette
+/// recognises these exact values; see `spooky-desktop`'s terminal colours.
+pub const ANSI_PALETTE: [[u8; 3]; 16] = [
+    [0, 0, 0],
+    [205, 49, 49],
+    [13, 188, 121],
+    [229, 229, 16],
+    [36, 114, 200],
+    [188, 63, 188],
+    [17, 168, 205],
+    [229, 229, 229],
+    [102, 102, 102],
+    [241, 76, 76],
+    [35, 209, 139],
+    [245, 245, 67],
+    [59, 142, 234],
+    [214, 112, 214],
+    [41, 184, 219],
+    [255, 255, 255],
+];
 /// Share of a split given to its first side when the split is created, in thousandths.
 pub const EVEN_SPLIT: u16 = 500;
 /// Smallest share either side of a split may keep, in thousandths.

@@ -594,6 +594,13 @@ impl App {
             )
     }
 
+    /// The colours the selected theme draws terminal text with.
+    pub(crate) fn terminal_colors(&self) -> crate::ui::TerminalColors {
+        self.themes
+            .get(self.theme_id())
+            .map_or_else(Default::default, |definition| definition.terminal)
+    }
+
     pub(crate) fn theme_id(&self) -> &str {
         self.config
             .custom_theme

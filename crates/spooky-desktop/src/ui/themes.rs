@@ -1,9 +1,10 @@
 //! User-authored, data-only color themes discovered beside `config.toml`.
 
-use super::{Color, ColorPalette, color_palette};
+use super::{Color, ColorPalette, TerminalColors, color_palette};
 use crate::config::Appearance;
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     fmt, fs,
     path::{Path, PathBuf},
 };
@@ -18,6 +19,7 @@ pub(crate) struct ThemeDefinition {
     pub id: String,
     pub name: String,
     pub colors: ColorPalette,
+    pub terminal: TerminalColors,
 }
 
 impl fmt::Display for ThemeDefinition {
@@ -38,6 +40,9 @@ struct ThemeFile {
     id: String,
     name: String,
     colors: ThemeFileColors,
+    /// Optional overrides of the terminal's colours, by name; the rest are derived from
+    /// `colors`.
+    terminal: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +119,11 @@ impl ThemeCatalog {
             id: id.to_owned(),
             name: name.to_owned(),
             colors: color_palette(appearance),
+            terminal: match appearance {
+                Appearance::Nord => TerminalColors::nord(),
+                Appearance::Dracula => TerminalColors::dracula(),
+                Appearance::Midnight | Appearance::Spooky => TerminalColors::default(),
+            },
         })
         .collect();
         for (id, name, colors) in [
@@ -144,10 +154,13 @@ impl ThemeCatalog {
         ] {
             let [background, text, accent, success, warning, danger] =
                 colors.map(|(r, g, b)| Color::from_rgb8(r, g, b));
+            let colors =
+                ColorPalette::from_base(background, text, accent, success, warning, danger);
             themes.push(ThemeDefinition {
                 id: id.to_owned(),
                 name: name.to_owned(),
-                colors: ColorPalette::from_base(background, text, accent, success, warning, danger),
+                terminal: TerminalColors::derive(&colors),
+                colors,
             });
         }
         Self {
@@ -217,10 +230,18 @@ impl ThemeCatalog {
                 return;
             }
         };
+        let terminal = match terminal_colors(&colors, parsed.terminal.as_ref()) {
+            Ok(terminal) => terminal,
+            Err(problem) => {
+                self.issue(format!("{}: {problem}", path.display()));
+                return;
+            }
+        };
         self.themes.push(ThemeDefinition {
             id: parsed.id,
             name: parsed.name,
             colors,
+            terminal,
         });
     }
 
@@ -245,6 +266,24 @@ impl ThemeFileColors {
             parse("danger", &self.danger)?,
         ))
     }
+}
+
+/// The terminal colours of a theme file: derived from its palette, with the file's own
+/// choices on top.
+fn terminal_colors(
+    palette: &ColorPalette,
+    overrides: Option<&BTreeMap<String, String>>,
+) -> Result<TerminalColors, String> {
+    let mut colors = TerminalColors::derive(palette);
+    for (name, value) in overrides.into_iter().flatten() {
+        let rgb = parse_hex(value)
+            .ok_or_else(|| format!("terminal.{name:?} must be a #RRGGBB color"))?
+            .rgb8();
+        if !colors.set(name, rgb) {
+            return Err(format!("terminal.{name:?} is not a colour a theme may set"));
+        }
+    }
+    Ok(colors)
 }
 
 fn parse_hex(value: &str) -> Option<Color> {
@@ -345,5 +384,90 @@ danger = "#FF0000"
         assert!(catalog.get("not valid").is_none());
         assert_eq!(catalog.issues().len(), 2);
         fs::remove_dir_all(dir).expect("remove scratch directory");
+    }
+    #[test]
+    fn a_theme_file_may_choose_terminal_colours_and_the_rest_follow_its_palette() {
+        let dir = scratch();
+        fs::write(
+            dir.join("mine.toml"),
+            r##"id = "mine"
+name = "Mine"
+[colors]
+background = "#19121A"
+text = "#F3E8F5"
+accent = "#F08755"
+success = "#70C89A"
+warning = "#F0C674"
+danger = "#F06C75"
+[terminal]
+red = "#112233"
+foreground = "#445566"
+"##,
+        )
+        .expect("theme file");
+        let catalog = ThemeCatalog::load(&dir);
+        assert!(catalog.issues().is_empty(), "{:?}", catalog.issues());
+        let terminal = catalog.get("mine").expect("theme").terminal;
+        assert_eq!(
+            terminal.resolve(spooky_core::ANSI_PALETTE[1]),
+            [0x11, 0x22, 0x33]
+        );
+        assert_eq!(
+            terminal.resolve(spooky_core::DEFAULT_FOREGROUND),
+            [0x44, 0x55, 0x66]
+        );
+        // Not chosen: derived from the palette's success colour.
+        assert_eq!(
+            terminal.resolve(spooky_core::ANSI_PALETTE[2]),
+            [0x70, 0xc8, 0x9a]
+        );
+        fs::remove_dir_all(dir).expect("remove scratch directory");
+    }
+
+    #[test]
+    fn a_bad_terminal_colour_rejects_the_whole_theme() {
+        let dir = scratch();
+        let theme = |id: &str, line: &str| {
+            format!(
+                "id = \"{id}\"\nname = \"X\"\n[colors]\nbackground = \"#000001\"\ntext = \"#FFFFFE\"\n\
+                 accent = \"#FFFFFE\"\nsuccess = \"#00FF00\"\nwarning = \"#FFFF00\"\ndanger = \"#FF0000\"\n\
+                 [terminal]\n{line}\n"
+            )
+        };
+        fs::write(dir.join("a.toml"), theme("a", "red = \"red\"")).expect("theme");
+        fs::write(dir.join("b.toml"), theme("b", "black = \"#000000\"")).expect("theme");
+        fs::write(dir.join("c.toml"), theme("c", "purple = \"#000000\"")).expect("theme");
+        let catalog = ThemeCatalog::load(&dir);
+        for id in ["a", "b", "c"] {
+            assert!(catalog.get(id).is_none(), "{id}");
+        }
+        assert_eq!(catalog.issues().len(), 3, "{:?}", catalog.issues());
+        fs::remove_dir_all(dir).expect("remove scratch directory");
+    }
+
+    #[test]
+    fn the_nord_and_dracula_themes_carry_their_own_schemes_and_midnight_none() {
+        let catalog = ThemeCatalog::load(&scratch());
+        let red = spooky_core::ANSI_PALETTE[1];
+        assert_eq!(
+            catalog.get("nord").expect("nord").terminal.resolve(red),
+            [0xbf, 0x61, 0x6a]
+        );
+        assert_eq!(
+            catalog
+                .get("dracula")
+                .expect("dracula")
+                .terminal
+                .resolve(red),
+            [0xff, 0x55, 0x55]
+        );
+        assert_eq!(
+            catalog
+                .get("midnight")
+                .expect("midnight")
+                .terminal
+                .resolve(red),
+            red
+        );
     }
 }
