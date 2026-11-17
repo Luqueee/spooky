@@ -193,27 +193,18 @@ impl App {
                 } else {
                     size
                 };
-                #[cfg(target_os = "macos")]
-                if pointer_display.is_some()
-                    && let Some(at) = dropdown_origin(bounds, target)
-                {
-                    if crate::platform::macos::app::place_dropdown(at, target) {
-                        return Task::window(WindowOp::Show)
-                            .chain(Task::window(WindowOp::Minimize(false)))
-                            .chain(Task::window(WindowOp::Raise));
-                    }
-                    self.status = "Could not position the window on the selected display".into();
-                }
+                // The toolkit is told the size first, so it draws to it; the move then
+                // keeps the window's top edge where the display's usable area starts.
                 let mut tasks = vec![
                     Task::window(WindowOp::Show),
                     Task::window(WindowOp::Minimize(false)),
                     Task::window(WindowOp::Raise),
                 ];
-                if target != size {
-                    tasks.insert(0, Task::window(WindowOp::Resize(target)));
-                }
                 if let Some(at) = dropdown_origin(bounds, target) {
                     tasks.insert(0, Task::window(WindowOp::MoveTo(at)));
+                }
+                if target != size {
+                    tasks.insert(0, Task::window(WindowOp::Resize(target)));
                 }
                 // Wayland ignores the placement above; KWin does it there.
                 #[cfg(target_os = "linux")]

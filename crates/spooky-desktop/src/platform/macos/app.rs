@@ -8,7 +8,7 @@ use objc2_app_kit::{
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindow, NSWindowAnimationBehavior, NSWindowButton, NSWindowOrderingMode, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSString};
 use std::cell::RefCell;
 
 /// Sets the running application's Dock artwork independently of the bundle icon cache.
@@ -126,40 +126,6 @@ pub(crate) fn dropdown_visible() -> Option<bool> {
         return None;
     }
     Some(!app.isHidden() && window.isVisible() && window.isOnActiveSpace())
-}
-
-/// Places the one Spooky window in AppKit points, in one step, so the frame is never
-/// converted with the scale of the display the window is leaving.
-/// Returns false rather than moving another window if the target is ambiguous.
-pub(crate) fn place_dropdown(origin: Point, size: Size) -> bool {
-    let Some(main_thread) = MainThreadMarker::new() else {
-        return false;
-    };
-    let screens = NSScreen::screens(main_thread);
-    let Some(primary) = screens.firstObject() else {
-        return false;
-    };
-    let primary = primary.frame();
-    let primary_top = primary.origin.y + primary.size.height;
-    let windows = NSApplication::sharedApplication(main_thread).windows();
-    let mut matches = windows
-        .into_iter()
-        .filter(|window| window.title().to_string() == "Spooky");
-    let Some(window) = matches.next() else {
-        return false;
-    };
-    if matches.next().is_some() {
-        return false;
-    }
-    let frame = NSRect::new(
-        NSPoint::new(
-            f64::from(origin.x),
-            primary_top - f64::from(origin.y) - f64::from(size.height),
-        ),
-        NSSize::new(f64::from(size.width), f64::from(size.height)),
-    );
-    window.setFrame_display(frame, true);
-    true
 }
 
 /// The width and height of the part of the window's display that windows may use:
