@@ -3,13 +3,15 @@
 //! the user is typing for each agent pane, which entries are unfolded, and the parsed
 //! Markdown of the answers.
 
+mod document;
+pub(crate) mod markdown;
 mod view;
 pub(crate) mod web;
 
 pub(crate) mod commands;
 
 use crate::features::attachments::preview::Preview;
-use iced::widget::{markdown, text_editor};
+use markdown::Document;
 use spooky_core::{Agent, AgentRole, DialogAnswer, Request};
 use std::collections::{HashMap, HashSet};
 pub(crate) use view::{FIELD, SEARCH, view};
@@ -54,8 +56,8 @@ pub(crate) struct Attachment {
 /// What the composer and its buttons tell the application.
 #[derive(Clone, Debug)]
 pub(crate) enum Message {
-    /// The user edited, or moved in, a pane's composer.
-    Edit(u64, text_editor::Action),
+    /// The text of a pane's composer changed.
+    Draft(u64, String),
     /// Send a pane's draft.
     Send(u64),
     /// Send text to a pane's agent as a message (from the web view, which keeps its own
@@ -120,13 +122,13 @@ pub(crate) struct Outcome {
 /// An entry's text and its parsed Markdown.
 struct Rendered {
     text: String,
-    content: markdown::Content,
+    content: Document,
 }
 
 /// The composers, folds and rendered answers of the agent panes.
 #[derive(Default)]
 pub(crate) struct Agents {
-    composers: HashMap<u64, text_editor::Content>,
+    composers: HashMap<u64, String>,
     rendered: HashMap<(u64, u64), Rendered>,
     /// Entries the user unfolded, by (pane, entry).
     unfolded: HashSet<(u64, u64)>,
@@ -200,12 +202,8 @@ impl Agents {
                     ..Outcome::default()
                 }
             }
-            Message::Edit(pane, action) => {
-                // Clicking in the composer is clicking outside an open list.
-                if matches!(action, text_editor::Action::Click(_)) {
-                    self.close_menu();
-                }
-                self.composers.entry(pane).or_default().perform(action);
+            Message::Draft(pane, text) => {
+                self.composers.insert(pane, text);
                 // Typing changes what the command list offers, so the choice starts over
                 // and a list put away comes back.
                 self.command_at = 0;
@@ -215,7 +213,7 @@ impl Agents {
             Message::Send(pane) => {
                 // A pane with only a file attached has no composer yet.
                 let composer = self.composers.entry(pane).or_default();
-                let draft = composer.text();
+                let draft = composer.clone();
                 let text = draft.trim();
                 let files = self.attachments.remove(&pane).unwrap_or_default();
                 // A draft of only blanks, with nothing attached, stays as it is.
@@ -227,7 +225,7 @@ impl Agents {
                     pane,
                     text: with_files(text, &files),
                 };
-                *composer = text_editor::Content::new();
+                composer.clear();
                 Outcome {
                     requests: vec![request],
                     focus_field: true,
@@ -338,9 +336,8 @@ impl Agents {
             }
             Message::WriteCommand(pane, name) => {
                 let composer = self.composers.entry(pane).or_default();
-                *composer = text_editor::Content::with_text(&format!("/{name} "));
+                *composer = format!("/{name} ");
                 self.commands_hidden = false;
-                composer.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                 self.command_at = 0;
                 Outcome {
                     focus_field: true,
@@ -382,25 +379,22 @@ impl Agents {
         self.answers.retain(|key, _| dialogs.contains(key));
     }
 
-    /// Brings the parsed Markdown of one answer up to date. A streaming answer only grows,
-    /// so the new tail is appended; anything else is parsed again.
+    /// Brings the parsed Markdown of one answer up to date when its text changed.
     fn parse(&mut self, pane: u64, entry: u64, text: &str) {
-        match self.rendered.get_mut(&(pane, entry)) {
-            Some(rendered) if rendered.text == text => {}
-            Some(rendered) if text.starts_with(&rendered.text) => {
-                rendered.content.push_str(&text[rendered.text.len()..]);
-                text.clone_into(&mut rendered.text);
-            }
-            _ => {
-                self.rendered.insert(
-                    (pane, entry),
-                    Rendered {
-                        text: text.to_owned(),
-                        content: markdown::Content::parse(text),
-                    },
-                );
-            }
+        if self
+            .rendered
+            .get(&(pane, entry))
+            .is_some_and(|rendered| rendered.text == text)
+        {
+            return;
         }
+        self.rendered.insert(
+            (pane, entry),
+            Rendered {
+                text: text.to_owned(),
+                content: Document::parse(text),
+            },
+        );
     }
 
     /// Whether the command list was put away for the message being written.
@@ -427,17 +421,14 @@ impl Agents {
     }
 
     /// The composer of a pane.
-    pub(crate) fn composer(&self, pane: u64) -> Option<&text_editor::Content> {
-        self.composers.get(&pane)
+    pub(crate) fn composer(&self, pane: u64) -> Option<&str> {
+        self.composers.get(&pane).map(String::as_str)
     }
 
     /// The text in a pane's composer.
     #[cfg(test)]
     pub(crate) fn draft(&self, pane: u64) -> String {
-        self.composers
-            .get(&pane)
-            .map(text_editor::Content::text)
-            .unwrap_or_default()
+        self.composers.get(&pane).cloned().unwrap_or_default()
     }
 
     /// Closes the open list and forgets its search.
@@ -489,7 +480,7 @@ impl Agents {
     }
 
     /// The parsed Markdown of an answer.
-    pub(crate) fn markdown(&self, pane: u64, entry: u64) -> Option<&markdown::Content> {
+    pub(crate) fn markdown(&self, pane: u64, entry: u64) -> Option<&Document> {
         self.rendered.get(&(pane, entry)).map(|r| &r.content)
     }
 
@@ -512,14 +503,9 @@ mod tests {
     use spooky_core::{AgentDialog, AgentMessage, DialogKind};
 
     fn type_into(agents: &mut Agents, pane: u64, text: &str) {
-        for c in text.chars() {
-            let key = if c == '\n' {
-                text_editor::Edit::Enter
-            } else {
-                text_editor::Edit::Insert(c)
-            };
-            agents.update(Message::Edit(pane, text_editor::Action::Edit(key)));
-        }
+        let mut draft = agents.draft(pane);
+        draft.push_str(text);
+        agents.update(Message::Draft(pane, draft));
     }
 
     fn answer(id: u64, text: &str) -> AgentMessage {
@@ -588,12 +574,12 @@ mod tests {
     fn a_growing_answer_is_parsed_incrementally_and_a_rewritten_one_again() {
         let mut agents = Agents::default();
         agents.sync([(1, &agent(vec![answer(1, "# Title\n\nfirst")]))].into_iter());
-        let before = agents.markdown(1, 1).map_or(0, |c| c.items().len());
+        let before = agents.markdown(1, 1).map_or(0, |c| c.blocks().len());
         agents.sync([(1, &agent(vec![answer(1, "# Title\n\nfirst\n\nsecond")]))].into_iter());
-        let grown = agents.markdown(1, 1).map_or(0, |c| c.items().len());
+        let grown = agents.markdown(1, 1).map_or(0, |c| c.blocks().len());
         assert_eq!((before, grown), (2, 3));
         agents.sync([(1, &agent(vec![answer(1, "other")]))].into_iter());
-        assert_eq!(agents.markdown(1, 1).map_or(0, |c| c.items().len()), 1);
+        assert_eq!(agents.markdown(1, 1).map_or(0, |c| c.blocks().len()), 1);
     }
 
     #[test]

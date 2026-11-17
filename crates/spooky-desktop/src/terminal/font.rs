@@ -1,27 +1,27 @@
 //! The terminal's font: which family, and how wide its cells are.
 
-use iced::{
-    Font,
-    advanced::graphics::text::{
-        cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping},
-        font_system,
-    },
-};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock};
 
 #[cfg(target_os = "macos")]
-const DEFAULT_FAMILY: &str = "Menlo";
+pub(crate) const DEFAULT_FAMILY: &str = "Menlo";
 #[cfg(not(target_os = "macos"))]
-const DEFAULT_FAMILY: &str = "DejaVu Sans Mono";
+pub(crate) const DEFAULT_FAMILY: &str = "DejaVu Sans Mono";
 
 /// The width of a cell, as a share of the font size, when it cannot be measured. It is
 /// the advance of both default families.
 const DEFAULT_ADVANCE: f32 = 0.602;
 
+/// The fonts installed, read once.
+static FONTS: LazyLock<fontdb::Database> = LazyLock::new(|| {
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+    database
+});
+
 /// The terminal's font and the width of one cell in it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct TerminalFont {
-    pub font: Font,
+    pub family: Arc<str>,
     /// The width of a cell, as a share of the font size.
     pub advance: f32,
 }
@@ -38,53 +38,50 @@ impl TerminalFont {
     pub(crate) fn resolve(family: Option<&str>) -> Self {
         let name = family.unwrap_or(DEFAULT_FAMILY);
         Self {
-            font: Font::with_name(intern(name)),
+            family: Arc::from(name),
             advance: measure(name).unwrap_or(DEFAULT_ADVANCE),
         }
     }
 }
 
-/// `Font::with_name` wants a name that lives for the whole run. Each distinct name is
-/// kept once, so choosing fonts over and over does not grow memory.
-fn intern(name: &str) -> &'static str {
-    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-    let Ok(mut names) = NAMES.lock() else {
-        return DEFAULT_FAMILY;
+/// The font file of one style of `family`, and which face of a collection it is.
+pub(super) fn face_data(family: &str, bold: bool, italic: bool) -> Option<(Vec<u8>, u32)> {
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight: if bold {
+            fontdb::Weight::BOLD
+        } else {
+            fontdb::Weight::NORMAL
+        },
+        style: if italic {
+            fontdb::Style::Italic
+        } else {
+            fontdb::Style::Normal
+        },
+        ..fontdb::Query::default()
     };
-    if let Some(known) = names.iter().find(|known| **known == name) {
-        return known;
-    }
-    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
-    names.push(leaked);
-    leaked
+    let id = FONTS.query(&query)?;
+    FONTS.with_face_data(id, |data, index| (data.to_vec(), index))
 }
-
 /// The advance of a capital M in `family`, as a share of the font size.
 fn measure(family: &str) -> Option<f32> {
-    const SIZE: f32 = 100.0;
-    let mut system = font_system().write().ok()?;
-    let system = system.raw();
-    let mut buffer = Buffer::new(system, Metrics::new(SIZE, SIZE * 1.2));
-    buffer.set_text(
-        system,
-        "M",
-        &Attrs::new().family(Family::Name(family)),
-        Shaping::Advanced,
-        None,
-    );
-    buffer.shape_until_scroll(system, false);
-    let width = buffer.layout_runs().next()?.line_w / SIZE;
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        ..fontdb::Query::default()
+    };
+    let id = FONTS.query(&query)?;
+    let width = FONTS.with_face_data(id, |data, index| {
+        let face = ttf_parser::Face::parse(data, index).ok()?;
+        let glyph = face.glyph_index('M')?;
+        let advance = face.glyph_hor_advance(glyph)?;
+        Some(f32::from(advance) / f32::from(face.units_per_em()))
+    })??;
     (width.is_finite() && width > 0.1 && width < 2.0).then_some(width)
 }
 
 /// The monospace families installed, sorted and without duplicates.
 pub(crate) fn installed_monospace() -> Vec<String> {
-    let Ok(mut system) = font_system().write() else {
-        return Vec::new();
-    };
-    let mut families: Vec<String> = system
-        .raw()
-        .db()
+    let mut families: Vec<String> = FONTS
         .faces()
         .filter(|face| face.monospaced)
         .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
@@ -99,17 +96,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_name_is_kept_once_however_often_it_is_chosen() {
-        let first = intern("Spooky Test Font");
-        let second = intern("Spooky Test Font");
-        assert!(std::ptr::eq(first, second));
-    }
-
-    #[test]
-    fn every_installed_monospace_family_has_a_measurable_cell() {
+    fn every_installed_monospace_family_resolves_to_a_sensible_cell() {
         for family in installed_monospace() {
-            let advance = measure(&family);
-            assert!(advance.is_some_and(|a| a > 0.2 && a < 1.2), "{family}");
+            // A family with no usable capital M (a bitmap font, say) falls back to the
+            // default advance; one that measures must measure a plausible cell.
+            if let Some(advance) = measure(&family) {
+                assert!(advance > 0.2 && advance < 1.2, "{family}");
+            }
+            let font = TerminalFont::resolve(Some(&family));
+            assert!(font.advance > 0.1 && font.advance < 2.0, "{family}");
         }
     }
 

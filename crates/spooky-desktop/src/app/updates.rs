@@ -3,7 +3,7 @@
 //! person asks, and nothing is replaced until they agree to restart.
 
 use super::{App, Message};
-use iced::Task;
+use crate::runtime::Task;
 use spooky_core::update::Support;
 
 impl App {
@@ -13,7 +13,7 @@ impl App {
                 if self.updates.apply(event).exit {
                     // The new application was started; this one makes way for it. The
                     // server and its shells are not part of this process.
-                    return iced::exit();
+                    return Task::exit();
                 }
             }
             Message::UpdateCheck => self.updates_check(),

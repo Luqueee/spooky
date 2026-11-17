@@ -8,8 +8,8 @@ mod view;
 pub(crate) use discovery::Network;
 pub(crate) use view::view;
 
+use crate::runtime::Task;
 use discovery::{Discovery, discover};
-use iced::Task;
 
 /// What the rest of the application tells the picker, or the picker tells itself.
 #[derive(Clone, Debug)]

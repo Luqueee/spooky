@@ -1,8 +1,7 @@
 //! User-authored, data-only color themes discovered beside `config.toml`.
 
-use super::{ColorPalette, color_palette};
+use super::{Color, ColorPalette, color_palette};
 use crate::config::Appearance;
-use iced::Color;
 use serde::Deserialize;
 use std::{
     fmt, fs,
@@ -276,7 +275,7 @@ pub(crate) fn themes_directory(config_path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::ThemeCatalog;
+    use super::{Color, ThemeCatalog};
     use std::{
         fs,
         path::PathBuf,
@@ -315,8 +314,8 @@ danger = "#F06C75"
         let catalog = ThemeCatalog::load(&dir);
         let custom = catalog.get("custom").expect("custom theme loaded");
         assert_eq!(custom.name, "Custom");
-        assert_eq!(custom.colors.background, iced::Color::from_rgb8(25, 18, 26));
-        assert_eq!(custom.colors.accent, iced::Color::from_rgb8(240, 135, 85));
+        assert_eq!(custom.colors.background, Color::from_rgb8(25, 18, 26));
+        assert_eq!(custom.colors.accent, Color::from_rgb8(240, 135, 85));
         assert_ne!(custom.colors.sidebar, custom.colors.background);
         assert!(catalog.get("midnight").is_some());
         assert!(catalog.issues().is_empty());

@@ -4,10 +4,14 @@ mod app;
 mod commands;
 mod config;
 mod features;
+mod geometry;
+mod gui;
+mod keys;
 mod layout;
 mod link;
 mod platform;
 mod probe;
+mod runtime;
 mod shortcuts;
 mod tabs;
 mod terminal;
@@ -16,10 +20,11 @@ mod test_support;
 mod ui;
 mod updater;
 
-use app::{App, ContextTarget, Message, subscription};
+use app::{App, ContextTarget, Message};
 use config::Config;
-use features::window::{Hotkeys, StartError, initial_position, level_for};
-use iced::window;
+use features::window::{Hotkeys, StartError, initial_position};
+use geometry::{Point, Size};
+use std::{cell::RefCell, rc::Rc};
 
 fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
@@ -37,66 +42,49 @@ fn main() -> anyhow::Result<()> {
     let dropdown =
         hotkeys.is_some() && platform::window_control() != platform::WindowControl::Unavailable;
     let size = config.initial_size();
-    let level = level_for(config.on_blur);
-    // The application state owns the shortcut registration; the boot function hands
-    // it over once.
-    let hotkeys = std::cell::Cell::new(hotkeys);
-    let result = iced::application(
-        move || {
-            App::new(
-                config.clone(),
-                status.clone(),
-                hotkeys.take(),
-                themes.clone(),
-            )
-        },
-        App::update,
-        App::view,
-    )
-    .title("Spooky")
-    .subscription(subscription)
-    .theme(App::theme)
-    .style(App::style)
-    .default_font(iced::Font::MONOSPACE)
-    .window(window::Settings {
-        size,
-        // The window is clear behind the content while it slides, so it can be see-through.
-        // Clear behind the content, for the slide and for the background opacity setting.
-        transparent: dropdown || cfg!(any(target_os = "macos", target_os = "linux")),
-        // Blur what shows through where the compositor offers it (KDE's Blur effect, on
-        // X11 and Wayland); others ignore the request. Fixed when the window is created.
-        blur: cfg!(target_os = "linux"),
-        min_size: Some(config::MIN_WINDOW),
-        level,
-        #[cfg(target_os = "linux")]
-        icon: {
-            let image = image::load_from_memory(include_bytes!("../../../assets/logo-256.png"))?
-                .into_rgba8();
-            let (width, height) = image.dimensions();
-            Some(window::icon::from_rgba(image.into_raw(), width, height)?)
-        },
-        // The class KWin and the desktop entry know the window by.
-        #[cfg(target_os = "linux")]
-        platform_specific: window::settings::PlatformSpecific {
-            application_id: platform::APP_ID.to_owned(),
-            ..Default::default()
-        },
-        #[cfg(target_os = "macos")]
-        platform_specific: window::settings::PlatformSpecific {
-            title_hidden: true,
-            titlebar_transparent: true,
-            fullsize_content_view: true,
-        },
-        // With the global shortcut the window starts hidden, and is shown (placed,
-        // focused) by the same path as every later reveal.
-        visible: !dropdown,
-        position: window::Position::SpecificWith(initial_position),
-        // On KDE the application's own header replaces KDE's title bar, which would
-        // otherwise sit above it.
-        decorations: platform::window_control() != platform::WindowControl::Kwin,
-        exit_on_close_request: false,
-        ..Default::default()
-    })
-    .run();
-    result.map_err(|e| anyhow::anyhow!("{e}"))
+    let app = App::new(config, status, hotkeys, themes);
+    let failure = Rc::new(RefCell::new(None));
+    let reported = failure.clone();
+    gpui_platform::application().run(move |cx| {
+        let position = cx
+            .primary_display()
+            .map(|display| {
+                let bounds = display.bounds();
+                initial_position(
+                    size,
+                    Size::new(f32::from(bounds.size.width), f32::from(bounds.size.height)),
+                )
+            })
+            .unwrap_or(Point::ORIGIN);
+        let launch = gui::Launch {
+            size,
+            min_size: config::MIN_WINDOW,
+            position,
+            // With the global shortcut the window starts hidden, and is shown (placed,
+            // focused) by the same path as every later reveal.
+            hidden: dropdown,
+            // On KDE the application's own header replaces KDE's title bar, which would
+            // otherwise sit above it.
+            frameless: platform::window_control() == platform::WindowControl::Kwin,
+            app_id: platform::APP_ID,
+        };
+        if let Err(error) = gui::open(cx, app, &launch) {
+            *reported.borrow_mut() = Some(error);
+            cx.quit();
+            return;
+        }
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        if !dropdown {
+            cx.activate(true);
+        }
+    });
+    match failure.take() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }

@@ -2,7 +2,7 @@
 //! application asks for mouse events, the pointer is theirs: the terminal sends
 //! these bytes instead of selecting text or scrolling its own history.
 
-use iced::keyboard::Modifiers;
+use crate::keys::Modifiers;
 use spooky_core::{MouseEncoding, MouseTracking};
 
 /// A button or wheel notch an application can be told about.
@@ -16,12 +16,12 @@ pub(crate) enum Button {
 }
 
 impl Button {
-    /// The reportable button for an iced mouse button; others are never reported.
-    pub(crate) fn from_mouse(button: iced::mouse::Button) -> Option<Self> {
+    /// The reportable button for a pointer button; others are never reported.
+    pub(crate) fn from_gui(button: gpui::MouseButton) -> Option<Self> {
         match button {
-            iced::mouse::Button::Left => Some(Self::Left),
-            iced::mouse::Button::Middle => Some(Self::Middle),
-            iced::mouse::Button::Right => Some(Self::Right),
+            gpui::MouseButton::Left => Some(Self::Left),
+            gpui::MouseButton::Middle => Some(Self::Middle),
+            gpui::MouseButton::Right => Some(Self::Right),
             _ => None,
         }
     }
@@ -126,7 +126,7 @@ pub(crate) fn wheel_arrows(up: bool, application_cursor: bool, count: u32) -> Ve
 #[cfg(test)]
 mod tests {
     use super::{Action, Button, report, wheel_arrows};
-    use iced::keyboard::Modifiers;
+    use crate::keys::Modifiers;
     use spooky_core::{MouseEncoding, MouseTracking};
 
     fn sgr(action: Action, button: Option<Button>, modifiers: Modifiers) -> Option<Vec<u8>> {

@@ -5,11 +5,12 @@ use crate::{
     Message,
     config::{Appearance, Config, OnBlur, Osc52, SizeMode},
     features::updates::{Status, Updates},
-    ui::*,
+    gui::{Look, Tone, View, column, hsla, row},
+    ui::ThemeCatalog,
 };
-use iced::{
-    Alignment, Border, Element, Length,
-    widget::{button, column, container, pick_list, row, scrollable, text, toggler},
+use gpui::{
+    AnyElement, Div, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    StatefulInteractiveElement, Styled, anchored, deferred, div, point, px,
 };
 use spooky_core::update::{CURRENT, Channel};
 
@@ -25,97 +26,126 @@ const PRESETS: [(&str, f32, f32); 3] = [
 ];
 
 /// One option: its name and a line of explanation on the left, its control on the right.
-fn option<'a>(
+fn option(
+    v: &View,
     label: &'static str,
     hint: impl Into<String>,
-    control: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    container(
-        row![
-            column![
-                text(label).size(12).style(text_tone(TextTone::Text)),
-                text(hint.into()).size(10).style(text_tone(TextTone::Muted))
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-            control.into(),
-        ]
-        .spacing(16)
-        .align_y(Alignment::Center),
-    )
-    .padding([10, 12])
-    .into()
+    control: impl IntoElement,
+) -> AnyElement {
+    row()
+        .w_full()
+        .gap(px(16.))
+        .px(px(12.))
+        .py(px(10.))
+        .child(
+            column()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(v.text(label, 12.0, Tone::Text))
+                .child(v.text(hint.into(), 10.0, Tone::Muted)),
+        )
+        .child(div().flex_shrink_0().child(control))
+        .into_any_element()
 }
 
 /// A titled group of options.
-fn section<'a>(title: &'static str, options: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    let mut rows = column![].width(Length::Fill);
+fn section(v: &View, title: &'static str, options: Vec<AnyElement>) -> AnyElement {
+    let mut rows = column().w_full();
     for (index, option) in options.into_iter().enumerate() {
         if index > 0 {
-            rows = rows.push(separator());
+            rows = rows.child(v.separator());
         }
-        rows = rows.push(option);
+        rows = rows.child(option);
     }
-    column![
-        text(title).size(11).style(text_tone(TextTone::Accent)),
-        container(rows).style(|theme| {
-            let colors = color_palette_for(theme);
-            container::Style {
-                border: Border {
-                    color: colors.border,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..surface(colors.sidebar)
-            }
-        }),
-    ]
-    .spacing(8)
-    .into()
+    column()
+        .w_full()
+        .gap(px(8.))
+        .child(v.text(title, 11.0, Tone::Accent))
+        .child(v.panel().w_full().child(rows))
+        .into_any_element()
 }
 
 /// Buttons of which one is selected.
-fn choice<'a>(options: Vec<(&'static str, bool, Message)>) -> Element<'a, Message> {
-    let mut buttons = row![].spacing(2);
-    for (label, selected, message) in options {
-        buttons = buttons.push(
-            button(text(label).size(11))
-                .padding([4, 10])
-                .style(move |theme, status| selectable(selected, theme, status))
-                .on_press(message),
+fn choice(v: &View, name: &'static str, options: Vec<(&'static str, bool, Message)>) -> Div {
+    let mut buttons = row().gap(px(2.));
+    for (index, (label, selected, message)) in options.into_iter().enumerate() {
+        let look = if selected {
+            Look::Selected
+        } else {
+            Look::Quiet
+        };
+        buttons = buttons.child(
+            v.button(
+                (name, index),
+                div().text_size(px(11.)).child(label),
+                look,
+                Some(message),
+            )
+            .px(px(10.))
+            .py(px(4.)),
         );
     }
-    buttons.into()
-}
-
-fn step_button<'a>(label: &'static str, message: Message) -> Element<'a, Message> {
-    button(text(label).size(13))
-        .padding([2, 10])
-        .style(quiet)
-        .on_press(message)
-        .into()
+    buttons
 }
 
 /// A value with buttons to lower and raise it.
-fn stepper<'a>(value: String, lower: Message, raise: Message) -> Element<'a, Message> {
-    row![
-        step_button("−", lower),
-        text(value)
-            .size(11)
-            .style(text_tone(TextTone::Text))
-            .width(64)
-            .align_x(Alignment::Center),
-        step_button("+", raise),
-    ]
-    .align_y(Alignment::Center)
-    .into()
+fn stepper(v: &View, name: &'static str, value: String, lower: Message, raise: Message) -> Div {
+    let lower_id = format!("{name}-lower");
+    let raise_id = format!("{name}-raise");
+    row()
+        .child(step_button_owned(v, lower_id, "−", lower))
+        .child(
+            div()
+                .w(px(64.))
+                .flex()
+                .justify_center()
+                .child(v.text(value, 11.0, Tone::Text)),
+        )
+        .child(step_button_owned(v, raise_id, "+", raise))
 }
 
-fn switch<'a>(on: bool, change: fn(bool) -> Change) -> Element<'a, Message> {
-    toggler(on)
-        .size(16)
-        .on_toggle(move |value| apply(change(value)))
-        .into()
+fn step_button_owned(
+    v: &View,
+    id: String,
+    label: &'static str,
+    message: Message,
+) -> impl IntoElement {
+    v.button(
+        gpui::SharedString::from(id),
+        div().text_size(px(13.)).child(label),
+        Look::Quiet,
+        Some(message),
+    )
+    .px(px(10.))
+    .py(px(2.))
+}
+
+/// An on/off switch.
+fn switch(v: &View, name: &'static str, on: bool, change: fn(bool) -> Change) -> impl IntoElement {
+    let track = if on { v.p.accent } else { v.p.border };
+    let knob = div()
+        .size(px(12.))
+        .rounded(px(6.))
+        .bg(hsla(v.p.background.with_alpha(1.0)));
+    let mut body = div()
+        .w(px(30.))
+        .h(px(16.))
+        .rounded(px(8.))
+        .p(px(2.))
+        .flex()
+        .items_center()
+        .bg(hsla(track));
+    body = if on {
+        body.justify_end()
+    } else {
+        body.justify_start()
+    };
+    div()
+        .id(name)
+        .cursor_pointer()
+        .child(body.child(knob))
+        .on_click(v.on_click(apply(change(!on))))
 }
 
 /// The message a control sends to change `change`.
@@ -123,8 +153,80 @@ fn apply(change: Change) -> Message {
     Message::Settings(super::Message::Change(change))
 }
 
+/// A choice list: the current value, and the values when it is open.
+fn select(
+    v: &View,
+    name: &'static str,
+    width: f32,
+    current: String,
+    open: bool,
+    items: Vec<(String, bool, Message)>,
+) -> Div {
+    let toggle = Message::Settings(super::Message::Menu((!open).then_some(name)));
+    let button = v
+        .button(
+            name,
+            row()
+                .w_full()
+                .justify_between()
+                .gap(px(6.))
+                .child(v.line(current, 11.0, Tone::Text))
+                .child(v.text("▾", 10.0, Tone::Muted)),
+            Look::Quiet,
+            Some(toggle),
+        )
+        .w(px(width))
+        .px(px(9.))
+        .py(px(5.))
+        .border_1()
+        .border_color(hsla(if open { v.p.accent } else { v.p.border }))
+        .bg(hsla(v.p.sidebar));
+    let mut field = div().child(button);
+    if open {
+        let mut list = column().gap(px(1.));
+        for (index, (label, selected, message)) in items.into_iter().enumerate() {
+            let look = if selected {
+                Look::Selected
+            } else {
+                Look::Quiet
+            };
+            list = list.child(
+                v.button(
+                    (name, index + 1),
+                    v.line(label, 11.0, Tone::Text),
+                    look,
+                    Some(message),
+                )
+                .w_full()
+                .px(px(9.))
+                .py(px(5.)),
+            );
+        }
+        let menu = v
+            .panel()
+            .id(gpui::SharedString::from(format!("{name}-menu")))
+            .w(px(width))
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .p(px(3.))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(list);
+        field = field.child(
+            deferred(
+                anchored()
+                    .offset(point(px(0.), px(28.)))
+                    .snap_to_window_with_margin(px(4.))
+                    .child(menu),
+            )
+            .with_priority(2),
+        );
+    }
+    field
+}
+
 /// The release channel, the check at startup, and what is known about newer releases.
-fn updates_section<'a>(config: &'a Config, updates: &'a Updates) -> Element<'a, Message> {
+fn updates_section(v: &View, config: &Config, updates: &Updates) -> AnyElement {
     let channel = |channel: Channel| {
         (
             channel.label(),
@@ -150,37 +252,54 @@ fn updates_section<'a>(config: &'a Config, updates: &'a Updates) -> Element<'a, 
         ),
         Status::Failed(reason) => format!("Could not check: {reason}"),
     };
-    let mut buttons = row![
-        button(text("Check now").size(11))
-            .padding([4, 10])
-            .style(quiet)
-            .on_press_maybe(
-                (*updates.status() != Status::Checking).then_some(Message::UpdateCheck)
-            ),
-    ]
-    .spacing(6);
+    let mut buttons = row().gap(px(6.)).child(
+        v.button(
+            "updates-check",
+            div().text_size(px(11.)).child("Check now"),
+            Look::Quiet,
+            (*updates.status() != Status::Checking).then_some(Message::UpdateCheck),
+        )
+        .px(px(10.))
+        .py(px(4.)),
+    );
     if updates.available().is_some() {
-        buttons = buttons.push(
-            button(text("Update…").size(11))
-                .padding([4, 10])
-                .style(primary)
-                .on_press(Message::UpdateAsk),
+        buttons = buttons.child(
+            v.button(
+                "updates-update",
+                div().text_size(px(11.)).child("Update…"),
+                Look::Primary,
+                Some(Message::UpdateAsk),
+            )
+            .px(px(10.))
+            .py(px(4.)),
         );
     }
     section(
+        v,
         "Updates",
         vec![
             option(
+                v,
                 "Release channel",
                 "Stable follows production releases. Development also takes pre-releases such as 0.2.0-dev.1.",
-                choice(vec![channel(Channel::Stable), channel(Channel::Dev)]),
+                choice(
+                    v,
+                    "update-channel",
+                    vec![channel(Channel::Stable), channel(Channel::Dev)],
+                ),
             ),
             option(
+                v,
                 "Check when Spooky starts",
                 "Asks GitHub's public release list for a newer version and sends nothing else.",
-                switch(config.check_updates, Change::CheckUpdates),
+                switch(
+                    v,
+                    "check-updates",
+                    config.check_updates,
+                    Change::CheckUpdates,
+                ),
             ),
-            option("Spooky", format!("Version {CURRENT}. {status}"), buttons),
+            option(v, "Spooky", format!("Version {CURRENT}. {status}"), buttons),
         ],
     )
 }
@@ -192,24 +311,22 @@ pub(crate) struct Session {
     pub shortcuts_available: bool,
     /// Whether that shortcut can also hide the window and bring it back.
     pub can_hide: bool,
-    /// Whether the window's background can be translucent here.
-    pub glass_available: bool,
     /// Whether the system asks for solid backgrounds.
     pub reduce_transparency: bool,
 }
 
 /// The page that replaces the terminal while the settings tab is selected.
-pub(crate) fn view<'a>(
-    settings: &'a Settings,
-    config: &'a Config,
-    themes: &'a ThemeCatalog,
-    updates: &'a Updates,
+pub(crate) fn view(
+    v: &mut View,
+    settings: &Settings,
+    config: &Config,
+    themes: &ThemeCatalog,
+    updates: &Updates,
     session: Session,
-) -> Element<'a, Message> {
+) -> AnyElement {
     let Session {
         shortcuts_available,
         can_hide,
-        glass_available,
         reduce_transparency,
     } = session;
     let recording = settings.recording();
@@ -236,27 +353,43 @@ pub(crate) fn view<'a>(
     };
     let mut window = vec![
         option(
+            v,
             "Size",
             "A share of the display, pinned to its top edge, or fixed pixels",
-            choice(vec![
-                ("Percent", percent, apply(Change::Size(SizeMode::Percent))),
-                ("Pixels", !percent, apply(Change::Size(SizeMode::Pixels))),
-            ]),
+            choice(
+                v,
+                "size-mode",
+                vec![
+                    ("Percent", percent, apply(Change::Size(SizeMode::Percent))),
+                    ("Pixels", !percent, apply(Change::Size(SizeMode::Pixels))),
+                ],
+            ),
         ),
         option(
+            v,
             "Width",
             "Of the window when it opens",
-            stepper(width, apply(lower_width), apply(raise_width)),
+            stepper(v, "width", width, apply(lower_width), apply(raise_width)),
         ),
         option(
+            v,
             "Height",
             "Of the window when it opens",
-            stepper(height, apply(lower_height), apply(raise_height)),
+            stepper(
+                v,
+                "height",
+                height,
+                apply(lower_height),
+                apply(raise_height),
+            ),
         ),
         option(
+            v,
             "Presets",
             "Width and height as a share of the display",
             choice(
+                v,
+                "presets",
                 PRESETS
                     .iter()
                     .map(|&(label, width, height)| {
@@ -273,35 +406,39 @@ pub(crate) fn view<'a>(
         ),
     ];
     window.push(option(
+        v,
         "When another app is clicked",
         if can_hide {
             "Hiding brings the window back with the global shortcut"
         } else {
             "Hiding needs a global shortcut and a desktop that lets Spooky hide its window, which is not available here"
         },
-        choice(vec![
-            (
-                "Nothing",
-                config.on_blur == OnBlur::None,
-                apply(Change::OnBlur(OnBlur::None)),
-            ),
-            (
-                "Hide",
-                config.on_blur == OnBlur::Hide,
-                apply(Change::OnBlur(OnBlur::Hide)),
-            ),
-            (
-                "Stay on top",
-                config.on_blur == OnBlur::Top,
-                apply(Change::OnBlur(OnBlur::Top)),
-            ),
-        ]),
+        choice(
+            v,
+            "on-blur",
+            vec![
+                (
+                    "Nothing",
+                    config.on_blur == OnBlur::None,
+                    apply(Change::OnBlur(OnBlur::None)),
+                ),
+                (
+                    "Hide",
+                    config.on_blur == OnBlur::Hide,
+                    apply(Change::OnBlur(OnBlur::Hide)),
+                ),
+                (
+                    "Stay on top",
+                    config.on_blur == OnBlur::Top,
+                    apply(Change::OnBlur(OnBlur::Top)),
+                ),
+            ],
+        ),
     ));
     window.push(option(
+        v,
         "Background opacity",
-        if !glass_available {
-            "Transparency unavailable; the background stays solid"
-        } else if reduce_transparency {
+        if reduce_transparency {
             "macOS Reduce Transparency is on; the background stays solid"
         } else if cfg!(target_os = "macos") {
             "Subtle background blur; 100% uses a solid background"
@@ -309,6 +446,8 @@ pub(crate) fn view<'a>(
             "Lets the desktop show through, blurred where the desktop offers it (KDE's Blur effect); 100% is solid"
         },
         stepper(
+            v,
+            "opacity",
             format!("{} %", config.background_opacity),
             apply(Change::BackgroundOpacity(
                 config.background_opacity - PERCENT_STEP,
@@ -320,52 +459,55 @@ pub(crate) fn view<'a>(
     ));
     if cfg!(target_os = "macos") {
         window.push(option(
+            v,
             "Dock icon",
             "Off runs without a Dock icon; the global shortcut is the way back",
-            switch(config.dock_icon, Change::DockIcon),
+            switch(v, "dock-icon", config.dock_icon, Change::DockIcon),
         ));
     }
 
-    let shortcut = if shortcuts_available {
+    let shortcut_control: AnyElement = if shortcuts_available {
         let shown = if recording {
             "Press the new keys…".to_owned()
         } else {
             config.shortcut.clone()
         };
-        row![
-            container(text(shown).size(11).style(text_tone(TextTone::Text)))
-                .padding([4, 10])
-                .style(|theme| {
-                    let colors = color_palette_for(theme);
-                    container::Style {
-                        border: Border {
-                            color: colors.border,
-                            width: 1.0,
-                            radius: 5.0.into(),
-                        },
-                        ..surface(colors.hover)
-                    }
-                }),
-            if recording {
-                choice(vec![("Cancel", false, apply(Change::CancelRecording))])
-            } else {
-                choice(vec![
+        let actions = if recording {
+            choice(
+                v,
+                "shortcut-actions",
+                vec![("Cancel", false, apply(Change::CancelRecording))],
+            )
+        } else {
+            choice(
+                v,
+                "shortcut-actions",
+                vec![
                     ("Record", false, apply(Change::RecordShortcut)),
                     ("Reset", false, apply(Change::ResetShortcut)),
-                ])
-            },
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+                ],
+            )
+        };
+        row()
+            .gap(px(8.))
+            .child(
+                div()
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(hsla(v.p.border))
+                    .bg(hsla(v.p.hover))
+                    .child(v.text(shown, 11.0, Tone::Text)),
+            )
+            .child(actions)
+            .into_any_element()
     } else {
-        Element::from(
-            text("Not available")
-                .size(11)
-                .style(text_tone(TextTone::Muted)),
-        )
+        v.text("Not available", 11.0, Tone::Muted)
+            .into_any_element()
     };
     let shortcut = vec![option(
+        v,
         "Global shortcut",
         if recording {
             "Hold Ctrl, Alt or Cmd with a key, or press a function key. Escape cancels"
@@ -374,43 +516,71 @@ pub(crate) fn view<'a>(
         } else {
             "Brings the window forward from any application; this desktop does not let Spooky hide or place it"
         },
-        shortcut,
+        shortcut_control,
     )];
 
     let family = config.font_family.as_deref().unwrap_or(DEFAULT_FONT);
+    let fonts = select(
+        v,
+        "font-family",
+        220.0,
+        family.to_owned(),
+        settings.menu() == Some("font-family"),
+        settings
+            .fonts()
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    name == family,
+                    apply(Change::FontFamily(
+                        (name != DEFAULT_FONT).then(|| name.clone()),
+                    )),
+                )
+            })
+            .collect(),
+    );
     let terminal = vec![
         option(
+            v,
             "Font",
             "Monospace families installed on this machine; the default follows the platform",
-            pick_list(settings.fonts(), Some(family.to_owned()), |name: String| {
-                apply(Change::FontFamily((name != DEFAULT_FONT).then_some(name)))
-            })
-            .text_size(11)
-            .width(220),
+            fonts,
         ),
         option(
+            v,
             "Font size",
             "Terminal text, in points",
             stepper(
+                v,
+                "font-size",
                 format!("{} pt", config.font_size),
                 apply(Change::FontSize(config.font_size - 1.0)),
                 apply(Change::FontSize(config.font_size + 1.0)),
             ),
         ),
         option(
+            v,
             "Blinking cursor",
             "Off keeps every cursor solid, whatever a program asks for",
-            switch(config.cursor_blink, Change::CursorBlink),
+            switch(v, "cursor-blink", config.cursor_blink, Change::CursorBlink),
         ),
         option(
+            v,
             "Copy on select",
             "Selecting text with the mouse copies it when you let go; Shift-drag selects in programs that use the mouse",
-            switch(config.copy_on_select, Change::CopyOnSelect),
+            switch(
+                v,
+                "copy-on-select",
+                config.copy_on_select,
+                Change::CopyOnSelect,
+            ),
         ),
         option(
+            v,
             "Clipboard writes from programs",
             "OSC 52: how tmux and vim over SSH copy; reading is never allowed",
-            switch(config.osc52 == Osc52::Write, Change::Osc52),
+            switch(v, "osc52", config.osc52 == Osc52::Write, Change::Osc52),
         ),
     ];
 
@@ -429,27 +599,63 @@ pub(crate) fn view<'a>(
     let problem = settings.problem().unwrap_or_default().to_owned();
     // The bar stays put while the sections scroll, so a refused change is seen
     // wherever on the page it was made.
-    let bar = container(
-        row![
-            text("Settings").size(16).style(text_tone(TextTone::Text)),
-            container(text(problem).size(11).style(text_tone(TextTone::Danger)))
-                .width(Length::Fill),
-            button(text("Done").size(11))
-                .padding([5, 14])
-                .style(primary)
-                .on_press(Message::Settings(super::Message::Close)),
-        ]
-        .spacing(16)
-        .align_y(Alignment::Center)
-        .width(640),
-    )
-    .padding([10, 0])
-    .center_x(Length::Fill);
-    let mut sections = column![
-        section("Window", window),
-        section(
+    let bar = div().w_full().flex().justify_center().py(px(10.)).child(
+        row()
+            .w(px(640.))
+            .gap(px(16.))
+            .child(v.text("Settings", 16.0, Tone::Text))
+            .child(div().flex_1().child(v.text(problem, 11.0, Tone::Danger)))
+            .child(
+                v.button(
+                    "settings-done",
+                    div().text_size(px(11.)).child("Done"),
+                    Look::Primary,
+                    Some(Message::Settings(super::Message::Close)),
+                )
+                .px(px(14.))
+                .py(px(5.)),
+            ),
+    );
+    let current_theme = config
+        .custom_theme
+        .as_deref()
+        .and_then(|id| themes.get(id))
+        .or_else(|| {
+            themes.get(match config.appearance {
+                Appearance::Midnight => "midnight",
+                Appearance::Spooky => "spooky",
+                Appearance::Nord => "nord",
+                Appearance::Dracula => "dracula",
+            })
+        });
+    let theme_select = select(
+        v,
+        "color-theme",
+        150.0,
+        current_theme.map_or_else(String::new, |theme| theme.to_string()),
+        settings.menu() == Some("color-theme"),
+        themes
+            .themes()
+            .iter()
+            .map(|theme| {
+                let selected = current_theme.is_some_and(|current| current.id == theme.id);
+                (
+                    theme.to_string(),
+                    selected,
+                    apply(Change::Appearance(theme.id.clone())),
+                )
+            })
+            .collect(),
+    );
+    let mut sections = column()
+        .w(px(640.))
+        .gap(px(20.))
+        .child(section(v, "Window", window))
+        .child(section(
+            v,
             "Appearance",
             vec![option(
+                v,
                 "Color theme",
                 format!(
                     "Choose a palette or add .toml theme files in {}",
@@ -458,93 +664,46 @@ pub(crate) fn view<'a>(
                         |path| path.display().to_string(),
                     )
                 ),
-                pick_list(
-                    themes.themes(),
-                    config
-                        .custom_theme
-                        .as_deref()
-                        .and_then(|id| themes.get(id))
-                        .or_else(|| {
-                            themes.get(match config.appearance {
-                                Appearance::Midnight => "midnight",
-                                Appearance::Spooky => "spooky",
-                                Appearance::Nord => "nord",
-                                Appearance::Dracula => "dracula",
-                            })
-                        }),
-                    |theme: ThemeDefinition| { apply(Change::Appearance(theme.id)) },
-                )
-                .width(150)
-                .text_size(11)
-                .padding([5, 9])
-                .menu_height(240)
-                .style(|theme, status| {
-                    let colors = color_palette_for(theme);
-                    let mut style = iced::widget::pick_list::default(theme, status);
-                    style.background = colors.sidebar.into();
-                    style.text_color = colors.text;
-                    style.placeholder_color = colors.muted;
-                    style.handle_color = colors.muted;
-                    style.border = Border {
-                        color: if matches!(status, iced::widget::pick_list::Status::Active) {
-                            colors.border
-                        } else {
-                            colors.accent
-                        },
-                        width: 1.0,
-                        radius: 5.0.into(),
-                    };
-                    style
-                })
-                .menu_style(|theme| {
-                    let colors = color_palette_for(theme);
-                    let mut style = iced::overlay::menu::default(theme);
-                    style.background = colors.sidebar.into();
-                    style.text_color = colors.text;
-                    style.selected_text_color = colors.text;
-                    style.selected_background = colors.selected.into();
-                    style.border = Border {
-                        color: colors.border,
-                        width: 1.0,
-                        radius: 5.0.into(),
-                    };
-                    style
-                }),
+                theme_select,
             )],
-        ),
-        section("Shortcut", shortcut),
-        section("Terminal", terminal),
-        updates_section(config, updates),
-        text(file).size(10).style(text_tone(TextTone::Muted)),
-        text(themes_path).size(10).style(text_tone(TextTone::Muted)),
-    ]
-    .spacing(20)
-    .width(640);
+        ))
+        .child(section(v, "Shortcut", shortcut))
+        .child(section(v, "Terminal", terminal))
+        .child(updates_section(v, config, updates))
+        .child(v.text(file, 10.0, Tone::Muted))
+        .child(v.text(themes_path, 10.0, Tone::Muted));
     if let Some(missing_theme) = missing_theme {
-        sections = sections.push(
-            text(missing_theme)
-                .size(10)
-                .style(text_tone(TextTone::Warning)),
-        );
+        sections = sections.child(v.text(missing_theme, 10.0, Tone::Warning));
     }
     if !theme_issues.is_empty() {
-        sections = sections.push(
-            text(format!("Some theme files were skipped:\n{theme_issues}"))
-                .size(10)
-                .style(text_tone(TextTone::Danger)),
-        );
+        sections = sections.child(v.text(
+            format!("Some theme files were skipped:\n{theme_issues}"),
+            10.0,
+            Tone::Danger,
+        ));
     }
-
-    container(column![
-        bar,
-        separator(),
-        scrollable(container(sections).padding([16, 0]).center_x(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill),
-    ])
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    let mut page = column().size_full().child(bar).child(v.separator()).child(
+        div()
+            .id("settings-scroll")
+            .w_full()
+            .flex_1()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .py(px(16.))
+                    .child(sections),
+            ),
+    );
+    if settings.menu().is_some() {
+        page = page.child(v.dismiss_layer(
+            "settings-menu-dismiss",
+            Message::Settings(super::Message::Menu(None)),
+        ));
+    }
+    page.into_any_element()
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ flowchart LR
   mods --> server
 ```
 
-Everything mod-related lives in one crate, `spooky-mods`, with internal modules `manifest`, `capability`, `event`, `ui` (the declarative tree), `message` (host to mod protocol) and, behind the `host` Cargo feature, `host`. It depends on `spooky-core` (pane, tab and workspace ids in events) and on neither iced nor the terminal emulator, so the server can use the types without the GUI stack, and compiles the host (process or script supervision) only when it runs mods. Drawing the UI tree is `spooky-desktop`'s job. If an SDK for mod authors is ever published, the `manifest`, `capability`, `event`, `ui` and `message` modules are the part to extract.
+Everything mod-related lives in one crate, `spooky-mods`, with internal modules `manifest`, `capability`, `event`, `ui` (the declarative tree), `message` (host to mod protocol) and, behind the `host` Cargo feature, `host`. It depends on `spooky-core` (pane, tab and workspace ids in events) and on neither the GUI toolkit nor the terminal emulator, so the server can use the types without the GUI stack, and compiles the host (process or script supervision) only when it runs mods. Drawing the UI tree is `spooky-desktop`'s job. If an SDK for mod authors is ever published, the `manifest`, `capability`, `event`, `ui` and `message` modules are the part to extract.
 
 ### Internal modularization (the larger part of the work)
 
@@ -78,7 +78,7 @@ At the time of writing `spooky-desktop/src/main.rs` has about 2,500 lines, 75 `M
 | Target providers | list machines | `targets.provide` | GUI |
 | Host effects | notification, clipboard write, open URL (scheme allowlist as for links) | `notify`, `clipboard.write`, `url.open` | GUI |
 
-Mod UI is a declarative tree (text, list, button, input, table) drawn by the host with its own styling. A mod never touches iced.
+Mod UI is a declarative tree (text, list, button, input, table) drawn by the host with its own styling. A mod never touches the GUI toolkit.
 
 ### Manifest
 

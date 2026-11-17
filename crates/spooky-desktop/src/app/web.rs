@@ -1,17 +1,12 @@
 //! The agent pane shown by a web page instead of the native view (macOS).
 //!
-//! The page is a native child view of the window, so it sits over everything iced draws:
-//! it is shown only while nothing of iced's own is open over the pane, and it takes the
-//! place of the pane's area, which the native view measures and reports. Only a pane that
-//! fills its tab is shown this way; a split keeps the native agent view.
+//! The page is a native child view of the window, so it sits over everything the toolkit
+//! draws: it is shown only while nothing of the application's own is open over the pane,
+//! and it takes the place of the pane's area, which the view measures and reports. Only a
+//! pane that fills its tab is shown this way; a split keeps the native agent view.
 
 use super::{App, Message};
-use crate::{features::agent::web, platform::webview, ui::color_palette_for};
-use iced::{
-    Element, Length, Rectangle, Task, mouse,
-    widget::{canvas, canvas::Geometry},
-    window,
-};
+use crate::{features::agent::web, platform::webview, runtime::Task};
 use spooky_core::{Layout, MAX_AGENT_PROMPT_BYTES};
 
 /// Where the page is in its life.
@@ -33,56 +28,13 @@ enum Stage {
 pub(super) struct WebHost {
     stage: Stage,
     /// The pane's area as last measured.
-    area: Option<Rectangle>,
+    area: Option<crate::geometry::Rectangle>,
     /// Where the page was last placed.
-    placed: Option<Rectangle>,
+    placed: Option<crate::geometry::Rectangle>,
     /// The pane the page is showing, when it is on screen.
     pane: Option<u64>,
     /// The state last given to the page; cleared to give it again.
     pushed: String,
-}
-
-/// The measured stand-in for the page in the native layout: it fills the pane's area,
-/// reports where that is, and paints the page's background until the page covers it.
-struct Area;
-
-impl canvas::Program<Message> for Area {
-    type State = Option<Rectangle>;
-
-    fn update(
-        &self,
-        state: &mut Self::State,
-        _: &canvas::Event,
-        bounds: Rectangle,
-        _: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
-        if *state == Some(bounds) {
-            return None;
-        }
-        *state = Some(bounds);
-        Some(canvas::Action::publish(Message::WebArea(bounds)))
-    }
-
-    fn draw(
-        &self,
-        _: &Self::State,
-        renderer: &iced::Renderer,
-        theme: &iced::Theme,
-        bounds: Rectangle,
-        _: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(
-            iced::Point::ORIGIN,
-            bounds.size(),
-            color_palette_for(theme).background,
-        );
-        vec![frame.into_geometry()]
-    }
-}
-
-pub(super) fn area<'a>() -> Element<'a, Message> {
-    canvas(Area).width(Length::Fill).height(Length::Fill).into()
 }
 
 impl App {
@@ -97,7 +49,7 @@ impl App {
         matches!(tab.layout, Layout::Pane(id) if id == pane.id).then_some(pane.id)
     }
 
-    /// Something iced draws over the content area is open, and the page would cover it.
+    /// Something the application draws over the content area is open, and the page would cover it.
     fn overlay_open(&self) -> bool {
         self.menu_open
             || self.context_menu.is_some()
@@ -118,11 +70,11 @@ impl App {
     pub(super) fn sync_web(&mut self) -> Task<Message> {
         let target = self.web_target();
         if self.web.stage == Stage::Idle && target.is_some() {
-            let Some(id) = self.window else {
+            if !self.opened {
                 return Task::none();
-            };
+            }
             self.web.stage = Stage::Creating;
-            return window::run(id, |handle| webview::create(handle)).map(Message::WebCreated);
+            return Task::native(|handle| Message::WebCreated(webview::create(handle)));
         }
         if self.web.stage != Stage::Ready {
             return Task::none();
@@ -206,11 +158,11 @@ impl App {
                 }
             }
             Ok(web::Event::Paste) => {
-                return iced::clipboard::read().map(Message::WebPasted);
+                return Task::clipboard_read(Message::WebPasted);
             }
             Ok(web::Event::Copy(text)) => {
                 self.status = "Copied".into();
-                return iced::clipboard::write(text);
+                return Task::clipboard_write(text);
             }
             Ok(web::Event::Link { url, open }) => {
                 // A link is the agent's text: it opens only on the open modifier.
@@ -225,4 +177,31 @@ impl App {
         }
         Task::none()
     }
+}
+
+/// The pane's area, which the page is placed over: an empty element that reports where it
+/// is whenever that changes.
+pub(super) fn area(v: &crate::gui::View) -> gpui::AnyElement {
+    use crate::geometry::{Point, Rectangle, Size};
+    use gpui::{IntoElement, Styled, canvas};
+    let send = v.ui.sender();
+    let last = v.ui.web_area.clone();
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, cx| {
+            let area = Rectangle::new(
+                Point::new(f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
+                Size::new(f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            );
+            if last.get() != Some(area) {
+                last.set(Some(area));
+                let send = send.clone();
+                window.defer(cx, move |window, cx| {
+                    send(Message::WebArea(area), window, cx)
+                });
+            }
+        },
+    )
+    .size_full()
+    .into_any_element()
 }

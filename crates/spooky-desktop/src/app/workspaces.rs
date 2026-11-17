@@ -1,10 +1,10 @@
 use super::{App, Confirm, ContextTarget, Message, Pending};
 use crate::features::agent;
+use crate::runtime::Task;
 use crate::{
     layout::{context_target_exists, first_pane},
     tabs::label_for,
 };
-use iced::Task;
 use spooky_core::{Request, Snapshot, Tab, Workspace};
 use std::collections::HashSet;
 
@@ -101,7 +101,7 @@ impl App {
                     self.selection = None;
                     self.splits.reset();
                     if self.current_pane().is_some_and(|p| p.agent.is_some()) {
-                        return iced::widget::operation::focus(agent::FIELD);
+                        return Task::focus(agent::FIELD);
                     }
                 }
             }
@@ -160,8 +160,7 @@ impl App {
                     self.rename_workspace = Some(id);
                     self.renaming = true;
                     self.terminal_focused = false;
-                    return iced::widget::operation::focus("workspace-name")
-                        .chain(iced::widget::operation::select_all("workspace-name"));
+                    return Task::focus("workspace-name").chain(Task::select_all("workspace-name"));
                 }
             }
             Message::RenameValue(v) => {
@@ -187,8 +186,7 @@ impl App {
                     self.rename_workspace = None;
                     self.renaming = true;
                     self.terminal_focused = false;
-                    return iced::widget::operation::focus("workspace-name")
-                        .chain(iced::widget::operation::select_all("workspace-name"));
+                    return Task::focus("workspace-name").chain(Task::select_all("workspace-name"));
                 }
             }
             Message::RenameSubmit => {

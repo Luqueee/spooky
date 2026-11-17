@@ -11,14 +11,14 @@ mod features;
 mod grid;
 mod input;
 mod machines;
-mod subscription;
 mod updates;
 mod view;
 mod web;
 mod workspaces;
 
-pub(crate) use subscription::subscription;
-
+use crate::geometry::{Point, Rectangle, Size};
+use crate::keys::{Modifiers, Press};
+use crate::runtime::Task;
 use crate::terminal;
 use crate::{
     commands::Command as AppCommand,
@@ -40,7 +40,6 @@ use crate::{
     },
     link::{Command, Event, Link},
 };
-use iced::{Point, Rectangle, Size, Task, event, keyboard, window};
 use spooky_core::{Axis, Pane, Request, Snapshot, Tab, Workspace};
 use std::collections::{HashMap, HashSet};
 
@@ -57,7 +56,7 @@ pub(crate) enum Message {
     Link(Event),
     Hotkey(u32),
     /// Result of checking whether an unfocused, always-on-top window is minimized.
-    HotkeyMinimized(window::Id, u64, Option<bool>),
+    HotkeyMinimized(u64, Option<bool>),
     /// A frame of the window's slide.
     SlideFrame(std::time::Instant),
     /// The bottom edge was pressed: the compositor drags the window's height.
@@ -68,14 +67,11 @@ pub(crate) enum Message {
     ResizeSettled(u64),
     /// The window was dragged to this height on a display of this size.
     ResizedTo(f32, Option<Size>),
-    Key(
-        keyboard::Key,
-        keyboard::key::Physical,
-        keyboard::Modifiers,
-        Option<String>,
-        event::Status,
-    ),
-    Opened(window::Id),
+    /// A key was pressed; whether the application takes it is [`App::take_key_taken`].
+    Key(Press),
+    /// Text the input method typed while the terminal had the keyboard.
+    TerminalText(String),
+    Opened,
     /// The agent view's web page was created, or could not be.
     WebCreated(Result<(), String>),
     /// Where the agent view's area is, in window coordinates.
@@ -84,16 +80,10 @@ pub(crate) enum Message {
     WebEvent(String),
     /// The clipboard's text, which the agent view's page asked for.
     WebPasted(Option<String>),
-    Close(window::Id),
+    Close,
     WindowFocus(bool),
     /// Show the newest requested reveal using the measured window and pointer display.
-    Present(
-        window::Id,
-        u64,
-        Option<Size>,
-        Size,
-        Option<(Rectangle, Size)>,
-    ),
+    Present(u64, Option<Size>, Size, Option<(Rectangle, Size)>),
     Quit,
     DragWindow,
     NewWorkspace,
@@ -178,7 +168,7 @@ pub(crate) enum Message {
     Palette(palette::Message),
     /// Carry out a command, as its keyboard shortcut would.
     Run(AppCommand),
-    Modifiers(keyboard::Modifiers),
+    Modifiers(Modifiers),
     Copy,
     SelectAll,
     CopyAll,
@@ -214,7 +204,7 @@ pub(crate) struct App {
     config: Config,
     themes: crate::ui::ThemeCatalog,
     link: Link,
-    snapshot: Option<Snapshot>,
+    snapshot: Option<std::rc::Rc<Snapshot>>,
     activity: Activity,
     workspace: Option<u64>,
     tab: Option<u64>,
@@ -243,9 +233,8 @@ pub(crate) struct App {
     pending: Option<Pending>,
     /// A failed creation and its error, offered for explicit retry in the workspace.
     directory_fallback: Option<(Request, u64, String)>,
-    window: Option<window::Id>,
-    /// Whether the native behind-window material was installed successfully.
-    glass_available: bool,
+    opened: bool,
+    /// Whether the system asks for reduced transparency.
     reduce_transparency: bool,
     /// Hidden by Spooky itself (shortcut or close button), not minimized by the user.
     hidden: bool,
@@ -270,7 +259,9 @@ pub(crate) struct App {
     /// The pane last told it has the keyboard focus.
     focus_reported: Option<u64>,
     /// Keyboard modifiers as last reported by the window.
-    modifiers: keyboard::Modifiers,
+    modifiers: Modifiers,
+    /// Whether the last key press was taken by the application.
+    key_taken: bool,
     /// The global shortcut, when the session allows one.
     hotkeys: Option<Hotkeys>,
     /// Coalesces shortcut presses while the native minimized state is being checked.
@@ -326,13 +317,20 @@ pub(crate) struct App {
     updater: crate::updater::Updater,
 }
 
-/// A missing material or the system accessibility choice requires a solid surface.
-fn effective_background_opacity(configured: f32, available: bool, reduce: bool) -> f32 {
-    if available && !reduce {
-        configured / 100.0
-    } else {
-        1.0
-    }
+/// Which periodic wakeups the application currently needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Wakeups {
+    /// Toggle the cursor's blink phase.
+    pub blink: bool,
+    /// Look again at the selected pane's directory.
+    pub directory: bool,
+    /// Draw the next frame of the window's slide.
+    pub slide: bool,
+}
+
+/// The system's reduced-transparency choice requires a solid surface.
+fn effective_background_opacity(configured: f32, reduce: bool) -> f32 {
+    if reduce { 1.0 } else { configured / 100.0 }
 }
 
 impl App {
@@ -341,7 +339,7 @@ impl App {
         status: String,
         hotkeys: Option<Hotkeys>,
         themes: crate::ui::ThemeCatalog,
-    ) -> (Self, Task<Message>) {
+    ) -> Self {
         let size_pending = config.size_mode() == SizeMode::Percent;
         let font = terminal::TerminalFont::resolve(config.font_family.as_deref());
         let machines = Machines::new(&config.machines);
@@ -375,10 +373,7 @@ impl App {
             confirm: None,
             pending: None,
             directory_fallback: None,
-            window: None,
-            // Linux windows are created transparent, so the desktop can show through;
-            // macOS finds out once its blur view is installed.
-            glass_available: cfg!(target_os = "linux"),
+            opened: false,
             reduce_transparency: false,
             hidden: false,
             focused: false,
@@ -392,7 +387,8 @@ impl App {
             search: Search::default(),
             clipboard_seen: HashMap::new(),
             focus_reported: None,
-            modifiers: keyboard::Modifiers::default(),
+            modifiers: Modifiers::empty(),
+            key_taken: false,
             hotkeys,
             hotkey_pending: None,
             hotkey_generation: 0,
@@ -424,10 +420,7 @@ impl App {
         if app.config.check_updates {
             app.updates_check();
         }
-        (
-            app,
-            window::latest().map(|id| id.map(Message::Opened).unwrap_or(Message::Tick)),
-        )
+        app
     }
     fn send(&mut self, request: Request) {
         if let Request::Input { pane, bytes } = &request
@@ -580,27 +573,14 @@ impl App {
         }
         self.agent_focus = agent;
         if agent.is_some() {
-            return Task::batch([task, iced::widget::operation::focus(agent::FIELD)]);
+            return Task::batch([task, Task::focus(agent::FIELD)]);
         }
         task
     }
-    fn background_opacity(&self) -> f32 {
-        effective_background_opacity(
-            self.config.background_opacity,
-            self.glass_available,
-            self.reduce_transparency,
-        )
-    }
-    pub(crate) fn theme(&self) -> iced::Theme {
-        let selected = self
-            .config
-            .custom_theme
-            .as_deref()
-            .and_then(|id| self.themes.get(id));
-        selected.map_or_else(
-            || crate::ui::theme(self.config.appearance),
-            |definition| crate::ui::theme_with_palette(&definition.name, definition.colors),
-        )
+    /// How opaque the window's background is: the configured value, or fully opaque when
+    /// the system asks for reduced transparency.
+    pub(crate) fn background_opacity(&self) -> f32 {
+        effective_background_opacity(self.config.background_opacity, self.reduce_transparency)
     }
 
     pub(crate) fn appearance_colors(&self) -> crate::ui::ColorPalette {
@@ -627,21 +607,20 @@ impl App {
             })
     }
 
+    /// Rechecks the system's transparency accessibility setting.
     fn sync_background(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            self.reduce_transparency = crate::platform::macos::glass::reduce_transparency();
-            crate::platform::macos::glass::show(self.background_opacity() < 1.0);
+        self.reduce_transparency = crate::platform::reduce_transparency();
+    }
+
+    /// The periodic wakeups the state needs; the shell turns them into timers.
+    pub(crate) fn wakeups(&self) -> Wakeups {
+        Wakeups {
+            blink: self.blink_wanted(),
+            directory: self.online() && !self.hidden && self.current_pane().is_some(),
+            slide: self.slide_running(),
         }
     }
 
-    /// The screen paints its own backing so it can slide over a clear window.
-    pub(crate) fn style(&self, theme: &iced::Theme) -> iced::theme::Style {
-        iced::theme::Style {
-            background_color: iced::Color::TRANSPARENT,
-            ..iced::theme::Base::base(theme)
-        }
-    }
     /// Whether the selected pane's blinking cursor should be animating.
     fn blink_wanted(&self) -> bool {
         self.config.cursor_blink
@@ -663,8 +642,8 @@ impl App {
             | Message::ResizedTo(..)
             | Message::WindowFocus(..)
             | Message::Present(..)
-            | Message::Opened(..)
-            | Message::Close(..)
+            | Message::Opened
+            | Message::Close
             | Message::DragWindow => return self.window_message(message),
             Message::Machine(..)
             | Message::AddMachine
@@ -729,6 +708,7 @@ impl App {
             | Message::CopyAll
             | Message::ClearViewport
             | Message::PasteClipboard
+            | Message::TerminalText(..)
             | Message::Key(..) => return self.input_message(message),
             Message::Tick => {}
             Message::DirectoryTick => {}
@@ -737,7 +717,7 @@ impl App {
             | Message::CopyDirectory
             | Message::OpenDirectory
             | Message::DirectoryOpened(..) => return self.directory_message(message),
-            Message::Quit => return iced::exit(),
+            Message::Quit => return Task::exit(),
             Message::ToggleSidebar => {
                 self.sidebar_open = !self.sidebar_open;
                 self.context_menu = None;
@@ -782,10 +762,9 @@ mod background_tests {
     use super::effective_background_opacity;
 
     #[test]
-    fn system_accessibility_and_missing_material_force_an_opaque_background() {
-        assert_eq!(effective_background_opacity(80.0, true, false), 0.8);
-        assert_eq!(effective_background_opacity(100.0, true, false), 1.0);
-        assert_eq!(effective_background_opacity(80.0, true, true), 1.0);
-        assert_eq!(effective_background_opacity(80.0, false, false), 1.0);
+    fn the_system_accessibility_choice_forces_an_opaque_background() {
+        assert_eq!(effective_background_opacity(80.0, false), 0.8);
+        assert_eq!(effective_background_opacity(100.0, false), 1.0);
+        assert_eq!(effective_background_opacity(80.0, true), 1.0);
     }
 }

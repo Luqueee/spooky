@@ -1,4 +1,5 @@
 use super::{App, Message};
+use crate::runtime::Task;
 use crate::{
     config::Osc52,
     features::{
@@ -8,8 +9,8 @@ use crate::{
     link::Event,
     terminal::new_clipboard_writes,
 };
-use iced::{Task, clipboard};
 use spooky_core::{Request, Snapshot};
+use std::rc::Rc;
 
 impl App {
     pub(super) fn connection_message(&mut self, message: Message) -> Task<Message> {
@@ -19,7 +20,10 @@ impl App {
                     self.directory.receive(selection, result, started);
                 }
                 Event::Snapshot(g, mut s) if g == self.connection.generation() => {
-                    if let Some(mut current) = self.snapshot.take() {
+                    if let Some(current) = self.snapshot.take() {
+                        // The views release their reference when a frame ends, so this
+                        // moves rather than copies.
+                        let mut current = Rc::unwrap_or_clone(current);
                         current.apply_update(s);
                         s = current;
                     }
@@ -39,7 +43,7 @@ impl App {
                     );
                     self.activity.observe(&s, viewed);
                     let fetch = self.clipboard_writes(&s);
-                    self.snapshot = Some(s);
+                    self.snapshot = Some(Rc::new(s));
                     if self
                         .directory_fallback
                         .as_ref()
@@ -104,7 +108,7 @@ impl App {
                     match result {
                         Ok(text) => {
                             self.status = format!("Copied {} bytes", text.len());
-                            return clipboard::write(text);
+                            return Task::clipboard_write(text);
                         }
                         Err(error) => self.status = format!("Copy failed: {error}"),
                     }
@@ -117,7 +121,7 @@ impl App {
                         "A terminal program set the clipboard ({} bytes)",
                         text.len()
                     );
-                    return clipboard::write(text);
+                    return Task::clipboard_write(text);
                 }
                 _ => {}
             },
@@ -223,6 +227,6 @@ impl App {
         if self.web_pane() == Some(pane) {
             return Task::none();
         }
-        iced::widget::operation::focus(agent::FIELD)
+        Task::focus(agent::FIELD)
     }
 }

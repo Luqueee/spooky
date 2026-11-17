@@ -107,7 +107,7 @@ Each phase is usable and verified on its own, with a real `omp`, an isolated ser
 
 ## Web view
 
-On macOS an agent pane that fills its tab is shown by a web page (React, `web/agent`) in a `WKWebView`, which gives the conversation the typography, shadows and menus the iced widgets do not; the native view remains for splits and other platforms. See `docs/architecture.md` (*Agent web view*) for the ownership and the security rules: the page draws untrusted text without raw HTML or images, cannot fetch or navigate, and can only post validated actions that become the same requests the native composer sends.
+On macOS an agent pane that fills its tab is shown by a web page (React, `web/agent`) in a `WKWebView`, which gives the conversation the typography, shadows and menus the native widgets do not; the native view remains for splits and other platforms. See `docs/architecture.md` (*Agent web view*) for the ownership and the security rules: the page draws untrusted text without raw HTML or images, cannot fetch or navigate, and can only post validated actions that become the same requests the native composer sends.
 
 The model list searches without autocorrect or autocapitalization and orders each provider's models newest first. The program reports no release dates, so the order comes from the names: the first run of version numbers in the id (`5.6`, `4-5`), then a `YYYYMMDD` stamp, then the name (`web/agent/src/features/models/models.ts`).
 
@@ -128,5 +128,5 @@ See the agent bullet under *Verified* in the README: real `omp` through the GUI 
 ## Open decisions
 
 - **RPC or ACP.** Backends sit behind one trait. `omp` uses its RPC because it exposes the most of `omp`; ACP is the standard route for Claude Code, Codex and others and would be one more backend. Which to build second is open and needs a probe of each program's protocol first.
-- **Rich rendering.** iced's markdown widget and syntax highlighting cover text and code; a diff view and images need first-party code. Measure before promising full parity with the TUI.
+- **Rich rendering.** The native view's markdown renderer (`features/agent/markdown.rs`, `document.rs`) covers headings, paragraphs, lists, tables and code blocks without syntax highlighting; a diff view and images need first-party code. Measure before promising full parity with the TUI.
 - **Maintenance.** The RPC protocol is `omp`'s own and changes with it. Phase 1 does not read `omp`'s `ready` frame; it should negotiate the version there and refuse one it does not speak, as the session protocol does.

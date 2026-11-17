@@ -1,7 +1,8 @@
 //! Where the dropdown window goes, and what it does when it loses the focus.
 
 use crate::config::OnBlur;
-use iced::{Point, Rectangle, Size, window};
+use crate::geometry::{Point, Rectangle, Size};
+use crate::runtime::Level;
 
 /// Horizontally centres a window against the selected display's global top edge.
 /// `None` leaves placement to the system when the display is unknown.
@@ -40,11 +41,11 @@ pub(crate) fn usable_area(monitor: Size) -> Size {
     monitor
 }
 /// The window level a focus-loss behaviour calls for.
-pub(crate) fn level_for(on_blur: OnBlur) -> window::Level {
+pub(crate) fn level_for(on_blur: OnBlur) -> Level {
     if on_blur == OnBlur::Top {
-        window::Level::AlwaysOnTop
+        Level::AlwaysOnTop
     } else {
-        window::Level::Normal
+        Level::Normal
     }
 }
 
@@ -74,7 +75,7 @@ mod tests {
     }
     #[test]
     fn dropdown_uses_the_selected_displays_global_origin() {
-        let display = iced::Rectangle {
+        let display = Rectangle {
             x: -607.0,
             y: -1440.0,
             width: 3440.0,

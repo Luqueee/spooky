@@ -14,12 +14,21 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 spooky-core.workspace = true
-iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "tokio", "advanced", "advanced-shaping", "markdown", "image", "x11", "wayland"] }
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+raw-window-handle = "0.6"
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-segmentation = "1"
+smallvec = "1"
+fontdb = "0.23"
+ttf-parser = "0.25"
+fontdue = "0.9"
 global-hotkey = "0.6"
 rfd = "0.15"
 toml = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-tokio = { version = "1", features = ["sync", "process", "time", "io-util"] }
+tokio = { version = "1", features = ["sync", "process", "time", "io-util", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
@@ -27,7 +36,6 @@ zbus = { version = "5", default-features = false, features = ["async-io"] }
 x11rb = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-iced_winit = { version = "0.14", default-features = false }
 objc2 = "0.6"
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSAccessibility", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageView", "NSResponder", "NSScreen", "NSTextInputContext", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }

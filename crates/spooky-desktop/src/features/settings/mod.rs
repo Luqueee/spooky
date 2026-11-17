@@ -7,11 +7,11 @@ mod page;
 
 pub(crate) use page::{Session, view};
 
+use crate::keys;
 use crate::{
     config::{self, Appearance, Config, OnBlur, Osc52, SizeMode},
     shortcuts,
 };
-use iced::keyboard;
 use spooky_core::update::Channel;
 
 /// What the rest of the application is told by this feature.
@@ -25,6 +25,8 @@ pub(crate) enum Message {
     Close,
     /// A control on the page changed something.
     Change(Change),
+    /// Open the choice list of that name, or close the open one.
+    Menu(Option<&'static str>),
 }
 
 /// A change made on the settings page.
@@ -103,6 +105,8 @@ struct Page {
     recording: bool,
     /// Why the last change was refused or could not be saved.
     problem: Option<String>,
+    /// The choice list that is open.
+    menu: Option<&'static str>,
 }
 
 impl Settings {
@@ -174,6 +178,18 @@ impl Settings {
     fn set_recording(&mut self, recording: bool) {
         if let Some(page) = self.page.as_mut() {
             page.recording = recording;
+        }
+    }
+
+    /// The choice list that is open, by the name its control gave it.
+    pub(crate) fn menu(&self) -> Option<&'static str> {
+        self.page.as_ref()?.menu
+    }
+
+    /// Opens the choice list `menu`, or closes the open one.
+    pub(crate) fn set_menu(&mut self, menu: Option<&'static str>) {
+        if let Some(page) = self.page.as_mut() {
+            page.menu = menu;
         }
     }
 
@@ -277,24 +293,22 @@ impl Settings {
     /// Takes a key press as the new global shortcut while the page records one.
     pub(crate) fn record(
         &mut self,
-        key: &keyboard::Key,
-        physical: keyboard::key::Physical,
-        mods: keyboard::Modifiers,
+        key: &keys::Key,
+        physical: keys::Physical,
+        mods: keys::Modifiers,
         config: &mut Config,
         shortcuts: &mut impl Shortcuts,
     ) -> Vec<Effect> {
-        if *key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+        if *key == keys::Key::Named(keys::Named::Escape) {
             self.set_recording(false);
             return Vec::new();
         }
-        match shortcuts::hotkey_text(key, physical, mods) {
-            // Only modifiers are held so far.
-            None => Vec::new(),
-            Some(Err(problem)) => {
+        match shortcuts::hotkey_text(physical, mods) {
+            Err(problem) => {
                 self.report(Some(problem.to_owned()));
                 Vec::new()
             }
-            Some(Ok(text)) => {
+            Ok(text) => {
                 self.set_recording(false);
                 self.rebind(text, config, shortcuts)
             }
@@ -370,10 +384,7 @@ fn effects(previous: &Config, next: &Config, has_shortcut: bool) -> Vec<Effect> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::keyboard::{
-        Key,
-        key::{Code, Named, Physical},
-    };
+    use crate::keys::{Code, Key, Modifiers, Named, Physical};
 
     /// A shortcut that works, or refuses everything, and remembers what it was asked.
     struct Fake {
@@ -559,7 +570,7 @@ mod tests {
             settings.record(
                 &Key::Named(Named::F9),
                 Physical::Code(Code::F9),
-                keyboard::Modifiers::empty(),
+                Modifiers::empty(),
                 config,
                 shortcuts,
             )
@@ -578,20 +589,11 @@ mod tests {
         let mut shortcuts = Fake::new(true, false);
         settings.update(Change::RecordShortcut, &mut config, &mut shortcuts);
         let letter = Key::Character("a".into());
-        // Only modifiers held: nothing to say yet.
-        settings.record(
-            &Key::Named(Named::Control),
-            Physical::Code(Code::ControlLeft),
-            keyboard::Modifiers::CTRL,
-            &mut config,
-            &mut shortcuts,
-        );
-        assert!(settings.problem().is_none());
         // A bare letter would take that key from every application.
         settings.record(
             &letter,
             Physical::Code(Code::KeyA),
-            keyboard::Modifiers::empty(),
+            Modifiers::empty(),
             &mut config,
             &mut shortcuts,
         );
@@ -601,7 +603,7 @@ mod tests {
         settings.record(
             &Key::Named(Named::Escape),
             Physical::Code(Code::Escape),
-            keyboard::Modifiers::empty(),
+            Modifiers::empty(),
             &mut config,
             &mut shortcuts,
         );

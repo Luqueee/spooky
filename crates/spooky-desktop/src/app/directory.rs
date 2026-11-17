@@ -105,7 +105,7 @@ impl super::App {
     pub(super) fn directory_message(
         &mut self,
         message: super::Message,
-    ) -> iced::Task<super::Message> {
+    ) -> crate::runtime::Task<super::Message> {
         use super::Message;
         match message {
             Message::ToggleDirectoryMenu => {
@@ -119,22 +119,22 @@ impl super::App {
             }
             Message::CopyDirectory | Message::OpenDirectory => {
                 let Some((selection, path)) = self.directory_menu.take() else {
-                    return iced::Task::none();
+                    return crate::runtime::Task::none();
                 };
                 if !self.online() || self.hidden || !self.directory.matches(selection, &path) {
                     self.status = "Directory is no longer available".into();
-                    return iced::Task::none();
+                    return crate::runtime::Task::none();
                 }
                 if matches!(message, Message::CopyDirectory) {
                     self.status = "Directory copied".into();
-                    return iced::clipboard::write(path);
+                    return crate::runtime::Task::clipboard_write(path);
                 }
                 if self.connection.is_remote() || self.directory_opening {
-                    return iced::Task::none();
+                    return crate::runtime::Task::none();
                 }
                 self.directory_opening = true;
                 self.status = "Opening folder…".into();
-                return iced::Task::perform(open_folder(path), Message::DirectoryOpened);
+                return crate::runtime::Task::perform(open_folder(path), Message::DirectoryOpened);
             }
             Message::DirectoryOpened(result) => {
                 self.directory_opening = false;
@@ -145,7 +145,7 @@ impl super::App {
             }
             _ => {}
         }
-        iced::Task::none()
+        crate::runtime::Task::none()
     }
 }
 

@@ -1,10 +1,13 @@
 //! The palette's list, drawn inside a modal.
 
 use super::{Message as PaletteMessage, Palette};
-use crate::{Message, ui::*};
-use iced::{
-    Alignment, Element, Length,
-    widget::{button, column, container, row, scrollable, text, text_input},
+use crate::{
+    Message,
+    gui::{Look, Tone, View, column, row},
+};
+use gpui::{
+    AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    div, px,
 };
 
 /// The message a control sends.
@@ -13,52 +16,55 @@ fn tell(message: PaletteMessage) -> Message {
 }
 
 /// The palette's contents, or `None` while it is closed.
-pub(crate) fn view(palette: &Palette) -> Option<Element<'_, Message>> {
+pub(crate) fn view(palette: &Palette, v: &mut View) -> Option<AnyElement> {
     let open = palette.open.as_ref()?;
-    let mut list = column![].spacing(2);
+    let mut list = column().gap(px(2.));
     for (position, command) in open.results.iter().enumerate() {
         let selected = position == open.selected;
-        list = list.push(
-            button(
-                row![
-                    text(command.title())
-                        .size(12)
-                        .style(text_tone(TextTone::Text)),
-                    iced::widget::Space::new().width(Length::Fill),
-                    text(command.id())
-                        .size(10)
-                        .style(text_tone(TextTone::Muted)),
-                ]
-                .align_y(Alignment::Center),
+        let entry = row()
+            .w_full()
+            .justify_between()
+            .child(v.text(command.title(), 12.0, Tone::Text))
+            .child(v.text(command.id(), 10.0, Tone::Muted));
+        let look = if selected {
+            Look::Selected
+        } else {
+            Look::Quiet
+        };
+        list = list.child(
+            v.button(
+                ("palette-command", position),
+                entry,
+                look,
+                Some(tell(PaletteMessage::Run(*command))),
             )
-            .padding([6, 8])
-            .width(Length::Fill)
-            .style(move |theme, status| selectable(selected, theme, status))
-            .on_press(tell(PaletteMessage::Run(*command))),
+            .w_full()
+            .px(px(8.))
+            .py(px(6.)),
         );
     }
     if open.results.is_empty() {
-        list = list.push(
-            text("No command matches")
-                .size(11)
-                .style(text_tone(TextTone::Muted)),
-        );
+        list = list.child(v.text("No command matches", 11.0, Tone::Muted));
     }
+    let spec = v.line_spec(
+        &open.query,
+        "Type a command",
+        12.0,
+        |query| tell(PaletteMessage::Query(query)),
+        Some(tell(PaletteMessage::Submit)),
+    );
+    let input = v.boxed_field("palette-input", spec, (8.0, 8.0));
     Some(
-        column![
-            text_input("Type a command", &open.query)
-                .id("palette-input")
-                .size(12)
-                .padding(8)
-                .on_input(|query| tell(PaletteMessage::Query(query)))
-                .on_submit(tell(PaletteMessage::Submit)),
-            container(scrollable(container(list).padding(iced::Padding {
-                right: 12.0,
-                ..iced::Padding::ZERO
-            })))
-            .height(260),
-        ]
-        .spacing(10)
-        .into(),
+        column()
+            .gap(px(10.))
+            .child(input)
+            .child(
+                div()
+                    .id("palette-list")
+                    .h(px(260.))
+                    .overflow_y_scroll()
+                    .child(div().pr(px(12.)).child(list)),
+            )
+            .into_any_element(),
     )
 }

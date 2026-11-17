@@ -1,9 +1,9 @@
 //! The user's configuration: what `config.toml` may say, how it is checked, and how
 //! the settings page writes it back.
 
+use crate::geometry::Size;
 #[cfg(target_os = "linux")]
 use crate::platform::kwin::Dim;
-use iced::Size;
 use serde::{Deserialize, Serialize};
 use spooky_core::update::Channel;
 use std::{
@@ -331,7 +331,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{Appearance, Config, OnBlur, SizeMode};
-    use iced::Size;
+    use crate::geometry::Size;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn parse(text: &str) -> Result<Config, toml::de::Error> {

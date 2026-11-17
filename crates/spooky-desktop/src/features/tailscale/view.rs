@@ -1,10 +1,13 @@
 //! The picker as drawn: devices, search, and the SSH user.
 
 use super::{Discovery, Picker, user_is_valid};
-use crate::{Message, ui::*};
-use iced::{
-    Alignment, Element, Length,
-    widget::{button, column, container, row, scrollable, text, text_input},
+use crate::{
+    Message,
+    gui::{Icon, Look, Tone, View, column, row},
+};
+use gpui::{
+    AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    div, px,
 };
 
 /// The message a control sends.
@@ -12,92 +15,132 @@ fn tell(message: super::Message) -> Message {
     Message::Tailscale(message)
 }
 
-pub(crate) fn view(picker: &Picker, colors: ColorPalette) -> Element<'_, Message> {
+pub(crate) fn view(picker: &Picker, v: &mut View) -> AnyElement {
     let query = picker.query.to_lowercase();
     let user = picker.user.trim();
     let user_valid = user_is_valid(user);
-    let mut devices = column![].spacing(3);
+    let colors = v.p;
+    let mut devices = column().gap(px(3.));
     match &picker.discovery {
         Discovery::Idle | Discovery::Loading => {
-            devices = devices.push(
-                text("Reading local Tailscale client…")
-                    .size(11)
-                    .style(text_tone(TextTone::Muted)),
-            );
+            devices = devices.child(v.text("Reading local Tailscale client…", 11.0, Tone::Muted));
         }
         Discovery::Failed(error) => {
-            devices = devices.push(text(error).size(11).style(text_tone(TextTone::Text)));
+            devices = devices.child(v.text(error.clone(), 11.0, Tone::Text));
         }
         Discovery::Ready(network) => {
             let mut shown = 0;
-            for peer in &network.peers {
+            for (index, peer) in network.peers.iter().enumerate() {
                 if !peer.name.to_lowercase().contains(&query) && !peer.host.contains(&query) {
                     continue;
                 }
                 shown += 1;
-                let entry = button(
-                    row![
-                        dot(if peer.online {
-                            colors.success
-                        } else {
-                            colors.muted
-                        }),
-                        column![
-                            text(&peer.name).size(11).style(text_tone(if peer.online {
-                                TextTone::Text
-                            } else {
-                                TextTone::Muted
-                            })),
-                            text(format!(
-                                "{} · {} · {}",
-                                peer.host,
-                                peer.os,
-                                if peer.online { "online" } else { "offline" }
-                            ))
-                            .size(9)
-                            .style(text_tone(TextTone::Muted)),
-                        ]
-                        .spacing(3)
-                        .width(Length::Fill),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .padding(8)
-                .width(Length::Fill)
-                .style(quiet);
-                devices = devices.push(if peer.online && user_valid {
-                    entry.on_press(tell(super::Message::Select(peer.host.clone())))
-                } else {
-                    entry
-                });
+                let name_tone = if peer.online { Tone::Text } else { Tone::Muted };
+                let detail = format!(
+                    "{} · {} · {}",
+                    peer.host,
+                    peer.os,
+                    if peer.online { "online" } else { "offline" }
+                );
+                let entry = row()
+                    .w_full()
+                    .gap(px(8.))
+                    .child(v.dot(if peer.online {
+                        colors.success
+                    } else {
+                        colors.muted
+                    }))
+                    .child(
+                        column()
+                            .flex_1()
+                            .gap(px(3.))
+                            .child(v.text(peer.name.clone(), 11.0, name_tone))
+                            .child(v.text(detail, 9.0, Tone::Muted)),
+                    );
+                let message = (peer.online && user_valid)
+                    .then(|| tell(super::Message::Select(peer.host.clone())));
+                devices = devices.child(
+                    v.button(("tailscale-peer", index), entry, Look::Quiet, message)
+                        .w_full()
+                        .p(px(8.)),
+                );
             }
             if shown == 0 {
-                devices = devices.push(
-                    text(if network.peers.is_empty() {
+                devices = devices.child(v.text(
+                    if network.peers.is_empty() {
                         "No other devices in this tailnet."
                     } else {
                         "No matching devices."
-                    })
-                    .size(11)
-                    .style(text_tone(TextTone::Muted)),
-                );
+                    },
+                    11.0,
+                    Tone::Muted,
+                ));
             }
         }
     }
-    let refresh = button(text("Refresh").size(10))
-        .padding([5, 8])
-        .style(quiet);
-    column![
-        row![
-            text("Tailscale devices").size(14).style(text_tone(TextTone::Text)).width(Length::Fill),
-            action(Icon::Close, "Close Tailscale devices", tell(super::Message::Close)),
-        ].align_y(Alignment::Center),
-        text("Uses your installed Tailscale client. Selecting a device prepares SSH; Connect starts the session.").size(10).style(text_tone(TextTone::Muted)),
-        text_input("Search devices or IP", &picker.query).size(11).padding(7).on_input(|query| tell(super::Message::Query(query))),
-        text_input("SSH user (optional)", &picker.user).size(11).padding(7).on_input(|user| tell(super::Message::User(user))),
-        text(if user_valid { "Remote device needs SSH and spooky-server." } else { "Invalid SSH user: use letters, digits, dot, underscore or hyphen." }).size(10).style(text_tone(TextTone::Muted)),
-        container(scrollable(devices)).height(240),
-        if matches!(picker.discovery, Discovery::Loading) { refresh } else { refresh.on_press(tell(super::Message::Refresh)) },
-    ].spacing(10).into()
+    let loading = matches!(picker.discovery, Discovery::Loading);
+    let refresh = v
+        .button(
+            "tailscale-refresh",
+            div().text_size(px(10.)).child("Refresh"),
+            Look::Quiet,
+            (!loading).then(|| tell(super::Message::Refresh)),
+        )
+        .px(px(8.))
+        .py(px(5.));
+    let query_spec = v.line_spec(
+        &picker.query,
+        "Search devices or IP",
+        11.0,
+        |query| tell(super::Message::Query(query)),
+        None,
+    );
+    let user_spec = v.line_spec(
+        &picker.user,
+        "SSH user (optional)",
+        11.0,
+        |user| tell(super::Message::User(user)),
+        None,
+    );
+    let query_field = v.boxed_field("tailscale-query", query_spec, (7.0, 7.0));
+    let user_field = v.boxed_field("tailscale-user", user_spec, (7.0, 7.0));
+    column()
+        .gap(px(10.))
+        .child(
+            row()
+                .w_full()
+                .justify_between()
+                .child(v.text("Tailscale devices", 14.0, Tone::Text))
+                .child(v.action(
+                    "tailscale-close",
+                    Icon::Close,
+                    "Close Tailscale devices",
+                    tell(super::Message::Close),
+                )),
+        )
+        .child(v.text(
+            "Uses your installed Tailscale client. Selecting a device prepares SSH; Connect starts the session.",
+            10.0,
+            Tone::Muted,
+        ))
+        .child(query_field)
+        .child(user_field)
+        .child(v.text(
+            if user_valid {
+                "Remote device needs SSH and spooky-server."
+            } else {
+                "Invalid SSH user: use letters, digits, dot, underscore or hyphen."
+            },
+            10.0,
+            Tone::Muted,
+        ))
+        .child(
+            div()
+                .id("tailscale-devices")
+                .h(px(240.))
+                .overflow_y_scroll()
+                .child(devices),
+        )
+        .child(div().child(refresh))
+        .into_any_element()
 }

@@ -60,7 +60,7 @@ Priority: optional
 Maintainer: ${maintainer}
 Homepage: https://github.com/Luqueee/spooky
 Installed-Size: $(du -sk "$root/usr" | cut -f1)
-Depends: libc6 (>= ${glibc}), libgcc-s1, libxkbcommon0, libxkbcommon-x11-0, libvulkan1, libwayland-client0, libx11-6, libxcb1, fonts-dejavu-core | fonts-dejavu
+Depends: libc6 (>= ${glibc}), libgcc-s1, libxkbcommon0, libxkbcommon-x11-0, libvulkan1, libwayland-client0, libx11-6, libxcb1, libfontconfig1, libfreetype6, fonts-dejavu-core | fonts-dejavu
 Recommends: mesa-vulkan-drivers | vulkan-icd, libxcursor1, libxi6, libxrandr2, openssh-client, xdg-desktop-portal
 Suggests: xdg-desktop-portal-kde | xdg-desktop-portal-gnome | xdg-desktop-portal-gtk
 Description: Persistent GPU terminal workspaces

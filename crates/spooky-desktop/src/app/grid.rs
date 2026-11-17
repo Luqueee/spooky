@@ -1,9 +1,9 @@
 use super::App;
+use crate::geometry::Rectangle;
 use crate::{
     layout::find_split,
     terminal::{self},
 };
-use iced::Rectangle;
 use spooky_core::{Axis, Layout, Request};
 
 impl App {
@@ -30,15 +30,15 @@ impl App {
         }
     }
     /// The split's axis and the window area it occupies, both sides included.
-    pub(super) fn split_geometry(&self, split: u64) -> Option<(Axis, iced::Rectangle)> {
+    pub(super) fn split_geometry(&self, split: u64) -> Option<(Axis, Rectangle)> {
         let (_, tab) = self.active()?;
         let (axis, node) = find_split(&tab.layout, split)?;
         let mut ids = Vec::new();
         node.panes(&mut ids);
-        let mut region: Option<iced::Rectangle> = None;
+        let mut region: Option<Rectangle> = None;
         for id in ids {
             let inner = self.bounds.get(&id)?;
-            let outer = iced::Rectangle {
+            let outer = Rectangle {
                 x: inner.x - super::view::PANE_PADDING_X,
                 y: inner.y - super::view::PANE_PADDING_Y,
                 width: inner.width + 2.0 * super::view::PANE_PADDING_X,

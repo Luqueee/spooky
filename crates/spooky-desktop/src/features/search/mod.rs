@@ -6,7 +6,6 @@ mod view;
 
 pub(crate) use view::view;
 
-use crate::terminal::is_chord_echo;
 use spooky_core::{FindDirection, Request};
 
 /// What the search strip tells the application.
@@ -67,14 +66,8 @@ impl Search {
         }
     }
 
-    /// Applies a message. `pane` is the selected pane; `primary_held` whether the
-    /// application-shortcut modifier is down.
-    pub(crate) fn update(
-        &mut self,
-        message: Message,
-        pane: Option<u64>,
-        primary_held: bool,
-    ) -> Outcome {
+    /// Applies a message. `pane` is the selected pane.
+    pub(crate) fn update(&mut self, message: Message, pane: Option<u64>) -> Outcome {
         match message {
             Message::Open => {
                 if pane.is_none() {
@@ -88,16 +81,6 @@ impl Search {
                 }
             }
             Message::Input(query) => {
-                // A text field inserts the letter of Cmd+F and Cmd+G; that edit is
-                // the chord, handled as a key press, not text.
-                if primary_held
-                    && self
-                        .bar
-                        .as_ref()
-                        .is_some_and(|bar| is_chord_echo(&bar.query, &query))
-                {
-                    return Outcome::default();
-                }
                 let mut outcome = self.find(&query, FindDirection::Previous, pane);
                 outcome.terminal_focused = Some(false);
                 outcome
@@ -177,17 +160,17 @@ mod tests {
 
     fn open(pane: u64) -> Search {
         let mut search = Search::default();
-        search.update(Message::Open, Some(pane), false);
+        search.update(Message::Open, Some(pane));
         search
     }
 
     #[test]
     fn the_strip_needs_a_pane_and_takes_the_keyboard_when_it_opens() {
         let mut search = Search::default();
-        let outcome = search.update(Message::Open, None, false);
+        let outcome = search.update(Message::Open, None);
         assert!(!search.is_open());
         assert_eq!(outcome.terminal_focused, None);
-        let outcome = search.update(Message::Open, Some(1), false);
+        let outcome = search.update(Message::Open, Some(1));
         assert!(search.is_open());
         assert_eq!(outcome.terminal_focused, Some(false));
         assert!(outcome.focus_field);
@@ -197,7 +180,7 @@ mod tests {
     fn typing_searches_the_selected_pane_and_forgets_the_old_answer() {
         let mut search = open(1);
         search.found(Some((1, 3)));
-        let outcome = search.update(Message::Input("err".into()), Some(1), false);
+        let outcome = search.update(Message::Input("err".into()), Some(1));
         assert_eq!(finds(&outcome), [(1, "err", FindDirection::Previous)]);
         assert_eq!(outcome.terminal_focused, Some(false));
         assert!(search.bar.as_ref().is_some_and(|bar| bar.result.is_none()));
@@ -211,18 +194,18 @@ mod tests {
     #[test]
     fn stepping_repeats_the_query_in_the_asked_direction() {
         let mut search = open(1);
-        search.update(Message::Input("err".into()), Some(1), false);
-        let outcome = search.update(Message::Step(FindDirection::Next), Some(1), false);
+        search.update(Message::Input("err".into()), Some(1));
+        let outcome = search.update(Message::Step(FindDirection::Next), Some(1));
         assert_eq!(finds(&outcome), [(1, "err", FindDirection::Next)]);
-        let closed = Search::default().update(Message::Step(FindDirection::Next), Some(1), false);
+        let closed = Search::default().update(Message::Step(FindDirection::Next), Some(1));
         assert!(closed.requests.is_empty(), "nothing to step through");
     }
 
     #[test]
     fn moving_to_another_pane_clears_the_old_highlights_first() {
         let mut search = open(1);
-        search.update(Message::Input("err".into()), Some(1), false);
-        let outcome = search.update(Message::Step(FindDirection::Next), Some(2), false);
+        search.update(Message::Input("err".into()), Some(1));
+        let outcome = search.update(Message::Step(FindDirection::Next), Some(2));
         assert_eq!(
             finds(&outcome),
             [
@@ -235,30 +218,15 @@ mod tests {
     #[test]
     fn closing_clears_the_highlights_and_returns_the_keyboard() {
         let mut search = open(1);
-        search.update(Message::Input("err".into()), Some(1), false);
-        let outcome = search.update(Message::Close, Some(1), false);
+        search.update(Message::Input("err".into()), Some(1));
+        let outcome = search.update(Message::Close, Some(1));
         assert_eq!(finds(&outcome), [(1, "", FindDirection::Next)]);
         assert_eq!(outcome.terminal_focused, Some(true));
         assert!(!search.is_open());
-        let again = search.update(Message::Close, Some(1), false);
+        let again = search.update(Message::Close, Some(1));
         assert!(again.requests.is_empty() && again.terminal_focused.is_none());
         // A strip that never searched has nothing to clear.
         let mut fresh = open(1);
-        assert!(
-            fresh
-                .update(Message::Close, Some(1), false)
-                .requests
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn the_letter_a_chord_leaves_in_the_field_is_not_a_query_edit() {
-        let mut search = open(1);
-        search.update(Message::Input("hit-".into()), Some(1), false);
-        let echoed = search.update(Message::Input("hit-g".into()), Some(1), true);
-        assert!(echoed.requests.is_empty());
-        let typed = search.update(Message::Input("hit-g".into()), Some(1), false);
-        assert_eq!(finds(&typed), [(1, "hit-g", FindDirection::Previous)]);
+        assert!(fresh.update(Message::Close, Some(1)).requests.is_empty());
     }
 }

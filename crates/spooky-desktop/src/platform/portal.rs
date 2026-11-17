@@ -41,7 +41,7 @@ async fn listen(
     on_press: impl Fn(),
 ) -> Result<(), ashpd::Error> {
     use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
-    use iced::futures::StreamExt;
+    use futures::StreamExt;
     // A process outside a sandbox has no application id for the portal; an older portal
     // lacks the registry, and the bind below then says what is missing.
     if let Ok(id) = ashpd::AppID::try_from(APP_ID) {

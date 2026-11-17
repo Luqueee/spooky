@@ -1,14 +1,20 @@
 //! The draggable divider between the two sides of a split.
 
-use crate::{Message, ui::color_palette_for};
-
-/// The message a divider sends.
-fn tell(message: super::Message) -> Message {
-    Message::Splits(message)
-}
-use iced::{Point, Rectangle, Size, Theme, mouse, widget::canvas};
+use crate::{
+    Message,
+    geometry::{Point, Rectangle},
+    gui::{View, geometry_point, hsla},
+};
+use gpui::{
+    CursorStyle, DispatchPhase, HitboxBehavior, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Styled, canvas, fill, point, px, size,
+};
 use spooky_core::{Axis, MIN_SPLIT_SHARE};
-use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 /// Width of the gap a divider occupies between its two sides.
 pub(crate) const THICKNESS: f32 = 6.0;
@@ -31,117 +37,127 @@ pub(crate) fn ratio_at(region: Rectangle, axis: Axis, cursor: Point) -> u16 {
     ) as u16
 }
 
-pub(crate) struct Divider {
-    pub split: u64,
-    pub axis: Axis,
-}
-
+/// What a divider remembers between events.
 #[derive(Default)]
 pub(crate) struct State {
     dragging: bool,
+    hovered: bool,
     last_press: Option<Instant>,
 }
 
-impl canvas::Program<Message> for Divider {
-    type State = State;
+pub(crate) type Shared = Rc<RefCell<State>>;
 
-    fn update(
-        &self,
-        state: &mut State,
-        event: &canvas::Event,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
-        match event {
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-                if cursor.is_over(bounds) =>
-            {
-                let again = state
-                    .last_press
-                    .is_some_and(|at| at.elapsed() < DOUBLE_PRESS);
-                state.last_press = Some(Instant::now());
-                if again {
-                    state.dragging = false;
-                    return Some(
-                        canvas::Action::publish(tell(super::Message::Reset(self.split)))
-                            .and_capture(),
-                    );
+/// The divider of split `split`, which runs along `axis`.
+pub(crate) fn view(v: &mut View, split: u64, axis: Axis) -> impl IntoElement {
+    let state = v.ui.divider(split);
+    let send = v.ui.sender();
+    let colors = v.p;
+    let element = canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |bounds, hitbox, window, _| {
+            let hovered = hitbox.is_hovered(window);
+            let (dragging, remembered) = {
+                let state = state.borrow();
+                (state.dragging, state.hovered)
+            };
+            let active = dragging || hovered;
+            // The gap stays transparent so it shares the panes' blurred background.
+            let (thickness, color) = if active {
+                (2.0, colors.accent.scale_alpha(0.7))
+            } else {
+                (1.0, colors.border)
+            };
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let (offset, extent) = match axis {
+                Axis::Vertical => (
+                    point(px(((width - thickness) / 2.0).floor()), px(0.0)),
+                    size(px(thickness), bounds.size.height),
+                ),
+                Axis::Horizontal => (
+                    point(px(0.0), px(((height - thickness) / 2.0).floor())),
+                    size(bounds.size.width, px(thickness)),
+                ),
+            };
+            window.paint_quad(fill(
+                gpui::Bounds::new(bounds.origin + offset, extent),
+                hsla(color),
+            ));
+            if active {
+                window.set_cursor_style(
+                    match axis {
+                        Axis::Vertical => CursorStyle::ResizeLeftRight,
+                        Axis::Horizontal => CursorStyle::ResizeUpDown,
+                    },
+                    &hitbox,
+                );
+            }
+            if hovered != remembered {
+                state.borrow_mut().hovered = hovered;
+                // Redraw with the other thickness.
+                window.on_next_frame(|window, _| window.refresh());
+            }
+            let pressed = state.clone();
+            let press_send = send.clone();
+            let press_box = hitbox.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !press_box.is_hovered(window)
+                {
+                    return;
                 }
-                state.dragging = true;
-                Some(
-                    canvas::Action::publish(tell(super::Message::Drag(
-                        self.split,
-                        cursor.position()?,
-                    )))
-                    .and_capture(),
-                )
-            }
-            // The pointer may leave the thin divider while it is dragged.
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => Some(
-                canvas::Action::publish(tell(super::Message::Drag(self.split, cursor.position()?)))
-                    .and_capture(),
-            ),
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.dragging =>
-            {
-                state.dragging = false;
-                Some(canvas::Action::publish(tell(super::Message::End)).and_capture())
-            }
-            _ => None,
-        }
-    }
-
-    fn draw(
-        &self,
-        state: &State,
-        renderer: &iced::Renderer,
-        theme: &Theme,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let colors = color_palette_for(theme);
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // Leave the gap transparent so it shares the panes' blurred background.
-        let active = state.dragging || cursor.is_over(bounds);
-        let (thickness, color) = if active {
-            (2.0, colors.accent.scale_alpha(0.7))
-        } else {
-            (1.0, colors.border)
-        };
-        let (origin, size) = match self.axis {
-            Axis::Vertical => (
-                Point::new(((bounds.width - thickness) / 2.0).floor(), 0.0),
-                Size::new(thickness, bounds.height),
-            ),
-            Axis::Horizontal => (
-                Point::new(0.0, ((bounds.height - thickness) / 2.0).floor()),
-                Size::new(bounds.width, thickness),
-            ),
-        };
-        frame.fill_rectangle(origin, size, color);
-        vec![frame.into_geometry()]
-    }
-
-    fn mouse_interaction(
-        &self,
-        state: &State,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> mouse::Interaction {
-        if !(state.dragging || cursor.is_over(bounds)) {
-            return mouse::Interaction::None;
-        }
-        match self.axis {
-            Axis::Vertical => mouse::Interaction::ResizingHorizontally,
-            Axis::Horizontal => mouse::Interaction::ResizingVertically,
-        }
+                let again = {
+                    let mut state = pressed.borrow_mut();
+                    let again = state
+                        .last_press
+                        .is_some_and(|at| at.elapsed() < DOUBLE_PRESS);
+                    state.last_press = Some(Instant::now());
+                    state.dragging = !again;
+                    again
+                };
+                let message = if again {
+                    super::Message::Reset(split)
+                } else {
+                    super::Message::Drag(split, geometry_point(event.position))
+                };
+                press_send(Message::Splits(message), window, cx);
+                cx.stop_propagation();
+            });
+            let dragged = state.clone();
+            let drag_send = send.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                // The pointer may leave the thin divider while it is dragged.
+                if phase == DispatchPhase::Bubble && dragged.borrow().dragging {
+                    let message = super::Message::Drag(split, geometry_point(event.position));
+                    drag_send(Message::Splits(message), window, cx);
+                    cx.stop_propagation();
+                }
+            });
+            let released = state.clone();
+            let end_send = send.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Left
+                    && released.borrow().dragging
+                {
+                    released.borrow_mut().dragging = false;
+                    end_send(Message::Splits(super::Message::End), window, cx);
+                    cx.stop_propagation();
+                }
+            });
+        },
+    );
+    match axis {
+        Axis::Vertical => element.w(px(THICKNESS)).h_full(),
+        Axis::Horizontal => element.h(px(THICKNESS)).w_full(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{THICKNESS, ratio_at};
-    use iced::{Point, Rectangle, Size};
+    use crate::geometry::{Point, Rectangle, Size};
     use spooky_core::{Axis, MIN_SPLIT_SHARE};
 
     fn region(width: f32, height: f32) -> Rectangle {

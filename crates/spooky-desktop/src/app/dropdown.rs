@@ -2,10 +2,11 @@ use super::{App, Message};
 use crate::config::{OnBlur, SizeMode};
 use crate::features::settings::{Change, Effect};
 use crate::features::window::{FIRST_DELAY, Slide, dropdown_origin, hides_on_blur, usable_area};
+use crate::geometry::{Point, Rectangle, Size};
 #[cfg(target_os = "linux")]
 use crate::platform::kwin;
-use crate::platform::{WindowControl, fade, window_control};
-use iced::{Point, Rectangle, Size, Task, window};
+use crate::platform::{WindowControl, window, window_control};
+use crate::runtime::{Task, WindowOp};
 use std::time::{Duration, Instant};
 
 /// Whether KWin places, hides and raises the window.
@@ -38,13 +39,14 @@ impl App {
     pub(super) fn window_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Hotkey(key) => {
-                if self.hotkeys.as_ref().is_some_and(|keys| keys.id() == key)
-                    && let Some(id) = self.window
-                {
+                if self.hotkeys.as_ref().is_some_and(|keys| keys.id() == key) && self.opened {
                     if !self.dropdown() {
                         // The desktop does not let the window be hidden, so the shortcut
                         // only brings it forward.
-                        return Task::batch([window::minimize(id, false), window::gain_focus(id)]);
+                        return Task::batch([
+                            Task::window(WindowOp::Minimize(false)),
+                            Task::window(WindowOp::Raise),
+                        ]);
                     }
                     if let Some(pending) = &mut self.hotkey_pending {
                         *pending = !*pending;
@@ -54,15 +56,15 @@ impl App {
                         self.hotkey_generation = self.hotkey_generation.wrapping_add(1);
                         self.hotkey_pending = Some(true);
                         let generation = self.hotkey_generation;
-                        return window::is_minimized(id).map(move |minimized| {
-                            Message::HotkeyMinimized(id, generation, minimized)
+                        return Task::minimized(move |minimized| {
+                            Task::done(Message::HotkeyMinimized(generation, minimized))
                         });
                     }
-                    return self.toggle_hotkey(id, None);
+                    return self.toggle_hotkey(None);
                 }
             }
-            Message::HotkeyMinimized(id, generation, minimized) => {
-                if self.window == Some(id)
+            Message::HotkeyMinimized(generation, minimized) => {
+                if self.opened
                     && self.hotkey_generation == generation
                     && let Some(pending) = self.hotkey_pending.take()
                     && pending
@@ -73,7 +75,7 @@ impl App {
                         Some(false) => Some(true),
                         None => None,
                     };
-                    return self.toggle_hotkey(id, minimized);
+                    return self.toggle_hotkey(minimized);
                 }
             }
             Message::WindowFocus(focused) => {
@@ -90,10 +92,10 @@ impl App {
                 }
             }
             Message::ResizeBottom => {
-                if let Some(id) = self.window {
+                if self.opened {
                     self.resizing = true;
                     self.resize_from = self.window_size.map_or(0.0, |size| size.height);
-                    return window::drag_resize(id, window::Direction::South);
+                    return Task::window(WindowOp::DragResizeBottom);
                 }
             }
             Message::WindowResized(size) => {
@@ -112,16 +114,14 @@ impl App {
                 }
             }
             Message::ResizeSettled(generation) => {
-                if generation == self.resize_gen
-                    && self.resizing
-                    && let Some(id) = self.window
-                {
+                if generation == self.resize_gen && self.resizing && self.opened {
                     self.resizing = false;
                     let height = self.window_size.map_or(0.0, |size| size.height);
                     // A press that moved nothing leaves the height as it was.
                     if (height - self.resize_from).abs() >= 1.0 {
-                        return window::monitor_size(id)
-                            .map(move |monitor| Message::ResizedTo(height, monitor));
+                        return Task::monitor_size(move |monitor| {
+                            Task::done(Message::ResizedTo(height, monitor))
+                        });
                     }
                 }
             }
@@ -131,21 +131,17 @@ impl App {
                     return Task::none();
                 };
                 slide.advance(now);
-                #[cfg(target_os = "macos")]
-                crate::platform::macos::glass::slide(slide.hidden_share());
-                fade::set(slide.opacity());
+                // The view draws the content at the slide's offset; the window fades.
+                window::set_opacity(slide.opacity());
                 if slide.finished_open() {
                     self.slide = None;
-                    fade::set(1.0);
-                } else if slide.closed()
-                    && !kwin_controls_window()
-                    && let Some(id) = self.window
-                {
+                    window::set_opacity(1.0);
+                } else if slide.closed() && !kwin_controls_window() && self.opened {
                     // Where the window can be hidden, it is once the content is out of sight.
-                    return window::set_mode(id, window::Mode::Hidden);
+                    return Task::window(WindowOp::Hide);
                 }
             }
-            Message::Present(id, generation, monitor, size, pointer_display) => {
+            Message::Present(generation, monitor, size, pointer_display) => {
                 if generation != self.reveal_generation {
                     return Task::none();
                 }
@@ -202,22 +198,22 @@ impl App {
                     && let Some(at) = dropdown_origin(bounds, target)
                 {
                     if crate::platform::macos::app::place_dropdown(at, target) {
-                        return window::set_mode(id, window::Mode::Windowed)
-                            .chain(window::minimize(id, false))
-                            .chain(window::gain_focus(id));
+                        return Task::window(WindowOp::Show)
+                            .chain(Task::window(WindowOp::Minimize(false)))
+                            .chain(Task::window(WindowOp::Raise));
                     }
                     self.status = "Could not position the window on the selected display".into();
                 }
                 let mut tasks = vec![
-                    window::set_mode(id, window::Mode::Windowed),
-                    window::minimize(id, false),
-                    window::gain_focus(id),
+                    Task::window(WindowOp::Show),
+                    Task::window(WindowOp::Minimize(false)),
+                    Task::window(WindowOp::Raise),
                 ];
                 if target != size {
-                    tasks.insert(0, window::resize(id, target));
+                    tasks.insert(0, Task::window(WindowOp::Resize(target)));
                 }
                 if let Some(at) = dropdown_origin(bounds, target) {
-                    tasks.insert(0, window::move_to(id, at));
+                    tasks.insert(0, Task::window(WindowOp::MoveTo(at)));
                 }
                 // Wayland ignores the placement above; KWin does it there.
                 #[cfg(target_os = "linux")]
@@ -235,20 +231,16 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
-            Message::Opened(id) => {
-                if self.window == Some(id) {
+            Message::Opened => {
+                if self.opened {
                     return Task::none();
                 }
-                self.window = Some(id);
+                self.opened = true;
                 #[cfg(target_os = "macos")]
                 {
-                    self.glass_available = crate::platform::macos::glass::install();
                     self.sync_background();
                     if !crate::platform::macos::app::set_dock_artwork() {
                         self.status = "Dock icon unavailable".into();
-                    }
-                    if !self.glass_available {
-                        self.status = "Window blur unavailable; using a solid background".into();
                     }
                 }
                 if self.dropdown() {
@@ -258,33 +250,35 @@ impl App {
                         crate::platform::macos::app::set_dock_icon(self.config.dock_icon);
                     }
                     return Task::batch([
-                        // The fade needs the native window.
-                        window::run(id, fade::attach).map(|()| Message::Tick),
-                        self.reveal(id),
+                        // The fade, the placement and the level need the native window.
+                        Task::native(|window| {
+                            window::attach(window);
+                            Message::Tick
+                        })
+                        .chain(Task::window(WindowOp::SetLevel(
+                            crate::features::window::level_for(self.config.on_blur),
+                        ))),
+                        self.reveal(),
                     ]);
                 }
             }
             // The close button hides the window while the shortcut can bring it back;
             // without one, hiding would strand the app, so closing quits. Sessions
             // run on the server either way.
-            Message::Close(id) => {
+            Message::Close => {
                 return if self.dropdown() {
                     self.hide()
                 } else {
-                    window::close(id)
+                    Task::window(WindowOp::Close)
                 };
             }
-            Message::DragWindow => {
-                if let Some(id) = self.window {
-                    return window::drag(id);
-                }
-            }
+            Message::DragWindow if self.opened => return Task::window(WindowOp::Drag),
             _ => {}
         }
         Task::none()
     }
 
-    fn toggle_hotkey(&mut self, id: window::Id, minimized: Option<bool>) -> Task<Message> {
+    fn toggle_hotkey(&mut self, minimized: Option<bool>) -> Task<Message> {
         if hotkey_hides(self.hidden, self.focused, self.config.on_blur, minimized) {
             return self.hide();
         }
@@ -297,13 +291,13 @@ impl App {
                 .is_some_and(|((bounds, _), previous)| bounds != previous);
             if changed_display {
                 // Move before revealing, so the old display never flashes.
-                return self.reveal(id);
+                return self.reveal();
             }
             return Task::batch([
-                window::set_mode(id, window::Mode::Windowed)
-                    .chain(window::minimize(id, false))
-                    .chain(window::gain_focus(id)),
-                self.reveal(id),
+                Task::window(WindowOp::Show)
+                    .chain(Task::window(WindowOp::Minimize(false)))
+                    .chain(Task::window(WindowOp::Raise)),
+                self.reveal(),
             ]);
         }
         if self.hidden && self.slide_running() {
@@ -311,7 +305,7 @@ impl App {
             self.slide = Some(Slide::open(Instant::now(), self.slide_share(1.0)));
             self.hidden = false;
         }
-        self.reveal(id)
+        self.reveal()
     }
     /// Makes the height the window was dragged to the configured one, in the unit the
     /// configuration already uses. The window is already that size, so the change does
@@ -331,6 +325,10 @@ impl App {
     /// the desktop lets it be hidden and placed. Without that it is an ordinary window.
     pub(super) fn dropdown(&self) -> bool {
         self.hotkeys.is_some() && window_control() != WindowControl::Unavailable
+    }
+    /// How much of the content is out of sight: 0 when shown, 1 when hidden.
+    pub(crate) fn slide_hidden_share(&self) -> f32 {
+        self.slide_share(0.0)
     }
     /// Where the content is now, or `idle` when no slide is in progress.
     fn slide_share(&self, idle: f32) -> f32 {
@@ -356,7 +354,7 @@ impl App {
         Task::none()
     }
     /// Measures the display and window, then shows the window via [`Message::Present`].
-    pub(super) fn reveal(&mut self, id: window::Id) -> Task<Message> {
+    pub(super) fn reveal(&mut self) -> Task<Message> {
         self.hotkey_pending = None;
         self.reveal_generation = self.reveal_generation.wrapping_add(1);
         let generation = self.reveal_generation;
@@ -364,9 +362,10 @@ impl App {
         let pointer_display = crate::platform::macos::app::pointer_display();
         #[cfg(not(target_os = "macos"))]
         let pointer_display = None;
-        window::monitor_size(id).then(move |monitor| {
-            window::size(id)
-                .map(move |size| Message::Present(id, generation, monitor, size, pointer_display))
+        Task::monitor_size(move |monitor| {
+            Task::window_size(move |size| {
+                Task::done(Message::Present(generation, monitor, size, pointer_display))
+            })
         })
     }
 }

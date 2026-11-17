@@ -1,6 +1,6 @@
 # Spooky
 
-A native Rust dropdown terminal with persistent workspaces, tabs and split panes. The interface uses iced's **wgpu** backend, not a WebView. Terminal emulation comes from **alacritty_terminal** and shell processes from **portable-pty**.
+A native Rust dropdown terminal with persistent workspaces, tabs and split panes. The interface uses [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (Zed's GPU UI framework: Metal on macOS, Vulkan on Linux), not a WebView. Terminal emulation comes from **alacritty_terminal** and shell processes from **portable-pty**.
 
 ## Platforms
 
@@ -46,7 +46,7 @@ Build both binaries: the desktop client starts its sibling `spooky-server` when 
 Linux build dependencies on Ubuntu:
 
 ```sh
-sudo apt-get install libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libgtk-3-dev pkg-config
+sudo apt-get install libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgtk-3-dev libfontconfig-dev libfreetype-dev libxcb1-dev pkg-config clang cmake
 ```
 
 ## Sessions and controls
@@ -136,7 +136,7 @@ When a machine reports that `spooky-server` is missing or of another protocol ve
 
 ## Captures and files
 
-**Capture** saves a real PNG of the focused terminal viewport through a native file dialog. It does not capture unrelated desktop windows.
+**Capture** saves a real PNG of the focused terminal viewport through a native file dialog. The picture is drawn from the pane's cells with the terminal font, not copied from the screen, so it does not capture unrelated desktop windows and needs no screen permission.
 
 **Attach**, or dropping a file, resolves a local path or transfers the file over SFTP for an SSH target. The resulting shell-quoted path is inserted into the terminal **without pressing Enter**. This is not a claim that arbitrary terminal programs support image attachments; the receiving program decides how to consume the path.
 
@@ -218,7 +218,7 @@ Unknown fields and invalid values produce an explicit startup error. There is no
 
 ## Agent view (web)
 
-On macOS an agent pane that fills its tab is drawn by a React page in a `WKWebView` (through `wry`) that is a child of the window; the terminal, tabs, sidebar and every other overlay stay native. The page is `web/agent` (see its README for the structure), built to one HTML file that is committed and embedded, so `cargo build` needs no Node. A split pane, any other platform, a page that fails to start, and `SPOOKY_AGENT_UI=native` use the native iced agent view. The page holds no state of its own beyond folds, drafts and open lists: the server's `Agent` is pushed to it as JSON, and it can only post a closed set of validated actions (`crates/spooky-desktop/src/features/agent/web.rs`). While one of iced's own overlays (palette, settings, menus, confirmations) is open the page is hidden, because a native child view always draws above iced. Rebuild the page after changing it:
+On macOS an agent pane that fills its tab is drawn by a React page in a `WKWebView` (through `wry`) that is a child of the window; the terminal, tabs, sidebar and every other overlay stay native. The page is `web/agent` (see its README for the structure), built to one HTML file that is committed and embedded, so `cargo build` needs no Node. A split pane, any other platform, a page that fails to start, and `SPOOKY_AGENT_UI=native` use the native agent view. The page holds no state of its own beyond folds, drafts and open lists: the server's `Agent` is pushed to it as JSON, and it can only post a closed set of validated actions (`crates/spooky-desktop/src/features/agent/web.rs`). While one of the application's own overlays (palette, settings, menus, confirmations) is open the page is hidden, because a native child view always draws above the GPUI surface. Rebuild the page after changing it:
 
 ```sh
 cd web/agent && npm ci && npm run check && npm run build
@@ -333,6 +333,6 @@ Verified on macOS arm64:
 
 - Directory restoration (isolated macOS window with zsh): two split shells in different directories both returned to their own directory after a server restart, verified with `pwd -P`. A pinned-key loopback SSH bridge also preserved both directories across a server restart and kept live shells across reconnect. Real-PTY tests cover abrupt server exit, a busy shell, a replaced shell, a missing saved directory and a shell covered by an agent; older saved layouts remain readable. This does not establish Linux runtime behavior or an SSH connection to another machine.
 
-**Still unverified:** a remote session initiated from the Tailscale picker, SSH to a host other than loopback, mouse reporting, focus reporting and OSC 52 with real vim, htop or tmux (the checks used `cat -v` and `printf`), the Shift bypass with a physical keyboard, end-to-end PNG-save, dropping a file onto the window, the dropdown on a second display (it appears on the display the window is already on, not under the cursor) or in a fullscreen Space, Developer ID signing and notarization, plus real Linux desktops for the dropdown, shortcuts and everything else. From the settings page specifically: a press of a *newly recorded* global shortcut (the registration succeeded, but synthetic key presses cannot trigger a global hotkey), and `on_blur = "hide"` followed by a reveal with the real shortcut, where a focus event arriving right after the reveal could hide the window again. **Not implemented:** input-method composition (iced's canvas cannot request an input method, so it needs a custom widget, and testing it needs a CJK input source enabled); search across a wrapped line; URLs wrapped onto two rows; theme and colors on the settings page. GitHub CI passed for the previous commit (quality and package on macOS and Linux); the settings page has only been checked locally.
+**Still unverified:** a remote session initiated from the Tailscale picker, SSH to a host other than loopback, mouse reporting, focus reporting and OSC 52 with real vim, htop or tmux (the checks used `cat -v` and `printf`), the Shift bypass with a physical keyboard, dropping a file onto the window, the dropdown on a second display (it appears on the display the window is already on, not under the cursor) or in a fullscreen Space, Developer ID signing and notarization, plus real Linux desktops for the dropdown, shortcuts and everything else (the Linux build compiles, lints and passes its tests in an Ubuntu container, but no Linux window has been run). From the settings page specifically: a press of a *newly recorded* global shortcut (the registration succeeded, but synthetic key presses cannot trigger a global hotkey), and `on_blur = "hide"` followed by a reveal with the real shortcut, where a focus event arriving right after the reveal could hide the window again. Input-method composition goes through GPUI's input-handler interface; it was checked with accented Latin characters and a CJK string typed through the system, not with a composing CJK input source. **Not implemented:** search across a wrapped line; URLs wrapped onto two rows; a pane capture draws the terminal font only, so characters the font lacks (CJK, emoji) are left blank in the PNG. The GUI was moved from iced to GPUI after the last GitHub CI run, so CI has not run on it.
 
 The dependency graph currently reports a future-Rust incompatibility in upstream `block 0.1.6`. First-party clippy and rustdoc pass without suppressing that diagnostic.

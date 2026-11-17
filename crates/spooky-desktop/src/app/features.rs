@@ -1,5 +1,6 @@
 use super::{App, Message};
 use crate::platform::{WindowControl, window_control};
+use crate::runtime::{Task, WindowOp};
 use crate::terminal;
 use crate::{
     features::{
@@ -15,7 +16,6 @@ use crate::{
     link::Command,
     shortcuts,
 };
-use iced::{Task, window};
 use std::time::Instant;
 
 impl App {
@@ -31,12 +31,26 @@ impl App {
             self.terminal_focused = true;
         }
     }
+    /// The selected terminal pane as a picture, for the capture control.
+    fn pane_image(&self) -> Option<attachments::Image> {
+        let pane = self.current_pane().filter(|pane| pane.agent.is_none())?;
+        let picture = terminal::capture(pane, &self.font, self.config.font_size)?;
+        Some(attachments::Image {
+            width: picture.width,
+            height: picture.height,
+            rgba: picture.rgba,
+        })
+    }
     /// Carries out a message from the attach and capture controls.
     pub(super) fn attachments_message(&mut self, message: attachments::Message) -> Task<Message> {
+        let capture = if matches!(message, attachments::Message::Capture) {
+            self.pane_image()
+        } else {
+            None
+        };
         let context = attachments::Context {
             pane: self.pane,
-            window: self.window,
-            pane_bounds: self.pane.and_then(|pane| self.bounds.get(&pane).copied()),
+            capture,
         };
         let outcome = self.attachments.update(message, context);
         if let Some(status) = outcome.status {
@@ -67,10 +81,7 @@ impl App {
         if outcome.focus_field {
             self.menu_open = false;
             self.context_menu = None;
-            tasks.push(
-                iced::widget::operation::focus("palette-input")
-                    .chain(iced::widget::operation::select_all("palette-input")),
-            );
+            tasks.push(Task::focus("palette-input").chain(Task::select_all("palette-input")));
         }
         if let Some(command) = outcome.run {
             tasks.push(self.run_command(command));
@@ -119,7 +130,12 @@ impl App {
                 self.close_settings();
                 Task::none()
             }
+            settings::Message::Menu(menu) => {
+                self.settings.set_menu(menu);
+                Task::none()
+            }
             settings::Message::Change(change) => {
+                self.settings.set_menu(None);
                 let effects = self
                     .settings
                     .update(change, &mut self.config, &mut self.hotkeys);
@@ -136,13 +152,13 @@ impl App {
                 settings::Effect::Refit => self.refit_grids(),
                 settings::Effect::Resize => {
                     self.size_pending = true;
-                    if let Some(id) = self.window {
-                        tasks.push(self.reveal(id));
+                    if self.opened {
+                        tasks.push(self.reveal());
                     }
                 }
                 settings::Effect::OnBlur(on_blur) => {
-                    if let Some(id) = self.window {
-                        tasks.push(window::set_level(id, level_for(on_blur)));
+                    if self.opened {
+                        tasks.push(Task::window(WindowOp::SetLevel(level_for(on_blur))));
                     }
                 }
                 settings::Effect::DockIcon(show) => {
@@ -173,9 +189,7 @@ impl App {
     }
     /// Carries out a message from the search strip.
     pub(super) fn search_message(&mut self, message: search::Message) -> Task<Message> {
-        let outcome = self
-            .search
-            .update(message, self.pane, shortcuts::primary(self.modifiers));
+        let outcome = self.search.update(message, self.pane);
         for request in outcome.requests {
             self.send(request);
         }
@@ -183,8 +197,7 @@ impl App {
             self.terminal_focused = focused;
         }
         if outcome.focus_field {
-            return iced::widget::operation::focus("search-input")
-                .chain(iced::widget::operation::select_all("search-input"));
+            return Task::focus("search-input").chain(Task::select_all("search-input"));
         }
         Task::none()
     }
@@ -196,7 +209,7 @@ impl App {
         }
         if let Some(text) = outcome.copy {
             self.status = "Copied the answer".into();
-            return iced::clipboard::write(text);
+            return Task::clipboard_write(text);
         }
         if let Some(link) = outcome.link {
             // A link in an answer is the agent's text: it opens only with the same
@@ -208,10 +221,10 @@ impl App {
             };
         }
         if outcome.focus_search {
-            return iced::widget::operation::focus(agent::SEARCH);
+            return Task::focus(agent::SEARCH);
         }
         if outcome.focus_field {
-            return iced::widget::operation::focus(agent::FIELD);
+            return Task::focus(agent::FIELD);
         }
         Task::none()
     }

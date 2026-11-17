@@ -147,7 +147,7 @@ async fn run() -> Result<Network, String> {
         };
         let stdout = child.stdout.take().ok_or("Tailscale stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("Tailscale stderr unavailable")?;
-        let (out, err, exit) = iced::futures::future::try_join3(
+        let (out, err, exit) = futures::future::try_join3(
             bounded_output(stdout, 8 * 1024 * 1024),
             bounded_output(stderr, 16 * 1024),
             async { child.wait().await.map_err(|e| e.to_string()) },

@@ -6,12 +6,9 @@
 //! page says reaches the server or the agent any other way.
 use super::{Attachment, Message};
 use crate::commands::Command;
+use crate::keys::{Code, Key, Modifiers, Named, Physical};
 use crate::shortcuts;
 use crate::ui::ColorPalette;
-use iced::keyboard::{
-    Key, Modifiers,
-    key::{Code, Named, Physical},
-};
 use serde::Deserialize;
 use spooky_core::{Agent, DialogAnswer, MAX_AGENT_PROMPT_BYTES};
 
@@ -182,11 +179,12 @@ fn forwarded(
     if key.len() > MAX_KEY_BYTES || code.len() > MAX_KEY_BYTES {
         return Err("A key name sent by the agent view is too long".into());
     }
-    let mut mods = Modifiers::empty();
-    mods.set(Modifiers::SHIFT, shift);
-    mods.set(Modifiers::ALT, alt);
-    mods.set(Modifiers::CTRL, ctrl);
-    mods.set(Modifiers::LOGO, meta);
+    let mods = Modifiers {
+        shift,
+        control: ctrl,
+        alt,
+        logo: meta,
+    };
     let key = match key {
         "Tab" => Key::Named(Named::Tab),
         "ArrowUp" => Key::Named(Named::ArrowUp),
@@ -222,10 +220,7 @@ fn physical(code: &str) -> Physical {
             .and_then(|digit| digit.checked_sub(1))
             .and_then(|index| DIGITS.get(index).copied()),
     };
-    found.map_or(
-        Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
-        Physical::Code,
-    )
+    found.map_or(Physical::Unidentified, Physical::Code)
 }
 
 /// An attached file as the page draws it.
@@ -265,14 +260,7 @@ struct View<'a> {
 }
 
 fn css_colors(colors: ColorPalette) -> CssColors {
-    let color = |color: iced::Color| {
-        format!(
-            "#{:02x}{:02x}{:02x}",
-            (color.r * 255.0).round() as u8,
-            (color.g * 255.0).round() as u8,
-            (color.b * 255.0).round() as u8,
-        )
-    };
+    let color = |color: crate::ui::Color| color.hex();
     CssColors {
         background: color(colors.background),
         sidebar: color(colors.sidebar),

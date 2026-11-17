@@ -4,10 +4,10 @@
 
 mod divider;
 
-pub(crate) use divider::{Divider, THICKNESS};
+pub(crate) use divider::{Shared as SharedDivider, view as divider_view};
 
+use crate::geometry::{Point, Rectangle};
 use divider::ratio_at;
-use iced::{Point, Rectangle};
 use spooky_core::{Axis, EVEN_SPLIT, Request};
 use std::time::{Duration, Instant};
 
@@ -123,7 +123,7 @@ impl Splits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::Size;
+    use crate::{features::splits::divider::THICKNESS, geometry::Size};
 
     const SPLIT: u64 = 7;
 

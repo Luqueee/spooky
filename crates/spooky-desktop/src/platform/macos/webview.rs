@@ -1,6 +1,6 @@
 //! The agent view's web page, a WKWebView that is a child of the main window.
 //!
-//! The view is created inside `iced::window::run`, which runs on the event loop's thread
+//! The view is created inside a `runtime::Op::Native` task, which runs on the main thread
 //! with a safe window handle, and kept in a thread-local because a `WebView` is bound to
 //! that thread. Everything here is called from that thread.
 //!
@@ -8,8 +8,8 @@
 //! or fetch anything; the only way out is the message channel, whose receiving end is read
 //! by [`messages`].
 
-use iced::Rectangle;
-use iced::futures::{StreamExt, channel::mpsc};
+use crate::geometry::Rectangle;
+use futures::channel::mpsc;
 use std::{
     cell::RefCell,
     sync::{LazyLock, Mutex},
@@ -60,7 +60,7 @@ fn rect(area: Rectangle) -> Rect {
 }
 
 /// Creates the page as a hidden child of `window`; a second call does nothing.
-pub(crate) fn create(window: &dyn iced::window::Window) -> Result<(), String> {
+pub(crate) fn create(window: &dyn raw_window_handle::HasWindowHandle) -> Result<(), String> {
     VIEW.with(|view| {
         if view.borrow().is_some() {
             return Ok(());
@@ -134,7 +134,8 @@ pub(crate) fn focus_composer() {
 }
 
 /// What the page posts, in order. The stream exists once: a second caller gets an empty one.
-pub(crate) fn messages() -> impl iced::futures::Stream<Item = String> {
+pub(crate) fn messages() -> impl futures::Stream<Item = String> {
+    use futures::StreamExt;
     let taken = CHANNEL.rx.lock().ok().and_then(|mut slot| slot.take());
-    iced::futures::stream::iter(taken).flatten()
+    futures::stream::iter(taken).flatten()
 }

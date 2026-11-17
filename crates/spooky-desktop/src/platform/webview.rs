@@ -8,13 +8,13 @@ pub(crate) use super::macos::webview::{
 
 #[cfg(not(target_os = "macos"))]
 mod absent {
-    use iced::Rectangle;
+    use crate::geometry::Rectangle;
 
     pub(crate) fn supported() -> bool {
         false
     }
 
-    pub(crate) fn create(_: &dyn iced::window::Window) -> Result<(), String> {
+    pub(crate) fn create(_: &dyn raw_window_handle::HasWindowHandle) -> Result<(), String> {
         Err("The web agent view is only available on macOS".into())
     }
 
@@ -30,8 +30,8 @@ mod absent {
 
     pub(crate) fn paste(_: &str) {}
 
-    pub(crate) fn messages() -> impl iced::futures::Stream<Item = String> {
-        iced::futures::stream::empty()
+    pub(crate) fn messages() -> impl futures::Stream<Item = String> {
+        futures::stream::empty()
     }
 }
 

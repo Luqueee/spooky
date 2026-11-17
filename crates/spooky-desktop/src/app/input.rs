@@ -6,13 +6,13 @@ use crate::{
         search::{self},
         settings::{self},
     },
+    keys::{Key, Named, Press},
+    runtime::Task,
     shortcuts,
     terminal::{
         ClipboardAction, clipboard_action, focus_reports, key_bytes, paste_bytes, selection_text,
-        terminal_text,
     },
 };
-use iced::{Task, clipboard, event, keyboard};
 use spooky_core::{FindDirection, Request};
 
 impl App {
@@ -56,7 +56,7 @@ impl App {
                     && let Some(text) = self.selected_text()
                 {
                     self.copy_pending = None;
-                    return clipboard::write(text);
+                    return Task::clipboard_write(text);
                 }
             }
             Message::ScrollPane(p, lines) => {
@@ -84,7 +84,7 @@ impl App {
                     self.copy_all();
                 } else if let Some(text) = self.selected_text() {
                     self.copy_pending = None;
-                    return clipboard::write(text);
+                    return Task::clipboard_write(text);
                 }
             }
             Message::SelectAll => {
@@ -113,142 +113,180 @@ impl App {
             }
             Message::PasteClipboard => {
                 self.context_menu = None;
-                return clipboard::read().map(Message::Paste);
+                return Task::clipboard_read(Message::Paste);
             }
-            Message::Key(key, physical, mods, typed, status) => {
-                self.blink_on = true;
-                if self.directory_fallback.is_some() {
-                    if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
-                        self.directory_fallback = None;
-                    } else if shortcuts::shortcut(&key, physical, mods) == Some(Command::Quit) {
-                        return iced::exit();
-                    }
-                    return Task::none();
-                }
-                if self.settings.recording() {
-                    let effects = self.settings.record(
-                        &key,
-                        physical,
-                        mods,
-                        &mut self.config,
-                        &mut self.hotkeys,
-                    );
-                    return self.apply_effects(effects);
-                }
-                if self.palette.is_open() {
-                    use keyboard::{Key, key::Named};
-                    let message = match key {
-                        Key::Named(Named::Escape) => Some(palette::Message::Close),
-                        Key::Named(Named::ArrowDown) => Some(palette::Message::Move(1)),
-                        Key::Named(Named::ArrowUp) => Some(palette::Message::Move(-1)),
-                        _ => match shortcuts::shortcut(&key, physical, mods) {
-                            Some(Command::Palette) => Some(palette::Message::Toggle),
-                            Some(Command::Quit) => return iced::exit(),
-                            _ => None,
-                        },
-                    };
-                    return message
-                        .map_or_else(Task::none, |message| Task::done(Message::Palette(message)));
-                }
-                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
-                    && self.search.is_open()
-                    && !(self.menu_open
-                        || self.context_menu.is_some()
-                        || self.directory_menu.is_some()
-                        || self.tailscale.is_open()
-                        || self.renaming
-                        || self.confirm.is_some()
-                        || self.connection_open)
-                {
-                    return Task::done(Message::Search(search::Message::Close));
-                }
-                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
-                    && (self.menu_open
-                        || self.context_menu.is_some()
-                        || self.directory_menu.is_some()
-                        || self.tailscale.is_open()
-                        || self.renaming
-                        || self.confirm.is_some()
-                        || self.connection_open)
-                {
-                    self.menu_open = false;
-                    self.context_menu = None;
-                    self.directory_menu = None;
-                    self.rename_workspace = None;
-                    self.rename_tab = None;
-                    if self.tailscale.is_open() {
-                        self.tailscale.close();
-                        self.terminal_focused = !self.connection_open;
-                        return Task::none();
-                    }
-                    self.renaming = false;
-                    self.connection_open = false;
-                    self.confirm = None;
-                    self.terminal_focused = true;
-                    return Task::none();
-                }
-                if key == keyboard::Key::Named(keyboard::key::Named::Escape)
-                    && self.settings.is_shown()
-                {
-                    self.close_settings();
-                    return Task::none();
-                }
-                let chord = shortcuts::shortcut(&key, physical, mods);
-                if chord == Some(Command::Quit) {
-                    return iced::exit();
-                }
-                // The search chords also work while the search field has the focus,
-                // whether or not the field consumed the key.
-                if !self.terminal_focused
-                    && self.search.is_open()
-                    && self.confirm.is_none()
-                    && !(self.menu_open
-                        || self.context_menu.is_some()
-                        || self.directory_menu.is_some()
-                        || self.tailscale.is_open()
-                        || self.renaming
-                        || self.connection_open)
-                    && let Some(
-                        command @ (Command::Find | Command::FindNext | Command::FindPrevious),
-                    ) = chord
-                {
-                    return self.run_command(command);
-                }
-                if status == event::Status::Ignored
-                    && self.terminal_focused
-                    && self.confirm.is_none()
-                    && !self.menu_open
-                    && !self.renaming
-                    && self.context_menu.is_none()
-                    && self.directory_menu.is_none()
-                    && !self.tailscale.is_open()
-                {
-                    if let Some(command) = chord {
-                        return self.run_command(command);
-                    }
-                    match clipboard_action(&key, mods) {
-                        Some(ClipboardAction::Copy) => return Task::done(Message::Copy),
-                        Some(ClipboardAction::Paste) => {
-                            return clipboard::read().map(Message::Paste);
-                        }
-                        None => {
-                            if let Some(p) = self.current_pane().filter(|p| p.agent.is_none()) {
-                                let id = p.id;
-                                let application_cursor = p.application_cursor;
-                                let typed = terminal_text(&key, physical, mods, typed);
-                                if let Some(bytes) =
-                                    key_bytes(&key, mods, typed.as_deref(), application_cursor)
-                                {
-                                    self.send(Request::Input { pane: id, bytes });
-                                }
-                            }
-                        }
-                    }
-                }
+            Message::TerminalText(text) => self.terminal_text(&text),
+            Message::Key(press) => {
+                let (taken, task) = self.key_pressed(press);
+                self.key_taken = taken;
+                return task;
             }
             _ => {}
         }
         Task::none()
+    }
+    /// Handles a key press. The answer says whether the application took it, so a text
+    /// field with the keyboard must not also act on it; the rest is what the press asks
+    /// the shell to do.
+    fn key_pressed(&mut self, press: Press) -> (bool, Task<Message>) {
+        let Press {
+            key,
+            physical,
+            modifiers: mods,
+            text,
+        } = press;
+        let escape = key == Key::Named(Named::Escape);
+        self.blink_on = true;
+        if self.directory_fallback.is_some() {
+            if escape {
+                self.directory_fallback = None;
+            } else if shortcuts::shortcut(&key, physical, mods) == Some(Command::Quit) {
+                return (true, Task::exit());
+            }
+            return (true, Task::none());
+        }
+        if self.settings.recording() {
+            let effects =
+                self.settings
+                    .record(&key, physical, mods, &mut self.config, &mut self.hotkeys);
+            return (true, self.apply_effects(effects));
+        }
+        if self.palette.is_open() {
+            let message = match key {
+                Key::Named(Named::Escape) => Some(palette::Message::Close),
+                Key::Named(Named::ArrowDown) => Some(palette::Message::Move(1)),
+                Key::Named(Named::ArrowUp) => Some(palette::Message::Move(-1)),
+                _ => match shortcuts::shortcut(&key, physical, mods) {
+                    Some(Command::Palette) => Some(palette::Message::Toggle),
+                    Some(Command::Quit) => return (true, Task::exit()),
+                    _ => None,
+                },
+            };
+            return match message {
+                Some(message) => (true, Task::done(Message::Palette(message))),
+                None => (false, Task::none()),
+            };
+        }
+        let overlay = self.menu_open
+            || self.context_menu.is_some()
+            || self.directory_menu.is_some()
+            || self.tailscale.is_open()
+            || self.renaming
+            || self.confirm.is_some()
+            || self.connection_open;
+        if escape && self.search.is_open() && !overlay {
+            return (true, Task::done(Message::Search(search::Message::Close)));
+        }
+        if escape && overlay {
+            self.menu_open = false;
+            self.context_menu = None;
+            self.directory_menu = None;
+            self.rename_workspace = None;
+            self.rename_tab = None;
+            if self.tailscale.is_open() {
+                self.tailscale.close();
+                self.terminal_focused = !self.connection_open;
+                return (true, Task::none());
+            }
+            self.renaming = false;
+            self.connection_open = false;
+            self.confirm = None;
+            self.terminal_focused = true;
+            return (true, Task::none());
+        }
+        if escape && self.settings.is_shown() {
+            self.close_settings();
+            return (true, Task::none());
+        }
+        let chord = shortcuts::shortcut(&key, physical, mods);
+        if chord == Some(Command::Quit) {
+            return (true, Task::exit());
+        }
+        // The search chords also work while the search field has the focus.
+        if !self.terminal_focused
+            && self.search.is_open()
+            && self.confirm.is_none()
+            && !(self.menu_open
+                || self.context_menu.is_some()
+                || self.directory_menu.is_some()
+                || self.tailscale.is_open()
+                || self.renaming
+                || self.connection_open)
+            && let Some(command @ (Command::Find | Command::FindNext | Command::FindPrevious)) =
+                chord
+        {
+            return (true, self.run_command(command));
+        }
+        if self.terminal_focused
+            && self.confirm.is_none()
+            && !self.menu_open
+            && !self.renaming
+            && self.context_menu.is_none()
+            && self.directory_menu.is_none()
+            && !self.tailscale.is_open()
+        {
+            if let Some(command) = chord {
+                return (true, self.run_command(command));
+            }
+            match clipboard_action(&key, mods) {
+                Some(ClipboardAction::Copy) => return (true, Task::done(Message::Copy)),
+                Some(ClipboardAction::Paste) => {
+                    return (true, Task::clipboard_read(Message::Paste));
+                }
+                None => {
+                    if let Some(p) = self.current_pane().filter(|p| p.agent.is_none()) {
+                        let id = p.id;
+                        let application_cursor = p.application_cursor;
+                        if let Some(bytes) =
+                            key_bytes(&key, mods, text.as_deref(), application_cursor)
+                        {
+                            self.send(Request::Input { pane: id, bytes });
+                            return (true, Task::none());
+                        }
+                    }
+                }
+            }
+        }
+        (false, Task::none())
+    }
+
+    /// Whether the last key press was taken by the application. Reading it clears it.
+    pub(crate) fn take_key_taken(&mut self) -> bool {
+        std::mem::take(&mut self.key_taken)
+    }
+
+    /// Text the input method typed while the terminal had the keyboard: composed text,
+    /// accents and dead keys included. It goes to the program as it is.
+    pub(super) fn terminal_text(&mut self, text: &str) {
+        if !self.terminal_has_keyboard() {
+            return;
+        }
+        if let Some(p) = self.current_pane().filter(|p| p.agent.is_none()) {
+            let pane = p.id;
+            self.send(Request::Input {
+                pane,
+                bytes: text.as_bytes().to_vec(),
+            });
+        }
+    }
+
+    /// Whether the terminal has the keyboard, rather than a text field, a menu or a dialog.
+    pub(crate) fn terminal_has_keyboard(&self) -> bool {
+        self.terminal_focused
+            && !self.palette.is_open()
+            && !self.settings.is_shown()
+            && self.confirm.is_none()
+            && !self.menu_open
+            && !self.renaming
+            && self.context_menu.is_none()
+            && self.directory_menu.is_none()
+            && !self.tailscale.is_open()
+    }
+
+    /// Whether the keyboard focus belongs on the terminal view: it has the keyboard and
+    /// the selected pane is a terminal (an agent's composer takes it for itself).
+    pub(crate) fn terminal_wants_focus(&self) -> bool {
+        self.terminal_has_keyboard() && self.current_pane().is_some_and(|pane| pane.agent.is_none())
     }
     /// Carries out a command by sending the message its button would.
     pub(super) fn run_command(&self, command: Command) -> Task<Message> {

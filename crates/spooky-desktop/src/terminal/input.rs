@@ -1,19 +1,10 @@
 //! Turning key presses, pastes and focus changes into the bytes a terminal program reads.
+//!
+//! Text is not handled here: what the keyboard types, composed by the input method (dead
+//! keys, accents, CJK), arrives as text and goes to the program as it is. This module
+//! encodes the presses that are not text, which are named keys and Ctrl and Alt chords.
 
-use iced::keyboard;
-
-/// Whether a text field's new content is its old content plus the one letter of
-/// a search chord (Cmd+F or Cmd+G). The field inserts that letter even while the
-/// chord modifier is held, so such an edit is the chord and not typing.
-pub(crate) fn is_chord_echo(old: &str, new: &str) -> bool {
-    new.strip_prefix(old).is_some_and(|extra| {
-        let mut chars = extra.chars();
-        matches!(
-            (chars.next(), chars.next()),
-            (Some(c), None) if matches!(c.to_ascii_lowercase(), 'f' | 'g')
-        )
-    })
-}
+use crate::keys::{Key, Modifiers, Named};
 
 const FOCUS_IN: &[u8] = b"\x1b[I";
 const FOCUS_OUT: &[u8] = b"\x1b[O";
@@ -60,54 +51,35 @@ pub(crate) enum ClipboardAction {
 }
 
 /// Cmd+C/V and Ctrl+Shift+C/V. Plain Ctrl+C and Ctrl+V remain terminal input.
-pub(crate) fn clipboard_action(
-    key: &keyboard::Key,
-    mods: keyboard::Modifiers,
-) -> Option<ClipboardAction> {
+pub(crate) fn clipboard_action(key: &Key, mods: Modifiers) -> Option<ClipboardAction> {
     if !((mods.logo() && !mods.control()) || (mods.control() && mods.shift())) {
         return None;
     }
-    match key.as_ref() {
-        keyboard::Key::Character(c) if c.eq_ignore_ascii_case("c") => Some(ClipboardAction::Copy),
-        keyboard::Key::Character(c) if c.eq_ignore_ascii_case("v") => Some(ClipboardAction::Paste),
+    match key {
+        Key::Character(c) if c.eq_ignore_ascii_case("c") => Some(ClipboardAction::Copy),
+        Key::Character(c) if c.eq_ignore_ascii_case("v") => Some(ClipboardAction::Paste),
         _ => None,
     }
 }
 
-pub(crate) fn terminal_text(
-    key: &keyboard::Key,
-    physical: keyboard::key::Physical,
-    modifiers: keyboard::Modifiers,
-    text: Option<String>,
-) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    if modifiers.alt()
-        && !modifiers.control()
-        && !modifiers.logo()
-        && matches!(key, keyboard::Key::Character(_))
-        && text.as_deref().is_none_or(str::is_empty)
-    {
-        return crate::platform::macos::keyboard::option_text(physical, modifiers);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (key, physical, modifiers);
-    text
-}
-
+/// What a press that is not text sends to the program: `None` when it is text, which the
+/// input method delivers, or a chord the terminal has no encoding for.
+///
+/// `typed` is the text the press types; with Alt held on other platforms than macOS the
+/// program reads it after ESC. `app` is the application cursor mode.
 pub(crate) fn key_bytes(
-    key: &keyboard::Key,
-    mods: keyboard::Modifiers,
+    key: &Key,
+    mods: Modifiers,
     typed: Option<&str>,
     app: bool,
 ) -> Option<Vec<u8>> {
-    use keyboard::key::Named;
     if mods.logo() {
         return None;
     }
     let modifier =
         1 + u8::from(mods.shift()) + 2 * u8::from(mods.alt()) + 4 * u8::from(mods.control());
     let mut bytes = match key {
-        keyboard::Key::Character(s) if mods.control() => {
+        Key::Character(s) if mods.control() => {
             let c = s.chars().next()?.to_ascii_uppercase();
             match c {
                 '@'..='_' => vec![(c as u8) & 0x1f],
@@ -116,16 +88,13 @@ pub(crate) fn key_bytes(
                 _ => return None,
             }
         }
-        keyboard::Key::Character(s) => {
-            // Dead keys without terminal text must not leak their unmodified base key.
-            let text = if cfg!(target_os = "macos") {
-                typed.filter(|text| !text.is_empty())?
-            } else {
-                typed.unwrap_or(s.as_str())
-            };
-            text.as_bytes().to_vec()
+        // Alt makes the program read ESC and then the character. On macOS Option composes
+        // text instead, and the input method delivers that.
+        Key::Character(s) if mods.alt() && !cfg!(target_os = "macos") => {
+            typed.unwrap_or(s.as_str()).as_bytes().to_vec()
         }
-        keyboard::Key::Named(named) => {
+        Key::Character(_) | Key::Unidentified => return None,
+        Key::Named(named) => {
             let arrow = match named {
                 Named::ArrowUp => Some('A'),
                 Named::ArrowDown => Some('B'),
@@ -168,7 +137,12 @@ pub(crate) fn key_bytes(
                 } else {
                     match named {
                         Named::Space if mods.control() => vec![0],
-                        Named::Space => typed.unwrap_or(" ").as_bytes().to_vec(),
+                        // A space with Alt held is ESC and a space, on macOS too: Option+Space
+                        // composes nothing, so it is not left to the input method.
+                        Named::Space if mods.alt() && typed.is_none_or(|text| text == " ") => {
+                            b" ".to_vec()
+                        }
+                        Named::Space => return None,
                         Named::Enter => b"\r".to_vec(),
                         Named::Backspace => vec![0x7f],
                         Named::Tab if mods.shift() => b"\x1b[Z".to_vec(),
@@ -183,14 +157,10 @@ pub(crate) fn key_bytes(
                 }
             }
         }
-        _ => return None,
     };
     if mods.alt()
         && (!cfg!(target_os = "macos") || mods.control())
-        && matches!(
-            key,
-            keyboard::Key::Character(_) | keyboard::Key::Named(Named::Space)
-        )
+        && matches!(key, Key::Character(_) | Key::Named(Named::Space))
     {
         bytes.insert(0, 0x1b);
     }
@@ -200,75 +170,91 @@ pub(crate) fn key_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::keyboard::{Key, Modifiers, key::Named};
 
     #[test]
-    fn space_reaches_the_shell_with_terminal_modifiers() {
-        let cases: &[(Modifiers, Option<&[u8]>)] = &[
-            (Modifiers::empty(), Some(b" ")),
-            (Modifiers::SHIFT, Some(b" ")),
-            (Modifiers::CTRL, Some(b"\0")),
-            #[cfg(target_os = "macos")]
-            (Modifiers::ALT, Some(b" ")),
-            #[cfg(not(target_os = "macos"))]
-            (Modifiers::ALT, Some(b"\x1b ")),
-            (Modifiers::ALT | Modifiers::CTRL, Some(b"\x1b\0")),
-            (Modifiers::LOGO, None),
-        ];
-        for &(modifiers, expected) in cases {
-            for text in [None, Some(" ")] {
-                assert_eq!(
-                    key_bytes(&Key::Named(Named::Space), modifiers, text, false).as_deref(),
-                    expected,
-                    "space with {modifiers:?}, text {text:?}"
-                );
+    fn plain_text_is_left_to_the_input_method() {
+        for key in [Key::Character("a".into()), Key::Named(Named::Space)] {
+            for mods in [Modifiers::empty(), Modifiers::SHIFT] {
+                assert_eq!(key_bytes(&key, mods, Some("a"), false), None, "{key:?}");
             }
         }
     }
 
     #[test]
-    fn composed_text_reaches_the_shell_unchanged() {
+    fn space_with_control_or_alt_is_not_text() {
+        let space = Key::Named(Named::Space);
         assert_eq!(
-            key_bytes(
-                &Key::Named(Named::Space),
-                Modifiers::empty(),
-                Some("~"),
-                false
-            ),
-            Some(b"~".to_vec())
+            key_bytes(&space, Modifiers::CTRL, None, false),
+            Some(b"\0".to_vec())
         );
         assert_eq!(
-            key_bytes(
-                &Key::Character("n".into()),
-                Modifiers::empty(),
-                Some("ñ"),
-                false
-            ),
-            Some("ñ".as_bytes().to_vec())
+            key_bytes(&space, Modifiers::ALT | Modifiers::CTRL, None, false),
+            Some(b"\x1b\0".to_vec())
         );
-        #[cfg(target_os = "macos")]
-        {
-            for base in ["ñ", "n", "e"] {
-                assert_eq!(
-                    key_bytes(&Key::Character(base.into()), Modifiers::ALT, None, false),
-                    None,
-                    "an uncommitted dead key must not reach the shell"
-                );
-            }
-            assert_eq!(
-                key_bytes(&Key::Named(Named::Space), Modifiers::ALT, Some("~"), false),
-                Some(b"~".to_vec())
-            );
-            assert_eq!(
-                key_bytes(
-                    &Key::Character("2".into()),
-                    Modifiers::ALT,
-                    Some("@"),
-                    false
-                ),
-                Some(b"@".to_vec())
-            );
+        let alt = key_bytes(&space, Modifiers::ALT, None, false);
+        if cfg!(target_os = "macos") {
+            assert_eq!(alt, Some(b" ".to_vec()));
+        } else {
+            assert_eq!(alt, Some(b"\x1b ".to_vec()));
         }
+        assert_eq!(key_bytes(&space, Modifiers::LOGO, None, false), None);
+    }
+
+    #[test]
+    fn control_letters_are_control_codes() {
+        let c = Key::Character("c".into());
+        assert_eq!(key_bytes(&c, Modifiers::CTRL, None, false), Some(vec![3]));
+        assert_eq!(
+            key_bytes(&Key::Character("?".into()), Modifiers::CTRL, None, false),
+            Some(vec![0x7f])
+        );
+        assert_eq!(
+            key_bytes(&c, Modifiers::CTRL | Modifiers::LOGO, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn alt_makes_the_program_read_escape_first_except_where_option_composes() {
+        let e = Key::Character("e".into());
+        let bytes = key_bytes(&e, Modifiers::ALT, Some("e"), false);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                bytes, None,
+                "Option composes text; the input method sends it"
+            );
+        } else {
+            assert_eq!(bytes, Some(b"\x1be".to_vec()));
+        }
+    }
+
+    #[test]
+    fn named_keys_follow_the_application_cursor_mode_and_modifiers() {
+        let up = Key::Named(Named::ArrowUp);
+        assert_eq!(
+            key_bytes(&up, Modifiers::empty(), None, false),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&up, Modifiers::empty(), None, true),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&up, Modifiers::SHIFT, None, true),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&Key::Named(Named::Delete), Modifiers::CTRL, None, false),
+            Some(b"\x1b[3;5~".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&Key::Named(Named::Tab), Modifiers::SHIFT, None, false),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&Key::Named(Named::F1), Modifiers::empty(), None, false),
+            Some(b"\x1bOP".to_vec())
+        );
     }
 
     #[test]
@@ -283,17 +269,6 @@ mod tests {
         assert_eq!(focus_reports(Some(1), None, asks), [(1, out)]);
         assert_eq!(focus_reports(Some(1), Some(3), asks), [(1, out)]);
         assert!(focus_reports(Some(1), Some(1), asks).is_empty());
-    }
-
-    #[test]
-    fn the_letter_a_search_chord_leaves_in_a_text_field_is_not_typing() {
-        assert!(is_chord_echo("hit-", "hit-g"));
-        assert!(is_chord_echo("hit-", "hit-F"));
-        assert!(is_chord_echo("", "g"));
-        assert!(!is_chord_echo("hit-", "hit-x"), "other letters are typing");
-        assert!(!is_chord_echo("hit-", "hit-gg"), "pasting is not a chord");
-        assert!(!is_chord_echo("hit-", "hit"), "deleting is not a chord");
-        assert!(!is_chord_echo("a", "ba"), "only a trailing letter counts");
     }
 
     #[test]
