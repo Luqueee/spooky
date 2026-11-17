@@ -212,10 +212,12 @@ blue from `accent`, the rest mixed). To choose them yourself add a `[terminal]`
 table to the file with any of `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
 `white`, `bright_black`, `bright_red`, `bright_green`, `bright_yellow`, `bright_blue`,
 `bright_magenta`, `bright_cyan` and `foreground` (the default text), each a `#RRGGBB`
-string. Black and bright white are never replaced, because programs also use them as
-24-bit `#000000` and `#ffffff`, which the server sends identically. Colors given
-as 24-bit values or from the 256-color cube are unchanged, except a 24-bit value
-identical to one of the replaced ANSI colors.
+string. A key `color16` to `color255` replaces that color of the 256-color palette
+(Starship's package color is `color208`, an orange; Nord and Dracula set it to
+theirs). Text a program dims follows too. Black and bright white are never
+replaced, because programs also use them as 24-bit `#000000` and `#ffffff`, which
+the server sends identically. Other 24-bit colors are unchanged, except a 24-bit
+value identical to a color the theme replaces.
 
 The server reads its own file, `spooky/server.toml` in the same directory, on each machine it runs on (including a remote one):
 
