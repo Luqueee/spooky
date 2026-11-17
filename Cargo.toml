@@ -44,3 +44,9 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.9.0",
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
+
+# Zed's `ztracing` crate (and through it `zlog` and `ztracing_macro`) is GPL-3.0-or-later,
+# and GPUI uses one attribute from it. A first-party no-op with the same name keeps the
+# MIT workspace free of GPL code; see docs/architecture.md before changing it.
+[patch."https://github.com/zed-industries/zed"]
+ztracing = { path = "third_party/ztracing" }

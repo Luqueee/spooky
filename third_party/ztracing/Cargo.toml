@@ -1,0 +1,10 @@
+[package]
+name = "ztracing"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Stand-in for Zed's GPL-licensed ztracing crate: the one attribute GPUI's sum_tree uses, as a no-op."
+
+[lib]
+proc-macro = true

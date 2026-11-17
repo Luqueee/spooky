@@ -47,6 +47,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --workspace --no-deps
+      - name: No GPL dependency without a permissive alternative
+        run: |
+          bad=$(cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.source != null and ((.license // "") | test("GPL")) and ((.license // "") | test("MIT|Apache|BSD|ISC|Zlib") | not)) | "\(.name) \(.license)"')
+          if [ -n "$bad" ]; then
+            echo "Dependencies licensed GPL-only, which this MIT workspace must not link:"
+            echo "$bad"
+            exit 1
+          fi
 
   clippy:
     name: Clippy (${{ matrix.os }})

@@ -24,8 +24,8 @@ use std::{
 
 /// Wheel notches forwarded per event, so momentum scrolling cannot flood a pane.
 const MAX_WHEEL_EVENTS: u32 = 30;
-const SELECTION: Color = Color::from_rgb8(67, 75, 96);
-const FOUND: Color = Color::from_rgb8(224, 175, 104);
+/// How much of the theme's accent colour a selection lays over the text's background.
+const SELECTION_ALPHA: f32 = 0.4;
 
 /// What a pane's pointer handling remembers between events.
 #[derive(Default)]
@@ -182,7 +182,7 @@ impl TerminalView {
                     y,
                     f32::from(end.saturating_sub(start) + 1) * cw,
                     ch,
-                    hsla(SELECTION),
+                    hsla(self.colors.accent.scale_alpha(SELECTION_ALPHA)),
                 );
             }
             for found in pane.highlights.iter().filter(|found| found.row == line.row) {
@@ -192,7 +192,11 @@ impl TerminalView {
                     y,
                     f32::from(found.end.saturating_sub(found.start) + 1) * cw,
                     ch,
-                    hsla(FOUND.scale_alpha(if found.current { 0.65 } else { 0.3 })),
+                    hsla(
+                        self.colors
+                            .warning
+                            .scale_alpha(if found.current { 0.65 } else { 0.3 }),
+                    ),
                 );
             }
             for run in &line.runs {
